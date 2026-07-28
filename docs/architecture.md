@@ -6,13 +6,15 @@ The compiler pipeline is becoming:
 C# source
   -> Roslyn syntax + semantic model
   -> supported-subset validation
-  -> procedural IR
+  -> typed scalar, procedural, and relational query IR
   -> call graph, purity, cost, and inlining passes
   -> SQL Server lowering
   -> one or more executable batches
 ```
 
-Roslyn syntax and semantic typing are active today; procedural syntax is still lowered directly. Before adding exceptions, virtual dispatch, and broad library support, the direct lowering should be replaced by a typed IR with nodes such as `Declare`, `Assign`, `If`, `Loop`, `Break`, `Continue`, `Return`, `Print`, `Allocate`, `LoadField`, `StoreField`, and `Call`.
+Scalar expressions lower through `SqlScalarExpression`, which carries SQL text, C# type, SQL precedence, and null-flow state. Relational LINQ has a separate typed query plan. Blocks bind to a `ProceduralStatement` hierarchy before SQL emission, with typed declarations and expressions plus explicit branch, loop, foreach, break, continue, and return nodes. Both direct/inlined lowering and the stack-machine backend consume this hierarchy; heap, LINQ, allocation, and call behavior remain specialized leaf lowerings.
+
+Roslyn expression analysis supplies semantic types, nullable flow state, and compile-time constants at the scalar boundary. Inlining substitutions and captured LINQ values retain the complete typed scalar node instead of carrying disconnected SQL and type fields. A semantic preflight imports definite-assignment, use-before-declaration, out-parameter, and missing-return failures while leaving intentional SharpSql extensions—such as mutable positional-record fields—to the supported-subset validator. Constant boolean facts simplify generated predicates without changing branch structure. Each method also carries a reusable flow summary containing endpoint reachability, returns, statement cost, reads, writes, and captured variables; inlining budgets and missing-return validation consume that summary.
 
 ## Inlining policy
 
@@ -35,6 +37,8 @@ The budget needs both per-method size and total expanded-size limits; a small me
 
 ## Control-flow lowering
 
+Roslyn statements first bind to procedural IR. The SQL lowerer therefore switches on the supported compiler model rather than maintaining separate Roslyn-syntax dispatchers for ordinary and VM-backed methods. Source syntax remains attached to every node for diagnostics and comment placement.
+
 Each inlined method receives a unique end label. A source `return value;` assigns the result and jumps directly to that label. Loops similarly receive condition/body, continue, and break labels. This is a compact target for arbitrary control-flow graphs while keeping source-level `if` statements structured:
 
 ```sql
@@ -51,7 +55,7 @@ Labels are batch-scoped rather than block-scoped, so every generated label goes 
 
 ## Expression rendering
 
-Emitted scalar expressions carry their SQL operator precedence. Parent expressions request an operand at a minimum precedence, so parentheses are added only when removing them would change the syntax tree. This produces `5 * 5` for `Square(5)`, while retaining both required pairs in `Square(a + b)` as `(@a + @b) * (@a + @b)`. A text-level regular expression is deliberately avoided because it cannot safely distinguish expressions from strings or preserve associativity such as `a - (b - c)`.
+Typed scalar expressions carry their C# type, null-flow state, and SQL operator precedence. Parent expressions request an operand at a minimum precedence, so parentheses are added only when removing them would change the syntax tree. This produces `5 * 5` for `Square(5)`, while retaining both required pairs in `Square(a + b)` as `(@a + @b) * (@a + @b)`. Casts are also represented at this boundary rather than reconstructed by substitution consumers. A text-level regular expression is deliberately avoided because it cannot safely distinguish expressions from strings or preserve associativity such as `a - (b - c)`.
 
 ## Stack-machine fallback
 
@@ -94,7 +98,15 @@ References are normal VM scalar values, so callers spill object, list, and dicti
 
 `Random` instances are also heap references. Their cursor pair lives in the shared object header and their 56-element state arrays live in the shared indexed item table. Seeded construction implements .NET's compatibility subtractive PRNG, allowing `Next()`, `Next(max)`, `Next(min,max)`, and `NextDouble()` to advance independently per object and reproduce seeded .NET sequences. Parameterless construction supplies a SQL-generated seed to that same state machine.
 
-Current heap lowering deliberately diagnoses constructors containing behavior beyond direct field assignments. The next object-runtime layers are constructor-body lowering, inheritance and virtual dispatch, structs and boxing, delegates/closures, exception unwinding, and then `IEnumerable<T>`/`IQueryable<T>` LINQ lowering.
+Current heap lowering deliberately diagnoses constructors containing behavior beyond direct field assignments. The next object-runtime layers are constructor-body lowering, inheritance and virtual dispatch, structs and boxing, broader delegate execution outside LINQ, exception unwinding, and external-source `IQueryable<T>` lowering.
+
+The LINQ lowerer builds a compile-time relational plan over an array or `List<T>` heap source. Filtering, projection, ordering, pagination, distinct, joins, and grouped-key stages compose as derived-table operations. Aggregates and element operators render terminal scalar queries; operators whose .NET contracts throw emit explicit guards for empty, multiply populated, or out-of-range results. A query variable stores its plan in the compiler binding while its SQL `BIGINT` captures the original source object, retaining deferred predicate/projection evaluation. `AsEnumerable()`, managed `AsQueryable()`, query syntax, direct `foreach`, and `ToList()`/`ToArray()` materialization all consume the same plan.
+
+Lambda bindings carry their syntax plus scalar captures. This lets stored delegates, lexical closures, returned delegate factories, and expression-bodied or single-return helper methods pass predicates and deferred query plans through parameters and return values. Method-local captures are spilled when the helper is invoked, preserving capture-by-value for returned closures while ordinary lexical closures continue to observe later mutations. Grouping currently represents distinct group keys, which supports group counts and `group.Key` projections; full `IGrouping<TKey,TElement>` materialization and per-group aggregate projections require a richer nested-sequence representation.
+
+`Enumerable.Repeat(...).Select(...).ToArray()`/`ToList()` also has an ordered procedural lowering. This path permits stateful selectors such as `value => value[random.Next(value.Length)]`, which cannot be represented as a pure relational projection without changing evaluation semantics.
+
+This `IQueryable<T>` support applies only to SharpSql-managed arrays and lists. Translating a query rooted in an external database table still requires a source-mapping API and schema/type metadata.
 
 ## Comment preservation
 
@@ -106,6 +118,6 @@ Every source file under `examples/` is executable specification. The integration
 
 Testcontainers owns container startup, readiness, random host-port allocation, and cleanup. The suite shares one SQL Server instance for the example corpus but opens a fresh connection for every batch, preserving local-temporary-table isolation. Adding an example automatically adds it to the parity suite.
 
-The corpus spans arithmetic and numeric widths, null/boolean behavior, Unicode and escaping, nested control flow, arrays, mutable collections, dictionary key collation, heap aliasing, instance methods, inlining, recursion, and short-circuit evaluation. Narrow compiler unit tests accompany any lowering defect first discovered by a differential example.
+The corpus spans arithmetic and numeric widths, null/boolean behavior, Unicode and escaping, nested control flow, arrays, mutable collections, dictionary key collation, heap aliasing, instance methods, inlining, recursion, short-circuit evaluation, relational LINQ pipelines, managed `IQueryable<T>`, advanced ordering/paging/join/group stages, guarded terminals, delegate/query-plan flow, query syntax, stateful `Enumerable.Repeat` materialization, and character-array string construction. Narrow compiler unit tests accompany any lowering defect first discovered by a differential example.
 
 SQL Server's scalar-UDF inlining feature does not solve object lifetime: it optimizes eligible schema UDFs after they have been created. Persisted UDF emission should therefore remain an opt-in deployment mode, never the script default.

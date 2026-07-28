@@ -190,7 +190,7 @@ public sealed partial class SharpSqlCompiler
             if (methodName == "NextDouble")
             {
                 var result = _names.Allocate("_random_double");
-                _sql.Line($"DECLARE {result} FLOAT = CONVERT(FLOAT, {sample}) * (1.0 / {RandomMax}.0);");
+                _sql.Line($"DECLARE {result} FLOAT = CONVERT(FLOAT, {sample}) * (CAST(1 AS FLOAT) / CAST({RandomMax} AS FLOAT));");
                 continuation(result);
                 return;
             }
@@ -205,7 +205,7 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"DECLARE {integerResult} INT;");
             if (captured.Count == 1)
             {
-                _sql.Line($"SET {integerResult} = CONVERT(INT, FLOOR(CONVERT(FLOAT, {sample}) * (1.0 / {RandomMax}.0) * {firstArgument}));");
+                _sql.Line($"SET {integerResult} = CONVERT(INT, CONVERT(FLOAT, {sample}) * (CAST(1 AS FLOAT) / CAST({RandomMax} AS FLOAT)) * {firstArgument});");
                 continuation(integerResult);
                 return;
             }
@@ -213,7 +213,7 @@ public sealed partial class SharpSqlCompiler
             var range = _names.Allocate("_random_range");
             _sql.Line($"DECLARE {range} BIGINT = CONVERT(BIGINT, {secondArgument}) - CONVERT(BIGINT, {firstArgument});");
             _sql.Line($"IF {range} <= {RandomMax}");
-            _sql.Line($"    SET {integerResult} = CONVERT(INT, FLOOR(CONVERT(FLOAT, {sample}) * (1.0 / {RandomMax}.0) * {range})) + {firstArgument};");
+            _sql.Line($"    SET {integerResult} = CONVERT(INT, CONVERT(FLOAT, {sample}) * (CAST(1 AS FLOAT) / CAST({RandomMax} AS FLOAT)) * {range}) + {firstArgument};");
             _sql.Line("ELSE");
             _sql.Line("BEGIN");
             using (_sql.Indent())

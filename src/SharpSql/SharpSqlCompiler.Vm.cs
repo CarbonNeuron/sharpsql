@@ -201,6 +201,8 @@ public sealed partial class SharpSqlCompiler
         Action<string> continuation)
     {
         expression = StripParentheses(expression);
+        if (TryEmitGuardedLinqExpression(expression, scope, context, continuation))
+            return;
         if (TryEmitHeapExpression(expression, scope, context, continuation))
             return;
         if (!ContainsRuntimeExpression(expression))
@@ -235,6 +237,14 @@ public sealed partial class SharpSqlCompiler
                 return;
             case ConditionalExpressionSyntax conditional:
                 EmitVmConditional(conditional, scope, context, continuation);
+                return;
+            case ObjectCreationExpressionSyntax creation
+                when IsStringCharacterArrayCreation(creation, scope):
+                EmitVmExpression(
+                    creation.ArgumentList!.Arguments[0].Expression,
+                    scope,
+                    context,
+                    characters => continuation(StringFromCharacterArraySql(characters)));
                 return;
             case CheckedExpressionSyntax checkedExpression:
                 EmitVmExpression(checkedExpression.Expression, scope, context, continuation);
@@ -470,88 +480,86 @@ public sealed partial class SharpSqlCompiler
         LoopContext? loop)
     {
         foreach (var statement in statements)
-            EmitVmStatement(statement, method, loop);
+            EmitVmStatement(BindProceduralStatement(statement, method.Scope), method, loop);
     }
 
-    private void EmitVmStatement(StatementSyntax statement, VmMethod method, LoopContext? loop)
+    private void EmitVmStatement(ProceduralStatement statement, VmMethod method, LoopContext? loop)
     {
-        EmitLeadingComments(statement);
+        EmitLeadingComments(statement.Source);
         switch (statement)
         {
-            case BlockSyntax block:
-                EmitVmStatementSequence(block.Statements, method, loop);
+            case ProceduralBlock block:
+                EmitVmProceduralStatementSequence(block.Statements, method, loop);
                 break;
-            case LocalDeclarationStatementSyntax declaration:
-                foreach (var variable in declaration.Declaration.Variables)
+            case ProceduralDeclarationStatement declaration:
+                EmitVmDeclaration(declaration.Declaration, method);
+                break;
+            case ProceduralExpressionStatement expression:
+                EmitVmExpressionStatement(expression.Expression.Syntax, method);
+                break;
+            case ProceduralIf @if:
+                EmitVmExpression(@if.Condition.Syntax, method.Scope, method, condition =>
                 {
-                    var target = method.Variables[variable.Identifier.ValueText];
-                    if (variable.Initializer is null)
-                        _sql.Line($"SET {target.SqlName} = NULL;");
-                    else
-                        EmitVmExpression(
-                            variable.Initializer.Value,
-                            method.Scope,
-                            method,
-                            value => _sql.Line($"SET {target.SqlName} = {value};"));
-                }
-                break;
-            case ExpressionStatementSyntax expression:
-                EmitVmExpressionStatement(expression.Expression, method);
-                break;
-            case IfStatementSyntax @if:
-                EmitVmExpression(@if.Condition, method.Scope, method, condition =>
-                {
-                    _sql.Line($"IF {VmPredicate(condition, @if.Condition, method.Scope)}");
-                    EmitVmEmbedded(@if.Statement, method, loop);
-                    if (@if.Else is not null)
+                    _sql.Line($"IF {VmPredicate(condition, @if.Condition.Syntax, method.Scope)}");
+                    EmitVmEmbedded(@if.Then, method, loop);
+                    if (@if.Else is { } elseStatement)
                     {
                         _sql.Line("ELSE");
-                        EmitVmEmbedded(@if.Else.Statement, method, loop);
+                        EmitVmEmbedded(elseStatement, method, loop);
                     }
                 });
                 break;
-            case WhileStatementSyntax @while:
+            case ProceduralWhile @while:
                 EmitVmWhile(@while, method);
                 break;
-            case DoStatementSyntax @do:
+            case ProceduralDo @do:
                 EmitVmDo(@do, method);
                 break;
-            case ForStatementSyntax @for:
+            case ProceduralFor @for:
                 EmitVmFor(@for, method);
                 break;
-            case ForEachStatementSyntax forEach:
+            case ProceduralForEach forEach:
                 EmitVmForEach(forEach, method);
                 break;
-            case BreakStatementSyntax:
+            case ProceduralBreak:
                 if (loop is null)
-                    AddDiagnostic("SS2005", "break must be inside a loop.", statement);
+                    AddDiagnostic("SS2005", "break must be inside a loop.", statement.Source);
                 else
                     _sql.Line($"GOTO {loop.BreakLabel};");
                 break;
-            case ContinueStatementSyntax:
+            case ProceduralContinue:
                 if (loop is null)
-                    AddDiagnostic("SS2001", "continue must be inside a loop.", statement);
+                    AddDiagnostic("SS2001", "continue must be inside a loop.", statement.Source);
                 else
                     _sql.Line($"GOTO {loop.ContinueLabel};");
                 break;
-            case ReturnStatementSyntax @return:
+            case ProceduralReturn @return:
                 if (@return.Expression is null)
                     EmitVmReturn(method, "NULL");
                 else
                     EmitVmExpression(
-                        @return.Expression,
+                        @return.Expression.Syntax,
                         method.Scope,
                         method,
                         value => EmitVmReturn(method, value));
                 break;
-            case LocalFunctionStatementSyntax:
-            case EmptyStatementSyntax:
+            case ProceduralLocalFunction:
+            case ProceduralEmpty:
                 break;
-            default:
-                Unsupported(statement, "stack-machine statement");
+            case ProceduralUnsupported unsupported:
+                Unsupported(unsupported.Source, "stack-machine statement");
                 break;
         }
-        EmitTrailingComments(statement);
+        EmitTrailingComments(statement.Source);
+    }
+
+    private void EmitVmProceduralStatementSequence(
+        IEnumerable<ProceduralStatement> statements,
+        VmMethod method,
+        LoopContext? loop)
+    {
+        foreach (var statement in statements)
+            EmitVmStatement(statement, method, loop);
     }
 
     private void EmitVmExpressionStatement(ExpressionSyntax expression, VmMethod method)
@@ -622,46 +630,43 @@ public sealed partial class SharpSqlCompiler
         return $"SET {target} = {target} {op} ({value});";
     }
 
-    private void EmitVmWhile(WhileStatementSyntax statement, VmMethod method)
+    private void EmitVmWhile(ProceduralWhile statement, VmMethod method)
     {
         var conditionLabel = _names.AllocateLabel("vm_while_condition");
         var continueLabel = _names.AllocateLabel("vm_while_continue");
         var breakLabel = _names.AllocateLabel("vm_while_break");
         EmitLabel(conditionLabel);
-        EmitVmExpression(statement.Condition, method.Scope, method, condition =>
+        EmitVmExpression(statement.Condition.Syntax, method.Scope, method, condition =>
         {
-            _sql.Line($"IF NOT ({VmPredicate(condition, statement.Condition, method.Scope)}) GOTO {breakLabel};");
-            EmitVmEmbeddedContents(statement.Statement, method, new LoopContext(breakLabel, continueLabel));
+            _sql.Line($"IF NOT ({VmPredicate(condition, statement.Condition.Syntax, method.Scope)}) GOTO {breakLabel};");
+            EmitVmEmbeddedContents(statement.Body, method, new LoopContext(breakLabel, continueLabel));
             EmitLabel(continueLabel);
             _sql.Line($"GOTO {conditionLabel};");
             EmitLabel(breakLabel);
         });
     }
 
-    private void EmitVmDo(DoStatementSyntax statement, VmMethod method)
+    private void EmitVmDo(ProceduralDo statement, VmMethod method)
     {
         var bodyLabel = _names.AllocateLabel("vm_do_body");
         var continueLabel = _names.AllocateLabel("vm_do_continue");
         var breakLabel = _names.AllocateLabel("vm_do_break");
         EmitLabel(bodyLabel);
-        EmitVmEmbeddedContents(statement.Statement, method, new LoopContext(breakLabel, continueLabel));
+        EmitVmEmbeddedContents(statement.Body, method, new LoopContext(breakLabel, continueLabel));
         EmitLabel(continueLabel);
-        EmitVmExpression(statement.Condition, method.Scope, method, condition =>
+        EmitVmExpression(statement.Condition.Syntax, method.Scope, method, condition =>
         {
-            _sql.Line($"IF {VmPredicate(condition, statement.Condition, method.Scope)} GOTO {bodyLabel};");
+            _sql.Line($"IF {VmPredicate(condition, statement.Condition.Syntax, method.Scope)} GOTO {bodyLabel};");
             EmitLabel(breakLabel);
         });
     }
 
-    private void EmitVmFor(ForStatementSyntax statement, VmMethod method)
+    private void EmitVmFor(ProceduralFor statement, VmMethod method)
     {
         if (statement.Declaration is not null)
-        {
-            var declaration = SyntaxFactory.LocalDeclarationStatement(statement.Declaration);
-            EmitVmStatement(declaration, method, null);
-        }
+            EmitVmDeclaration(statement.Declaration, method);
         foreach (var initializer in statement.Initializers)
-            EmitVmExpressionStatement(initializer, method);
+            EmitVmExpressionStatement(initializer.Syntax, method);
 
         var conditionLabel = _names.AllocateLabel("vm_for_condition");
         var continueLabel = _names.AllocateLabel("vm_for_continue");
@@ -670,24 +675,40 @@ public sealed partial class SharpSqlCompiler
         if (statement.Condition is null)
             EmitBody();
         else
-            EmitVmExpression(statement.Condition, method.Scope, method, condition =>
+            EmitVmExpression(statement.Condition.Syntax, method.Scope, method, condition =>
             {
-                _sql.Line($"IF NOT ({VmPredicate(condition, statement.Condition, method.Scope)}) GOTO {breakLabel};");
+                _sql.Line($"IF NOT ({VmPredicate(condition, statement.Condition.Syntax, method.Scope)}) GOTO {breakLabel};");
                 EmitBody();
             });
 
         void EmitBody()
         {
-            EmitVmEmbeddedContents(statement.Statement, method, new LoopContext(breakLabel, continueLabel));
+            EmitVmEmbeddedContents(statement.Body, method, new LoopContext(breakLabel, continueLabel));
             EmitLabel(continueLabel);
             foreach (var incrementor in statement.Incrementors)
-                EmitVmExpressionStatement(incrementor, method);
+                EmitVmExpressionStatement(incrementor.Syntax, method);
             _sql.Line($"GOTO {conditionLabel};");
             EmitLabel(breakLabel);
         }
     }
 
-    private void EmitVmEmbedded(StatementSyntax statement, VmMethod method, LoopContext? loop)
+    private void EmitVmDeclaration(ProceduralDeclaration declaration, VmMethod method)
+    {
+        foreach (var variable in declaration.Variables)
+        {
+            var target = method.Variables[variable.Name];
+            if (variable.Initializer is null)
+                _sql.Line($"SET {target.SqlName} = NULL;");
+            else
+                EmitVmExpression(
+                    variable.Initializer.Syntax,
+                    method.Scope,
+                    method,
+                    value => _sql.Line($"SET {target.SqlName} = {value};"));
+        }
+    }
+
+    private void EmitVmEmbedded(ProceduralStatement statement, VmMethod method, LoopContext? loop)
     {
         _sql.Line("BEGIN");
         using (_sql.Indent())
@@ -695,22 +716,22 @@ public sealed partial class SharpSqlCompiler
         _sql.Line("END;");
     }
 
-    private void EmitVmForEach(ForEachStatementSyntax statement, VmMethod method)
+    private void EmitVmForEach(ProceduralForEach statement, VmMethod method)
     {
-        var collectionType = InferType(statement.Expression, method.Scope);
+        var collectionType = statement.SourceExpression.Facts.Type;
         if (!IsSequenceType(collectionType.Name))
         {
-            AddDiagnostic("SS6302", "foreach currently supports arrays and List<T>.", statement.Expression);
+            AddDiagnostic("SS6302", "foreach currently supports arrays and List<T>.", statement.SourceExpression.Syntax);
             return;
         }
 
-        EmitVmExpression(statement.Expression, method.Scope, method, collection =>
+        EmitVmExpression(statement.SourceExpression.Syntax, method.Scope, method, collection =>
         {
             var collectionStorage = AllocateVmTemporary(collectionType, method);
             StoreVmTemporary(collectionStorage, collection);
             var indexStorage = AllocateVmTemporary(CSharpType.Int, method);
             StoreVmTemporary(indexStorage, "0");
-            var item = method.Variables[statement.Identifier.ValueText];
+            var item = method.Variables[statement.Syntax.Identifier.ValueText];
             var conditionLabel = _names.AllocateLabel("vm_foreach_condition");
             var continueLabel = _names.AllocateLabel("vm_foreach_continue");
             var breakLabel = _names.AllocateLabel("vm_foreach_break");
@@ -720,7 +741,7 @@ public sealed partial class SharpSqlCompiler
             var indexValue = ReadVmTemporary(indexStorage);
             _sql.Line($"IF {indexValue} >= {SequenceCountSql(collectionValue)} GOTO {breakLabel};");
             _sql.Line($"SET {item.SqlName} = {SequenceElementSql(collectionValue, indexValue, item.Type)};");
-            EmitVmEmbeddedContents(statement.Statement, method, new LoopContext(breakLabel, continueLabel));
+            EmitVmEmbeddedContents(statement.Body, method, new LoopContext(breakLabel, continueLabel));
             EmitLabel(continueLabel);
             _sql.Line($"UPDATE {VmSlots} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, __value) + 1) WHERE __frame_id = {VmFrameId} AND __slot_id = {indexStorage.Slot};");
             _sql.Line($"GOTO {conditionLabel};");
@@ -728,10 +749,10 @@ public sealed partial class SharpSqlCompiler
         });
     }
 
-    private void EmitVmEmbeddedContents(StatementSyntax statement, VmMethod method, LoopContext? loop)
+    private void EmitVmEmbeddedContents(ProceduralStatement statement, VmMethod method, LoopContext? loop)
     {
-        if (statement is BlockSyntax block)
-            EmitVmStatementSequence(block.Statements, method, loop);
+        if (statement is ProceduralBlock block)
+            EmitVmProceduralStatementSequence(block.Statements, method, loop);
         else
             EmitVmStatement(statement, method, loop);
     }

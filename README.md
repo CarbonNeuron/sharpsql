@@ -88,6 +88,7 @@ Console.WriteLine(result.Sql);
 - Top-level C# statements and conventional `Main` bodies
 - Core numeric types, `bool`, `char`, `string`, nullable values, date/time types, `Guid`, `byte[]`, and `object`
 - Declarations, assignment, arithmetic, comparisons, boolean expressions, interpolation, and casts
+- String length/indexing and `string(char[])` construction
 - `if`/`else`, `while`, `do`, `for`, `foreach`, `break`, and `continue`
 - `Console.WriteLine` and `Console.Write` lowered to `PRINT`
 - Pure-expression and procedural method inlining with hygienic variables and labels
@@ -95,6 +96,8 @@ Console.WriteLine(result.Sql);
 - Classes and records with reference identity, typed fields, object initializers, mapped constructors, and instance methods
 - One-dimensional arrays and `List<T>` with indexing, mutation, iteration, and common operations
 - `Dictionary<TKey,TValue>` with indexing and common mutation/query operations
+- Relational LINQ over arrays and `List<T>`: filtering/projection, ordering/paging, distinct values, joins, grouped-key pipelines, aggregates, and element operators, plus ordered `Enumerable.Repeat` materialization
+- Deferred query variables, managed `AsEnumerable`/`AsQueryable`, query syntax, stored/captured delegates, helper-method plan flow, LINQ `foreach`, and `ToList`/`ToArray` materialization
 - Stateful `Random` instances with `Next()`, bounded/ranged `Next(...)`, and `NextDouble()`
 - Roslyn semantic typing for `var`, generics, members, and expression results
 - C# line, block, and documentation comments preserved near their generated SQL
@@ -168,12 +171,50 @@ The heap is allocation-only for the life of the script. Dropping its temporary t
 
 ## Roadmap
 
-The long-term experiment is to discover how much idiomatic C# can execute faithfully inside a SQL Server batch. Major missing layers include:
+The long-term experiment is to discover how much idiomatic C# can execute faithfully inside a SQL Server batch.
 
-- A typed intermediate representation and broader data-flow analysis
-- LINQ and query-expression lowering to relational SQL where possible
+### LINQ milestone: managed collection queries
+
+The managed-collection LINQ milestones are complete:
+
+- A composable relational query plan over managed arrays and `List<T>`
+- `Where`, `Select`, `Sum`, `Count`, `LongCount`, `Any`, `All`, `Contains`, and `FirstOrDefault`
+- Deferred query variables, `AsEnumerable()`/`AsQueryable()`, and `where`/`select` query expressions
+- Direct query iteration plus `ToList()` and `ToArray()` materialization
+- Ordered procedural lowering for stateful `Enumerable.Repeat(...).Select(...)` pipelines
+- Targeted entry-scope capture for VM-backed local functions used by stateful selectors
+- Batched multi-row collection initialization, chunked at SQL Server's 1,000-row `VALUES` limit
+- Supporting string length/indexing, `string(char[])`, and exact seeded bounded-`Random` behavior
+- `Join`, key-based `GroupBy`, `OrderBy`/`ThenBy`, `Distinct`, `Skip`, and `Take`
+- `Min`, `Max`, `MinBy`, `MaxBy`, `Average`, `First`, `Last`, `Single`, `SingleOrDefault`, `ElementAt`, and their supported `OrDefault` forms, with explicit empty/multiple/out-of-range guards
+- Stored delegates and closures plus delegate/query-plan flow through expression-bodied or single-return helper methods, including returned delegate factories
+
+The runnable specifications are [`linq_sum.cs`](examples/linq_sum.cs), [`linq_queries.cs`](examples/linq_queries.cs), [`linq_advanced.cs`](examples/linq_advanced.cs), and [`generated_names.cs`](examples/generated_names.cs).
+
+The remaining LINQ milestone is:
+
+- External `IQueryable<T>` source mapping with explicit table/schema metadata
+
+`GroupBy` currently supports distinct group production, group counts, and `group.Key` projection. Materializing or iterating full `IGrouping<TKey,TElement>` values and aggregate projections over each group remain outside this phase.
+
+### Compiler-analysis foundation
+
+The first typed-IR and data-flow phase is complete:
+
+- A typed scalar SQL IR carrying C# type, SQL precedence, and nullable flow state
+- A typed procedural IR for declarations, blocks, branches, every supported loop, jumps, and returns
+- Centralized scalar casts and rendering
+- Typed substitutions shared by method inlining, closures, and LINQ captures
+- One procedural lowering boundary shared by direct/inlined code and the stack-machine backend
+- Roslyn constant-flow facts used during predicate lowering
+- Definite-assignment, use-before-declaration, missing-return, and out-parameter preflight diagnostics
+- Reusable method summaries for endpoint reachability, statement cost, reads, writes, and captures
+
+### Broader missing layers
+
+- Extend method summaries with interprocedural alias, escape, and side-effect analysis
 - Constructor bodies, inheritance, interfaces, and virtual dispatch
-- Delegates, closures, iterators, and async-state-machine diagnostics
+- General-purpose delegate invocation outside LINQ, iterators, and async-state-machine diagnostics
 - Exceptions and structured unwinding across VM frames
 - More of the base class library through explicit compiler intrinsics
 - Exact overflow, culture-sensitive formatting, and exception parity across the two runtimes

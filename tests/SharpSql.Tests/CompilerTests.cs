@@ -312,6 +312,39 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void BatchesCollectionAndArrayInitializersIntoMultiRowInserts()
+    {
+        const string source = """
+            var people = new List<Person>
+            {
+                new Person("Bob", 40),
+                new Person("Jane", 20),
+                new Person("Saul", 55)
+            };
+            int[] values = new int[] { 3, 1, 4 };
+            record Person(string Name, int Age);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Equal(1, Count(result.Sql, "(__owner_id, __index, __reference_value) VALUES"));
+        Assert.Equal(1, Count(result.Sql, "(__owner_id, __index, __value) VALUES"));
+        Assert.Contains("(@_object_4, 0, @_vm_temp_3),", result.Sql);
+        Assert.Contains("(@_object_4, 2, @_vm_temp_9);", result.Sql);
+    }
+
+    [Fact]
+    public void ChunksMultiRowInsertsAtSqlServersThousandRowLimit()
+    {
+        var items = string.Join(", ", Enumerable.Range(0, 1001));
+        var result = Compile($"var values = new List<int> {{ {items} }};");
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Equal(2, Count(result.Sql, "(__owner_id, __index, __value) VALUES"));
+    }
+
+    [Fact]
     public void FormatsBooleansLikeCSharpInsideInterpolatedStrings()
     {
         const string source = """
@@ -378,6 +411,69 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void BuildsStringsFromRuntimeIndexedCharacterArraysInsideVmMethods()
+    {
+        const string source = """
+            var people = new List<Person>();
+            var random = new Random();
+
+            for (int i = 0; i < 5; i++)
+                people.Add(new Person(GenerateName(), random.Next(1, 100)));
+
+            string GenerateName()
+            {
+                var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                var stringChars = new char[8];
+                var source = new Random();
+                for (int i = 0; i < stringChars.Length; i++)
+                    stringChars[i] = chars[source.Next(chars.Length)];
+                return new string(stringChars);
+            }
+
+            record Person(string Name, int Age);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DATALENGTH(@_vm_GenerateName_chars) / 2", result.Sql);
+        Assert.Contains("SUBSTRING(@_vm_GenerateName_chars", result.Sql);
+        Assert.Contains("STRING_AGG(CONVERT(NVARCHAR(MAX), CONVERT(NCHAR(1), __value)), N'')", result.Sql);
+        Assert.Contains("stack-machine body: GenerateName", result.Sql);
+    }
+
+    [Fact]
+    public void MaterializesStatefulRepeatSelectPipelinesWithCapturedEntryVariables()
+    {
+        const string source = """
+            var people = new List<Person>();
+            var random = new Random();
+            for (int i = 0; i < 5; i++)
+                people.Add(new Person(RandomString(8), random.Next(1, 100)));
+
+            string RandomString(int length)
+            {
+                const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+                return new string(Enumerable.Repeat(chars, length)
+                    .Select(value => value[random.Next(value.Length)]).ToArray());
+            }
+
+            record Person(string Name, int Age);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("stack-machine body: RandomString", result.Sql);
+        Assert.Contains("Enumerable.Repeat count must be non-negative.", result.Sql);
+        Assert.Contains("WHILE @_repeat_index <", result.Sql);
+        Assert.Contains("WHERE __id = @random", result.Sql);
+        Assert.Contains("CAST(1 AS FLOAT) / CAST(2147483647 AS FLOAT)", result.Sql);
+        Assert.Contains("SUBSTRING(", result.Sql);
+        Assert.Contains("STRING_AGG(", result.Sql);
+    }
+
+    [Fact]
     public void ReusesHeapTablesAcrossObjectsListsAndRandomState()
     {
         const string source = """
@@ -410,6 +506,285 @@ public sealed class CompilerTests
         Assert.DoesNotContain("#__sharpsql_list_items", result.Sql);
         Assert.DoesNotContain("#__sharpsql_randoms", result.Sql);
         Assert.DoesNotContain("#__sharpsql_random_state", result.Sql);
+    }
+
+    [Fact]
+    public void LowersLinqSumSelectorToOneRelationalAggregate()
+    {
+        const string source = """
+            var people = new List<Person>
+            {
+                new Person("Bob", 40),
+                new Person("Jane", 35)
+            };
+
+            var total = people.Sum(person => person.Age);
+            Console.WriteLine($"sum = {total}");
+
+            record Person(string Name, int Age);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DECLARE @total INT = COALESCE((SELECT SUM(__linq_terminal_", result.Sql);
+        Assert.Contains("(SELECT [Age] FROM #__sharpsql_type_1", result.Sql);
+        Assert.Contains("__object_id = __linq_source_", result.Sql);
+        Assert.Contains("FROM #__sharpsql_indexed_items AS __linq_item_1", result.Sql);
+        Assert.Contains("CAST(0 AS INT)", result.Sql);
+    }
+
+    [Fact]
+    public void LowersLinqSumWithoutSelectorAndPreservesEmptySequenceZero()
+    {
+        const string source = """
+            var values = new List<long>();
+            var total = values.Sum();
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("CONVERT(BIGINT, __linq_item_1.__value) AS __value", result.Sql);
+        Assert.Contains("CAST(0 AS BIGINT)", result.Sql);
+    }
+
+    [Fact]
+    public void ComposesQueryableWhereSelectAndTerminalOperators()
+    {
+        const string source = """
+            var people = new List<Person>
+            {
+                new Person("Bob", 40),
+                new Person("Jane", 20),
+                new Person("Saul", 55)
+            };
+            IQueryable<Person> query = people.AsQueryable();
+            var adults = query.Where(person => person.Age >= 21);
+            int total = adults.Select(person => person.Age).Sum();
+            int count = adults.Count();
+            bool anyJane = query.Any(person => person.Name == "Jane");
+            bool allPositive = query.All(person => person.Age > 0);
+            record Person(string Name, int Age);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DECLARE @query BIGINT = @people;", result.Sql);
+        Assert.Contains("DECLARE @adults BIGINT = @query;", result.Sql);
+        Assert.Contains("SELECT SUM(__linq_terminal_", result.Sql);
+        Assert.Contains("SELECT COUNT(*)", result.Sql);
+        Assert.Contains("CASE WHEN EXISTS", result.Sql);
+        Assert.Contains("CASE WHEN NOT EXISTS", result.Sql);
+        Assert.Contains("[Age]", result.Sql);
+        Assert.Contains("[Name]", result.Sql);
+    }
+
+    [Fact]
+    public void LowersQuerySyntaxForeachAndMaterialization()
+    {
+        const string source = """
+            var people = new List<Person>
+            {
+                new Person("Bob", 40),
+                new Person("Jane", 20)
+            };
+            var ages = from person in people
+                       where person.Age >= 21
+                       select person.Age;
+            var materialized = ages.ToList();
+            foreach (var age in ages)
+                Console.WriteLine(age);
+            bool contains = ages.Contains(40);
+            int firstMissing = ages.Where(age => age > 100).FirstOrDefault();
+            record Person(string Name, int Age);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DECLARE @ages BIGINT = @people;", result.Sql);
+        Assert.Contains("ROW_NUMBER() OVER (ORDER BY", result.Sql);
+        Assert.Contains("__sharpsql_linq_foreach_condition", result.Sql);
+        Assert.Contains("CASE WHEN EXISTS", result.Sql);
+        Assert.Contains("SELECT TOP (1)", result.Sql);
+    }
+
+    [Fact]
+    public void LowersAdvancedOrderingPagingJoinAndGroupingStages()
+    {
+        const string source = """
+            var values = new List<int> { 4, 1, 3, 1, 2, 4 };
+            var page = values.Distinct()
+                .OrderByDescending(value => value)
+                .ThenBy(value => value)
+                .Skip(1)
+                .Take(2)
+                .ToList();
+            var people = new List<Person> { new Person("Bob", 40), new Person("Jane", 20) };
+            var bands = new List<Band> { new Band(20, "young"), new Band(40, "older") };
+            var joined = people.Join(bands, person => person.Age, band => band.Age,
+                (person, band) => person.Name + ":" + band.Label).ToList();
+            var groupKeys = people.GroupBy(person => person.Age)
+                .Select(group => group.Key).OrderBy(value => value).ToArray();
+            record Person(string Name, int Age);
+            record Band(int Age, string Label);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("ROW_NUMBER() OVER (ORDER BY", result.Sql);
+        Assert.Contains("GROUP BY", result.Sql);
+        Assert.Contains("INNER JOIN", result.Sql);
+        Assert.Contains("__ordinal >=", result.Sql);
+        Assert.Contains("__ordinal <", result.Sql);
+    }
+
+    [Fact]
+    public void DiagnosesMaterializingFullGroupingValues()
+    {
+        const string source = """
+            var values = new List<int> { 1, 2, 1 };
+            var groups = values.GroupBy(value => value).ToList();
+            """;
+
+        var result = Compile(source);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "SS6411");
+    }
+
+    [Fact]
+    public void EmitsExplicitGuardsForAggregateAndElementTerminals()
+    {
+        const string source = """
+            var values = new List<int> { 4, 1, 3 };
+            int minimum = values.Min();
+            int maximum = values.Max();
+            double average = values.Average();
+            int minimumBy = values.MinBy(value => -value);
+            int maximumBy = values.MaxBy(value => -value);
+            int first = values.First();
+            int last = values.Last();
+            int single = values.Where(value => value == 3).Single();
+            int singleDefault = values.Where(value => value == 99).SingleOrDefault();
+            int element = values.ElementAt(1);
+            int missing = values.ElementAtOrDefault(99);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("LINQ sequence contains no elements.", result.Sql);
+        Assert.Contains("LINQ sequence contains more than one element.", result.Sql);
+        Assert.Contains("LINQ index was out of range.", result.Sql);
+        Assert.Contains("SELECT MIN(", result.Sql);
+        Assert.Contains("SELECT MAX(", result.Sql);
+        Assert.Contains("SELECT AVG(", result.Sql);
+        Assert.Contains("ROW_NUMBER() OVER (ORDER BY", result.Sql);
+    }
+
+    [Fact]
+    public void FlowsDeferredQueriesAndCapturedDelegateVariablesThroughMethods()
+    {
+        const string source = """
+            var values = new List<int> { 1, 2, 3, 4 };
+            int threshold = 2;
+            Func<int, bool> predicate = value => value > threshold;
+            var filtered = Filter(values, predicate);
+            var limited = FilterAbove(filtered, 2);
+            Func<int, bool> returnedPredicate = AtLeast(threshold);
+            threshold = 3;
+            int count = CountMatches(limited, returnedPredicate);
+            IEnumerable<int> Filter(IEnumerable<int> source, Func<int, bool> test) => source.Where(test);
+            IEnumerable<int> FilterAbove(IEnumerable<int> source, int minimum) => source.Where(value => value > minimum);
+            int CountMatches(IEnumerable<int> source, Func<int, bool> test) => source.Count(test);
+            Func<int, bool> AtLeast(int minimum) => value => value >= minimum;
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DECLARE @predicate BIGINT = NULL;", result.Sql);
+        Assert.Contains("DECLARE @filtered BIGINT = @values;", result.Sql);
+        Assert.Contains("__value > @threshold", result.Sql);
+        Assert.Contains("DECLARE @_linq_capture", result.Sql);
+        Assert.Contains("__value > @_linq_capture", result.Sql);
+        Assert.Contains("__value >= @_linq_capture", result.Sql);
+    }
+
+    [Fact]
+    public void ReportsDefiniteAssignmentFailuresBeforeLowering()
+    {
+        const string source = """
+            int value;
+            Console.WriteLine(value);
+            """;
+
+        var result = Compile(source);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "CS0165");
+    }
+
+    [Fact]
+    public void UsesConstantFlowFactsWhenRenderingPredicates()
+    {
+        const string source = """
+            if (1 + 1 == 2)
+                Console.WriteLine("yes");
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("IF 1 = 1", result.Sql);
+        Assert.DoesNotContain("1 + 1 = 2", result.Sql);
+    }
+
+    [Fact]
+    public void MethodFlowSummaryRejectsReachableNonVoidEndpoint()
+    {
+        const string source = """
+            int result = Choose(false);
+            int Choose(bool choose)
+            {
+                if (choose)
+                    return 1;
+            }
+            """;
+
+        var result = Compile(source);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "CS0161");
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "SS3004");
+    }
+
+    [Fact]
+    public void ProceduralIrPreservesNestedLoopAndBranchExits()
+    {
+        const string source = """
+            int total = 0;
+            for (int i = 0; i < 5; i++)
+            {
+                if (i == 1)
+                    continue;
+                if (i == 4)
+                    break;
+                total += i;
+            }
+            Console.WriteLine(total);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("GOTO __sharpsql_for_continue", result.Sql);
+        Assert.Contains("GOTO __sharpsql_for_break", result.Sql);
+        Assert.Contains("SET @total = @total + @i", result.Sql);
     }
 
     [Fact]
