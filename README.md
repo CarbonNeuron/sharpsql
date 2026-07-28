@@ -1,0 +1,152 @@
+# SharpSql
+
+[![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet)](https://dotnet.microsoft.com/)
+[![SQL Server](https://img.shields.io/badge/target-SQL%20Server-CC2927?logo=microsoftsqlserver)](https://www.microsoft.com/sql-server)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**Compile a useful subset of C# into one self-contained T-SQL batch.**
+
+SharpSql uses Roslyn syntax and semantic analysis to lower C# control flow, methods, objects, and collections into SQL Server. Small methods are inlined. Recursive or over-budget methods run on an ephemeral stack machine built from local temporary tables and static `GOTO` labels. The generated batch creates no persistent functions or procedures and cleans up its runtime state when it finishes.
+
+> [!WARNING]
+> SharpSql is an experimental compiler, not a production-safe way to run arbitrary C#. The supported language surface is intentionally explicit, and C# and SQL Server still differ in numeric, null, collation, evaluation-order, and exception semantics.
+
+## A quick example
+
+```csharp
+int Square(int value) => value * value;
+
+int Clamp(int value, int low, int high)
+{
+    if (value < low) return low;
+    if (value > high) return high;
+    return value;
+}
+
+int result = Clamp(Square(12), 0, 100);
+Console.WriteLine($"result={result}");
+```
+
+```sql
+SET NOCOUNT ON;
+
+DECLARE @_clamp_1_value INT = 12 * 12;
+DECLARE @_clamp_1_low INT = 0;
+DECLARE @_clamp_1_high INT = 100;
+DECLARE @result INT;
+IF @_clamp_1_value < @_clamp_1_low
+BEGIN
+    SET @result = @_clamp_1_low;
+    GOTO __sharpsql__clamp_1_end;
+END;
+-- ...
+PRINT CONCAT(N'result=', @result);
+```
+
+## Try it
+
+Requirements:
+
+- [.NET 10 SDK](https://dotnet.microsoft.com/download)
+- SQL Server 2016 or newer to execute generated batches; no database is needed to build or test the compiler
+
+From the repository root:
+
+```bash
+dotnet restore SharpSql.slnx
+dotnet run --project src/SharpSql.Cli -- examples/inlining.cs
+```
+
+Compile to a file:
+
+```bash
+dotnet run --project src/SharpSql.Cli -- examples/objects.cs -o objects.sql
+```
+
+The CLI reads C# from standard input when no input path is supplied:
+
+```bash
+echo 'Console.WriteLine("Hello from SQL");' | dotnet run --project src/SharpSql.Cli
+```
+
+The compiler can also be embedded directly:
+
+```csharp
+using SharpSql;
+
+var result = new SharpSqlCompiler().Transpile(source);
+if (!result.Success)
+    throw new InvalidOperationException(string.Join(Environment.NewLine, result.Diagnostics));
+
+Console.WriteLine(result.Sql);
+```
+
+## What works today
+
+- Top-level C# statements and conventional `Main` bodies
+- Core numeric types, `bool`, `char`, `string`, nullable values, date/time types, `Guid`, `byte[]`, and `object`
+- Declarations, assignment, arithmetic, comparisons, boolean expressions, interpolation, and casts
+- `if`/`else`, `while`, `do`, `for`, `foreach`, `break`, and `continue`
+- `Console.WriteLine` and `Console.Write` lowered to `PRINT`
+- Pure-expression and procedural method inlining with hygienic variables and labels
+- Recursive, mutually recursive, and over-budget calls through one generated stack and return trampoline
+- Classes and records with reference identity, typed fields, object initializers, mapped constructors, and instance methods
+- One-dimensional arrays and `List<T>` with indexing, mutation, iteration, and common operations
+- `Dictionary<TKey,TValue>` with indexing and common mutation/query operations
+- Roslyn semantic typing for `var`, generics, members, and expression results
+- C# line, block, and documentation comments preserved near their generated SQL
+- Source-positioned diagnostics for unsupported syntax
+
+See the runnable [examples](examples) and the detailed [compiler architecture](docs/architecture.md).
+
+## How method calls stay ephemeral
+
+SQL Server does not support temporary user-defined functions. SharpSql therefore chooses among three lowering strategies:
+
+1. Substitute a side-effect-free expression directly at its call site.
+2. Expand a small procedural body with renamed parameters, locals, and collision-safe labels.
+3. Emit larger or recursive methods once as stack-machine blocks inside the batch.
+
+The fallback stores activation frames and typed slots in local temporary tables. Every static call site receives an integer continuation ID, and all returns share one generated dispatcher that jumps to literal T-SQL labels. Normal completion drops the tables; closing the SQL connection provides failure-path cleanup.
+
+## Managed objects and collections
+
+References are represented by `BIGINT` object IDs. Each reachable class or record receives a typed local temporary table, while arrays, lists, and dictionaries use generic indexed runtime tables. Copying a class variable copies its ID, so aliases observe the same mutations.
+
+```csharp
+Person ada = new Person("Ada", 36);
+List<Person> people = new List<Person> { ada };
+Dictionary<string, Person> byName = new Dictionary<string, Person>();
+byName.Add("ada", people[0]);
+byName["ada"].Age = 37;
+
+record Person(string Name, int Age);
+```
+
+The heap is allocation-only for the life of the script. Dropping its temporary tables reclaims the whole heap at once.
+
+## Roadmap
+
+The long-term experiment is to discover how much idiomatic C# can execute faithfully inside a SQL Server batch. Major missing layers include:
+
+- A typed intermediate representation and broader data-flow analysis
+- LINQ and query-expression lowering to relational SQL where possible
+- Constructor bodies, inheritance, interfaces, and virtual dispatch
+- Delegates, closures, iterators, and async-state-machine diagnostics
+- Exceptions and structured unwinding across VM frames
+- More of the base class library through explicit compiler intrinsics
+- Differential tests that compare C# execution with generated SQL Server results
+
+## Build and contribute
+
+```bash
+dotnet restore SharpSql.slnx
+dotnet build SharpSql.slnx --configuration Release --no-restore
+dotnet test SharpSql.slnx --configuration Release --no-build
+```
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing new language behavior, and include tests that make any C#/T-SQL semantic difference explicit.
+
+## License
+
+SharpSql is available under the [MIT License](LICENSE).

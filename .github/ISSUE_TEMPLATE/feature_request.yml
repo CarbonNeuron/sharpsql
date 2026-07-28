@@ -1,0 +1,23 @@
+name: Language feature
+description: Propose a C# construct or runtime feature for SharpSql.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: example
+    attributes:
+      label: Example C#
+      description: Show the smallest program that needs this feature.
+      render: csharp
+    validations:
+      required: true
+  - type: textarea
+    id: lowering
+    attributes:
+      label: Suggested SQL behavior
+      description: Describe the expected semantics or lowering strategy.
+  - type: textarea
+    id: caveats
+    attributes:
+      label: Semantic differences
+      description: Note any known differences between C# and SQL Server behavior.

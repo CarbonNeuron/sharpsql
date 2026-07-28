@@ -1,0 +1,30 @@
+name: Bug report
+description: Report incorrect SQL, a crash, or an unexpected diagnostic.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: input
+    attributes:
+      label: Minimal C# input
+      render: csharp
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Generated SQL or diagnostic
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: SharpSql revision, .NET SDK, and SQL Server version if applicable.
