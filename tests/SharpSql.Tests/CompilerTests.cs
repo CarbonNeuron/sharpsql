@@ -312,6 +312,26 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void FormatsBooleansLikeCSharpInsideInterpolatedStrings()
+    {
+        const string source = """
+            bool yes = true;
+            bool no = false;
+            Dictionary<string, int> values = new Dictionary<string, int>();
+            values.Add("answer", 42);
+            Console.WriteLine($"{yes}:{no}:{1 < 2}:{values.ContainsKey("answer")}");
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("CASE @yes WHEN CAST(1 AS BIT) THEN N'True' WHEN CAST(0 AS BIT) THEN N'False' ELSE N'' END", result.Sql);
+        Assert.Contains("CASE @no WHEN CAST(1 AS BIT) THEN N'True' WHEN CAST(0 AS BIT) THEN N'False' ELSE N'' END", result.Sql);
+        Assert.Equal(4, Count(result.Sql, "THEN N'True' WHEN CAST(0 AS BIT) THEN N'False' ELSE N'' END"));
+        Assert.Contains("CASE WHEN EXISTS", result.Sql);
+    }
+
+    [Fact]
     public void HeapReferencesSurviveRecursiveVmFrames()
     {
         const string source = """

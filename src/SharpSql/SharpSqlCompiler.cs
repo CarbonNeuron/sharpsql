@@ -932,10 +932,24 @@ public sealed partial class SharpSqlCompiler
         var parts = interpolated.Contents.Select(content => content switch
         {
             InterpolatedStringTextSyntax text => "N'" + EscapeSqlString(text.TextToken.ValueText) + "'",
-            InterpolationSyntax interpolation => EmitScalar(interpolation.Expression, scope, substitutions),
+            InterpolationSyntax interpolation => EmitInterpolation(interpolation, scope, substitutions),
             _ => "N''"
         }).ToArray();
         return EmittedExpression.Primary(parts.Length == 0 ? "N''" : $"CONCAT({string.Join(", ", parts)})");
+    }
+
+    private string EmitInterpolation(
+        InterpolationSyntax interpolation,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions)
+    {
+        var value = EmitScalar(interpolation.Expression, scope, substitutions);
+        if (!InferType(interpolation.Expression, scope, substitutions).IsBoolean)
+            return value;
+
+        return $"CASE {value} " +
+            "WHEN CAST(1 AS BIT) THEN N'True' " +
+            "WHEN CAST(0 AS BIT) THEN N'False' ELSE N'' END";
     }
 
     private string EmitAssignable(ExpressionSyntax expression, VariableScope scope) => expression switch
