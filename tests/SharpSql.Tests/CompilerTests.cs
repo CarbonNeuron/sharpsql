@@ -399,6 +399,28 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void CompoundAssignmentsCanMutateHeapFields()
+    {
+        const string source = """
+            Counter counter = new Counter(2);
+            counter.Add(3);
+            Console.WriteLine(counter.Value);
+            class Counter
+            {
+                public Counter(int initial) { Value = initial; }
+                public int Value { get; set; }
+                public void Add(int amount) { Value += amount; }
+            }
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("SET [Value] = (SELECT [Value]", result.Sql);
+        Assert.Contains("+ (@_add_1_amount)", result.Sql);
+    }
+
+    [Fact]
     public void RecursiveVmMethodsCanEnumerateLists()
     {
         const string source = """
@@ -494,6 +516,23 @@ public sealed class CompilerTests
         Assert.Contains("@id UNIQUEIDENTIFIER", sql);
         Assert.Contains("@bytes VARBINARY(MAX)", sql);
         Assert.Contains("@nullableInt INT", sql);
+    }
+
+    [Fact]
+    public void PreservesFloatingPointLiteralTypesDuringArithmetic()
+    {
+        const string source = """
+            double ratio = 5.0 / 2.0;
+            float single = 5f / 2f;
+            decimal exact = 5m / 2m;
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("CAST(5 AS FLOAT) / CAST(2 AS FLOAT)", result.Sql);
+        Assert.Contains("CAST(5 AS REAL) / CAST(2 AS REAL)", result.Sql);
+        Assert.Contains("CAST(5 AS DECIMAL(38,18)) / CAST(2 AS DECIMAL(38,18))", result.Sql);
     }
 
     [Fact]

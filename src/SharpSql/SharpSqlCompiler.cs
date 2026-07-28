@@ -1133,9 +1133,9 @@ public sealed partial class SharpSqlCompiler
 
         return literal.Token.Value switch
         {
-            float value => value.ToString("R", CultureInfo.InvariantCulture),
-            double value => value.ToString("R", CultureInfo.InvariantCulture),
-            decimal value => value.ToString(CultureInfo.InvariantCulture),
+            float value => $"CAST({value.ToString("R", CultureInfo.InvariantCulture)} AS REAL)",
+            double value => $"CAST({value.ToString("R", CultureInfo.InvariantCulture)} AS FLOAT)",
+            decimal value => $"CAST({value.ToString(CultureInfo.InvariantCulture)} AS DECIMAL(38,18))",
             IFormattable value => value.ToString(null, CultureInfo.InvariantCulture),
             _ => literal.Token.ValueText
         };

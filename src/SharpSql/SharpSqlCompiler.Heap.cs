@@ -545,13 +545,16 @@ public sealed partial class SharpSqlCompiler
             }
         }
 
-        if (expression is AssignmentExpressionSyntax assignment && assignment.IsKind(SyntaxKind.SimpleAssignmentExpression))
+        if (expression is AssignmentExpressionSyntax assignment &&
+            (assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) || HeapAssignmentOperator(assignment.Kind()) is not null))
         {
             if (assignment.Left is MemberAccessExpressionSyntax fieldAccess &&
                 TryResolveHeapField(fieldAccess, scope, out var heapType, out var field))
             {
+                var receiver = EmitScalar(fieldAccess.Expression, scope);
+                var currentValue = $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE __object_id = {receiver})";
                 EmitVmExpression(assignment.Right, scope, context, value =>
-                    _sql.Line($"UPDATE {heapType.TableName} SET {field.SqlName} = {value} WHERE __object_id = {EmitScalar(fieldAccess.Expression, scope)};"));
+                    _sql.Line($"UPDATE {heapType.TableName} SET {field.SqlName} = {HeapAssignmentValue(assignment, field.Type, currentValue, value)} WHERE __object_id = {receiver};"));
                 return true;
             }
 
@@ -565,8 +568,9 @@ public sealed partial class SharpSqlCompiler
                     out var implicitMember,
                     out var implicitReceiver))
             {
+                var currentValue = $"(SELECT {implicitMember.SqlName} FROM {implicitType.TableName} WHERE __object_id = {implicitReceiver})";
                 EmitVmExpression(assignment.Right, scope, context, value =>
-                    _sql.Line($"UPDATE {implicitType.TableName} SET {implicitMember.SqlName} = {value} WHERE __object_id = {implicitReceiver};"));
+                    _sql.Line($"UPDATE {implicitType.TableName} SET {implicitMember.SqlName} = {HeapAssignmentValue(assignment, implicitMember.Type, currentValue, value)} WHERE __object_id = {implicitReceiver};"));
                 return true;
             }
 
@@ -587,6 +591,34 @@ public sealed partial class SharpSqlCompiler
         }
         return false;
     }
+
+    private static string HeapAssignmentValue(
+        AssignmentExpressionSyntax assignment,
+        CSharpType targetType,
+        string currentValue,
+        string value)
+    {
+        if (assignment.IsKind(SyntaxKind.SimpleAssignmentExpression))
+            return value;
+
+        var operation = HeapAssignmentOperator(assignment.Kind())!;
+        return targetType.IsString && operation == "+"
+            ? $"CONCAT({currentValue}, {value})"
+            : $"{currentValue} {operation} ({value})";
+    }
+
+    private static string? HeapAssignmentOperator(SyntaxKind kind) => kind switch
+    {
+        SyntaxKind.AddAssignmentExpression => "+",
+        SyntaxKind.SubtractAssignmentExpression => "-",
+        SyntaxKind.MultiplyAssignmentExpression => "*",
+        SyntaxKind.DivideAssignmentExpression => "/",
+        SyntaxKind.ModuloAssignmentExpression => "%",
+        SyntaxKind.AndAssignmentExpression => "&",
+        SyntaxKind.OrAssignmentExpression => "|",
+        SyntaxKind.ExclusiveOrAssignmentExpression => "^",
+        _ => null
+    };
 
     private void EmitListAdd(
         ExpressionSyntax receiver,

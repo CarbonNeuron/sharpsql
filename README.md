@@ -101,6 +101,21 @@ Console.WriteLine(result.Sql);
 
 See the runnable [examples](examples) and the detailed [compiler architecture](docs/architecture.md).
 
+## Differential compatibility corpus
+
+The files under [`examples/`](examples) are more than demos: Testcontainers executes every one as both real C# and transpiled SQL Server code, then compares their output. The corpus currently exercises:
+
+- Operator precedence, signed division and modulo, increment/decrement, and compound assignment
+- Integral widths, unsigned values, `float`, `double`, and `decimal` arithmetic
+- Null checks, nullable coalescing, conditionals, boolean formatting, and short-circuit evaluation
+- Unicode, apostrophe escaping, comment markers inside strings, characters, and embedded newlines
+- Nested `for`, `while`, and `do` loops with `break` and `continue`
+- Initialized/default arrays, indexed mutation, and `foreach`
+- List and dictionary mutation, clearing, removal, lookup, and case-sensitive string keys
+- Mutable class aliasing, constructors, instance methods, inlining, direct recursion, and mutual recursion
+
+Adding another `.cs` file to that directory automatically adds it to the parity suite.
+
 ## How method calls stay ephemeral
 
 SQL Server does not support temporary user-defined functions. SharpSql therefore chooses among three lowering strategies:
@@ -147,7 +162,7 @@ The long-term experiment is to discover how much idiomatic C# can execute faithf
 - Delegates, closures, iterators, and async-state-machine diagnostics
 - Exceptions and structured unwinding across VM frames
 - More of the base class library through explicit compiler intrinsics
-- A larger differential corpus covering more C# and SQL Server edge cases
+- Exact overflow, culture-sensitive formatting, and exception parity across the two runtimes
 
 ## Build and contribute
 
