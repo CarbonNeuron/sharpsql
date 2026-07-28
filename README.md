@@ -142,7 +142,7 @@ The fallback stores activation frames and typed slots in local temporary tables.
 
 ## Managed objects and collections
 
-References are represented by `BIGINT` object IDs. Each reachable class or record receives a typed local temporary table, while arrays, lists, and dictionaries use generic indexed runtime tables. Copying a class variable copies its ID, so aliases observe the same mutations.
+References are represented by `BIGINT` object IDs. Each reachable class or record receives a typed local temporary table. A shared object header holds identity, collection counts, and small intrinsic metadata; arrays, lists, and `Random` state reuse one indexed runtime table. Dictionaries add an entry table only when needed. Copying a class variable copies its ID, so aliases observe the same mutations.
 
 ```csharp
 Person ada = new Person("Ada", 36);

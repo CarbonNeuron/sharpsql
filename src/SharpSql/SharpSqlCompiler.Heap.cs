@@ -13,9 +13,7 @@ public sealed partial class SharpSqlCompiler
     private int _nextHeapTypeId;
 
     private const string HeapObjects = "#__sharpsql_objects";
-    private const string HeapLists = "#__sharpsql_lists";
-    private const string HeapListItems = "#__sharpsql_list_items";
-    private const string HeapDictionaries = "#__sharpsql_dictionaries";
+    private const string HeapIndexedItems = "#__sharpsql_indexed_items";
     private const string HeapDictionaryEntries = "#__sharpsql_dictionary_entries";
 
     private void PrepareHeapRuntime(CompilationUnitSyntax root)
@@ -130,27 +128,19 @@ public sealed partial class SharpSqlCompiler
         foreach (var type in _heapTypes.Values.Reverse())
             _sql.Line($"DROP TABLE IF EXISTS {type.TableName};");
         if (_usesDictionaries)
-        {
             _sql.Line($"DROP TABLE IF EXISTS {HeapDictionaryEntries};");
-            _sql.Line($"DROP TABLE IF EXISTS {HeapDictionaries};");
-        }
-        if (_usesLists)
-        {
-            _sql.Line($"DROP TABLE IF EXISTS {HeapListItems};");
-            _sql.Line($"DROP TABLE IF EXISTS {HeapLists};");
-        }
-        if (_usesRandom)
-        {
-            _sql.Line($"DROP TABLE IF EXISTS {HeapRandomState};");
-            _sql.Line($"DROP TABLE IF EXISTS {HeapRandoms};");
-        }
+        if (_usesLists || _usesRandom)
+            _sql.Line($"DROP TABLE IF EXISTS {HeapIndexedItems};");
         _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
 
         _sql.Line($"CREATE TABLE {HeapObjects} (");
         using (_sql.Indent())
         {
             _sql.Line("__id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
-            _sql.Line("__type_id INT NOT NULL");
+            _sql.Line("__type_id INT NOT NULL,");
+            _sql.Line("__count INT NULL,");
+            _sql.Line("__random_inext INT NULL,");
+            _sql.Line("__random_inextp INT NULL");
         }
         _sql.Line(");");
 
@@ -171,35 +161,31 @@ public sealed partial class SharpSqlCompiler
             _sql.Line(");");
         }
 
-        if (_usesLists)
-            EmitListTables();
+        if (_usesLists || _usesRandom)
+            EmitIndexedItemsTable();
         if (_usesDictionaries)
             EmitDictionaryTables();
-        if (_usesRandom)
-            EmitRandomTables();
         _sql.Line();
     }
 
-    private void EmitListTables()
+    private void EmitIndexedItemsTable()
     {
-        _sql.Line($"CREATE TABLE {HeapLists} (__object_id BIGINT NOT NULL PRIMARY KEY, __count INT NOT NULL);");
-        _sql.Line($"CREATE TABLE {HeapListItems} (");
+        _sql.Line($"CREATE TABLE {HeapIndexedItems} (");
         using (_sql.Indent())
         {
-            _sql.Line("__list_id BIGINT NOT NULL,");
+            _sql.Line("__owner_id BIGINT NOT NULL,");
             _sql.Line("__index INT NOT NULL,");
             _sql.Line("__value SQL_VARIANT NULL,");
             _sql.Line("__text_value NVARCHAR(MAX) NULL,");
             _sql.Line("__binary_value VARBINARY(MAX) NULL,");
             _sql.Line("__reference_value BIGINT NULL,");
-            _sql.Line("PRIMARY KEY (__list_id, __index)");
+            _sql.Line("PRIMARY KEY (__owner_id, __index)");
         }
         _sql.Line(");");
     }
 
     private void EmitDictionaryTables()
     {
-        _sql.Line($"CREATE TABLE {HeapDictionaries} (__object_id BIGINT NOT NULL PRIMARY KEY, __count INT NOT NULL);");
         _sql.Line($"CREATE TABLE {HeapDictionaryEntries} (");
         using (_sql.Indent())
         {
@@ -225,20 +211,9 @@ public sealed partial class SharpSqlCompiler
         foreach (var type in _heapTypes.Values.Reverse())
             _sql.Line($"DROP TABLE IF EXISTS {type.TableName};");
         if (_usesDictionaries)
-        {
             _sql.Line($"DROP TABLE IF EXISTS {HeapDictionaryEntries};");
-            _sql.Line($"DROP TABLE IF EXISTS {HeapDictionaries};");
-        }
-        if (_usesLists)
-        {
-            _sql.Line($"DROP TABLE IF EXISTS {HeapListItems};");
-            _sql.Line($"DROP TABLE IF EXISTS {HeapLists};");
-        }
-        if (_usesRandom)
-        {
-            _sql.Line($"DROP TABLE IF EXISTS {HeapRandomState};");
-            _sql.Line($"DROP TABLE IF EXISTS {HeapRandoms};");
-        }
+        if (_usesLists || _usesRandom)
+            _sql.Line($"DROP TABLE IF EXISTS {HeapIndexedItems};");
         _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
     }
 
@@ -311,7 +286,7 @@ public sealed partial class SharpSqlCompiler
             {
                 if (index == creation.Initializer.Expressions.Count)
                 {
-                    var array = AllocateHeapHeader(1003, HeapLists, "__count", captured.Count.ToString());
+                    var array = AllocateHeapHeader(1003, "__count", captured.Count.ToString());
                     for (var itemIndex = 0; itemIndex < captured.Count; itemIndex++)
                         InsertListItem(array, itemIndex.ToString(), elementType, ReadVmTemporary(captured[itemIndex]));
                     continuation(array);
@@ -334,7 +309,7 @@ public sealed partial class SharpSqlCompiler
             var sizeTemporary = _names.Allocate("_array_size");
             var indexTemporary = _names.Allocate("_array_index");
             _sql.Line($"DECLARE {sizeTemporary} INT = {size};");
-            var array = AllocateHeapHeader(1003, HeapLists, "__count", sizeTemporary);
+            var array = AllocateHeapHeader(1003, "__count", sizeTemporary);
             _sql.Line($"DECLARE {indexTemporary} INT = 0;");
             _sql.Line($"WHILE {indexTemporary} < {sizeTemporary}");
             _sql.Line("BEGIN");
@@ -460,11 +435,11 @@ public sealed partial class SharpSqlCompiler
 
         void Allocate()
         {
-            var listSql = AllocateHeapHeader(1001, HeapLists, "__count", "0");
+            var listSql = AllocateHeapHeader(1001, "__count", "0");
             for (var index = 0; index < captured.Count; index++)
                 InsertListItem(listSql, index.ToString(), elementType, ReadVmTemporary(captured[index]));
             if (captured.Count > 0)
-                _sql.Line($"UPDATE {HeapLists} SET __count = {captured.Count} WHERE __object_id = {listSql};");
+                _sql.Line($"UPDATE {HeapObjects} SET __count = {captured.Count} WHERE __id = {listSql};");
             continuation(listSql);
         }
     }
@@ -478,16 +453,15 @@ public sealed partial class SharpSqlCompiler
     {
         if (creation.Initializer is { Expressions.Count: > 0 })
             AddDiagnostic("SS6005", "Dictionary collection initializers are not supported yet; use Add calls.", creation.Initializer);
-        continuation(AllocateHeapHeader(1002, HeapDictionaries, "__count", "0"));
+        continuation(AllocateHeapHeader(1002, "__count", "0"));
     }
 
-    private string AllocateHeapHeader(int typeId, string table, string column, string value)
+    private string AllocateHeapHeader(int typeId, string column, string value)
     {
         var objectSql = _names.Allocate("_object");
         _sql.Line($"DECLARE {objectSql} BIGINT;");
-        _sql.Line($"INSERT INTO {HeapObjects} (__type_id) VALUES ({typeId});");
+        _sql.Line($"INSERT INTO {HeapObjects} (__type_id, {column}) VALUES ({typeId}, {value});");
         _sql.Line($"SET {objectSql} = CONVERT(BIGINT, SCOPE_IDENTITY());");
-        _sql.Line($"INSERT INTO {table} (__object_id, {column}) VALUES ({objectSql}, {value});");
         return objectSql;
     }
 
@@ -520,14 +494,14 @@ public sealed partial class SharpSqlCompiler
                 var receiver = EmitScalar(collectionMember.Expression, scope);
                 if (IsListType(receiverType.Name))
                 {
-                    _sql.Line($"DELETE FROM {HeapListItems} WHERE __list_id = {receiver};");
-                    _sql.Line($"UPDATE {HeapLists} SET __count = 0 WHERE __object_id = {receiver};");
+                    _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE __owner_id = {receiver};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE __id = {receiver};");
                     return true;
                 }
                 if (IsDictionaryType(receiverType.Name))
                 {
                     _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver};");
-                    _sql.Line($"UPDATE {HeapDictionaries} SET __count = 0 WHERE __object_id = {receiver};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE __id = {receiver};");
                     return true;
                 }
             }
@@ -538,9 +512,9 @@ public sealed partial class SharpSqlCompiler
                 {
                     var receiver = EmitScalar(collectionMember.Expression, scope);
                     _sql.Line($"IF {index} < 0 OR {index} >= {SequenceCountSql(receiver)} THROW 51002, 'List index was out of range.', 1;");
-                    _sql.Line($"DELETE FROM {HeapListItems} WHERE __list_id = {receiver} AND __index = {index};");
-                    _sql.Line($"UPDATE {HeapListItems} SET __index = __index - 1 WHERE __list_id = {receiver} AND __index > {index};");
-                    _sql.Line($"UPDATE {HeapLists} SET __count = __count - 1 WHERE __object_id = {receiver};");
+                    _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE __owner_id = {receiver} AND __index = {index};");
+                    _sql.Line($"UPDATE {HeapIndexedItems} SET __index = __index - 1 WHERE __owner_id = {receiver} AND __index > {index};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE __id = {receiver};");
                 });
                 return true;
             }
@@ -557,7 +531,7 @@ public sealed partial class SharpSqlCompiler
                     using (_sql.Indent())
                     {
                         _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver} AND {predicate};");
-                        _sql.Line($"UPDATE {HeapDictionaries} SET __count = __count - 1 WHERE __object_id = {receiver};");
+                        _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE __id = {receiver};");
                     }
                     _sql.Line("END;");
                 });
@@ -656,9 +630,9 @@ public sealed partial class SharpSqlCompiler
         EmitVmExpression(arguments[0].Expression, scope, context, value =>
         {
             var list = EmitScalar(receiver, scope);
-            var index = $"(SELECT __count FROM {HeapLists} WHERE __object_id = {list})";
+            var index = $"(SELECT __count FROM {HeapObjects} WHERE __id = {list})";
             InsertListItem(list, index, elementType, value);
-            _sql.Line($"UPDATE {HeapLists} SET __count = __count + 1 WHERE __object_id = {list};");
+            _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE __id = {list};");
         });
     }
 
@@ -675,12 +649,12 @@ public sealed partial class SharpSqlCompiler
             EmitVmExpression(valueExpression, scope, context, value =>
             {
                 var list = EmitScalar(element.Expression, scope);
-                _sql.Line($"UPDATE {HeapListItems} SET {CollectionValueColumn(elementType, false)} = {CollectionStoredValue(elementType, value)} WHERE __list_id = {list} AND __index = {index};");
+                _sql.Line($"UPDATE {HeapIndexedItems} SET {CollectionValueColumn(elementType, false)} = {CollectionStoredValue(elementType, value)} WHERE __owner_id = {list} AND __index = {index};");
             }));
     }
 
     private void InsertListItem(string list, string index, CSharpType type, string value) =>
-        _sql.Line($"INSERT INTO {HeapListItems} (__list_id, __index, {CollectionValueColumn(type, false)}) VALUES ({list}, {index}, {CollectionStoredValue(type, value)});");
+        _sql.Line($"INSERT INTO {HeapIndexedItems} (__owner_id, __index, {CollectionValueColumn(type, false)}) VALUES ({list}, {index}, {CollectionStoredValue(type, value)});");
 
     private void EmitDictionaryAdd(
         ExpressionSyntax receiver,
@@ -705,7 +679,7 @@ public sealed partial class SharpSqlCompiler
                 var savedKey = ReadVmTemporary(keyStore);
                 _sql.Line($"IF EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE __dictionary_id = {dictionary} AND {DictionaryKeyPredicate(types[0], savedKey)}) THROW 51001, 'Duplicate dictionary key.', 1;");
                 InsertDictionaryEntry(dictionary, types[0], savedKey, types[1], value);
-                _sql.Line($"UPDATE {HeapDictionaries} SET __count = __count + 1 WHERE __object_id = {dictionary};");
+                _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE __id = {dictionary};");
             });
         });
     }
@@ -735,7 +709,7 @@ public sealed partial class SharpSqlCompiler
                 using (_sql.Indent())
                 {
                     InsertDictionaryEntry(dictionary, types[0], savedKey, types[1], value);
-                    _sql.Line($"UPDATE {HeapDictionaries} SET __count = __count + 1 WHERE __object_id = {dictionary};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE __id = {dictionary};");
                 }
                 _sql.Line("END;");
             });
@@ -753,12 +727,12 @@ public sealed partial class SharpSqlCompiler
         {
             if ((IsListType(receiverType.Name) && member.Name.Identifier.ValueText == "Count") ||
                 (IsArrayType(receiverType.Name) && member.Name.Identifier.ValueText == "Length"))
-                return EmittedExpression.Primary($"(SELECT __count FROM {HeapLists} WHERE __object_id = {receiver})");
+                return EmittedExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE __id = {receiver})");
         }
         else if (IsDictionaryType(receiverType.Name))
         {
             if (member.Name.Identifier.ValueText == "Count")
-                return EmittedExpression.Primary($"(SELECT __count FROM {HeapDictionaries} WHERE __object_id = {receiver})");
+                return EmittedExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE __id = {receiver})");
         }
         else if (TryResolveHeapField(member, scope, out var type, out var field))
         {
@@ -809,7 +783,7 @@ public sealed partial class SharpSqlCompiler
                 var itemType = SequenceElementType(receiverType.Name);
                 var list = EmitScalar(member.Expression, scope);
                 var value = EmitScalar(invocation.ArgumentList.Arguments[0].Expression, scope);
-                expression = EmittedExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapListItems} WHERE __list_id = {list} AND {CollectionValuePredicate(itemType, value, false)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                expression = EmittedExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapIndexedItems} WHERE __owner_id = {list} AND {CollectionValuePredicate(itemType, value, false)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
                 return true;
             }
             if (IsDictionaryType(receiverType.Name) && member.Name.Identifier.ValueText == "ContainsValue" &&
@@ -1006,10 +980,10 @@ public sealed partial class SharpSqlCompiler
         : GenericArguments(name)[0];
 
     private static string SequenceCountSql(string collection) =>
-        $"(SELECT __count FROM {HeapLists} WHERE __object_id = {collection})";
+        $"(SELECT __count FROM {HeapObjects} WHERE __id = {collection})";
 
     private static string SequenceElementSql(string collection, string index, CSharpType itemType) =>
-        $"(SELECT {CollectionReadValue(itemType, false)} FROM {HeapListItems} WHERE __list_id = {collection} AND __index = {index})";
+        $"(SELECT {CollectionReadValue(itemType, false)} FROM {HeapIndexedItems} WHERE __owner_id = {collection} AND __index = {index})";
 
     private static bool IsDictionaryType(string name) =>
         name.StartsWith("Dictionary<", StringComparison.Ordinal) ||

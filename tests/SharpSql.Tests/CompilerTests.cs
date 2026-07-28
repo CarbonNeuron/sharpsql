@@ -304,7 +304,7 @@ public sealed class CompilerTests
         var result = Compile(source);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
-        Assert.Contains("CREATE TABLE #__sharpsql_list_items", result.Sql);
+        Assert.Contains("CREATE TABLE #__sharpsql_indexed_items", result.Sql);
         Assert.Contains("__reference_value BIGINT", result.Sql);
         Assert.Contains("CREATE TABLE #__sharpsql_dictionary_entries", result.Sql);
         Assert.Contains("__key_text COLLATE Latin1_General_100_BIN2", result.Sql);
@@ -363,15 +363,53 @@ public sealed class CompilerTests
         var result = Compile(source);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
-        Assert.Contains("CREATE TABLE #__sharpsql_randoms", result.Sql);
-        Assert.Contains("CREATE TABLE #__sharpsql_random_state", result.Sql);
+        Assert.Contains("CREATE TABLE #__sharpsql_objects", result.Sql);
+        Assert.Contains("__random_inext INT NULL", result.Sql);
+        Assert.Contains("CREATE TABLE #__sharpsql_indexed_items", result.Sql);
         Assert.Contains("DECLARE @_random_seed INT = 12345;", result.Sql);
         Assert.Contains("Random maximum must be non-negative.", result.Sql);
         Assert.Contains("Random minimum must not exceed maximum.", result.Sql);
         Assert.Contains("DECLARE @_random_double FLOAT", result.Sql);
         Assert.Contains("stack-machine body: Roll", result.Sql);
-        Assert.Contains("DROP TABLE IF EXISTS #__sharpsql_random_state;", result.Sql);
+        Assert.Contains("DROP TABLE IF EXISTS #__sharpsql_indexed_items;", result.Sql);
+        Assert.DoesNotContain("#__sharpsql_randoms", result.Sql);
+        Assert.DoesNotContain("#__sharpsql_random_state", result.Sql);
         Assert.DoesNotContain("RAND(", result.Sql);
+    }
+
+    [Fact]
+    public void ReusesHeapTablesAcrossObjectsListsAndRandomState()
+    {
+        const string source = """
+            var people = new List<Person>();
+            var random = new Random();
+            var names = new List<string> { "Bob", "Jane", "Billy", "James", "Saul" };
+
+            for (int i = 0; i < 5; i++)
+                people.Add(new Person(names[i], random.Next(1, 100)));
+
+            foreach (var person in people)
+                Console.WriteLine($"{person.Name} - {person.Age}");
+
+            var total = 0;
+            foreach (var person in people)
+                total += person.Age;
+            Console.WriteLine($"sum = {total}");
+
+            record Person(string Name, int Age);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Equal(3, Count(result.Sql, "CREATE TABLE #__sharpsql_"));
+        Assert.Contains("CREATE TABLE #__sharpsql_objects", result.Sql);
+        Assert.Contains("CREATE TABLE #__sharpsql_type_1", result.Sql);
+        Assert.Contains("CREATE TABLE #__sharpsql_indexed_items", result.Sql);
+        Assert.DoesNotContain("#__sharpsql_lists", result.Sql);
+        Assert.DoesNotContain("#__sharpsql_list_items", result.Sql);
+        Assert.DoesNotContain("#__sharpsql_randoms", result.Sql);
+        Assert.DoesNotContain("#__sharpsql_random_state", result.Sql);
     }
 
     [Fact]
@@ -413,7 +451,7 @@ public sealed class CompilerTests
         var result = Compile(source);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
-        Assert.Contains("VALUES (1003)", result.Sql);
+        Assert.Contains("(__type_id, __count) VALUES (1003, 3)", result.Sql);
         Assert.Contains("foreach_condition", result.Sql);
         Assert.Contains("SET @value = (SELECT CONVERT(INT, __value)", result.Sql);
         Assert.Contains("SET @total = @total + @value;", result.Sql);

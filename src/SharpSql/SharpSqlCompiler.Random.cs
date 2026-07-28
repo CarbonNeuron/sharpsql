@@ -5,32 +5,9 @@ namespace SharpSql;
 
 public sealed partial class SharpSqlCompiler
 {
-    private const string HeapRandoms = "#__sharpsql_randoms";
-    private const string HeapRandomState = "#__sharpsql_random_state";
     private const int RandomMax = int.MaxValue;
 
     private bool _usesRandom;
-
-    private void EmitRandomTables()
-    {
-        _sql.Line($"CREATE TABLE {HeapRandoms} (");
-        using (_sql.Indent())
-        {
-            _sql.Line("__object_id BIGINT NOT NULL PRIMARY KEY,");
-            _sql.Line("__inext INT NOT NULL,");
-            _sql.Line("__inextp INT NOT NULL");
-        }
-        _sql.Line(");");
-        _sql.Line($"CREATE TABLE {HeapRandomState} (");
-        using (_sql.Indent())
-        {
-            _sql.Line("__random_id BIGINT NOT NULL,");
-            _sql.Line("__index INT NOT NULL,");
-            _sql.Line("__value INT NOT NULL,");
-            _sql.Line("PRIMARY KEY (__random_id, __index)");
-        }
-        _sql.Line(");");
-    }
 
     private bool TryEmitRandomExpression(
         ExpressionSyntax expression,
@@ -102,9 +79,8 @@ public sealed partial class SharpSqlCompiler
         var stateValue = _names.Allocate("_random_state_value");
 
         _sql.Line($"DECLARE {random} BIGINT;");
-        _sql.Line($"INSERT INTO {HeapObjects} (__type_id) VALUES (1004);");
+        _sql.Line($"INSERT INTO {HeapObjects} (__type_id, __random_inext, __random_inextp) VALUES (1004, 0, 21);");
         _sql.Line($"SET {random} = CONVERT(BIGINT, SCOPE_IDENTITY());");
-        _sql.Line($"INSERT INTO {HeapRandoms} (__object_id, __inext, __inextp) VALUES ({random}, 0, 21);");
         _sql.Line($"DECLARE {seedVariable} INT = {seed};");
         _sql.Line($"DECLARE {subtraction} BIGINT = CASE WHEN {seedVariable} = -2147483648 THEN {RandomMax} WHEN {seedVariable} < 0 THEN -CONVERT(BIGINT, {seedVariable}) ELSE {seedVariable} END;");
         _sql.Line($"DECLARE {mj} BIGINT = 161803398 - {subtraction};");
@@ -114,11 +90,11 @@ public sealed partial class SharpSqlCompiler
         _sql.Line("BEGIN");
         using (_sql.Indent())
         {
-            _sql.Line($"INSERT INTO {HeapRandomState} (__random_id, __index, __value) VALUES ({random}, {index}, 0);");
+            _sql.Line($"INSERT INTO {HeapIndexedItems} (__owner_id, __index, __value) VALUES ({random}, {index}, CONVERT(SQL_VARIANT, 0));");
             _sql.Line($"SET {index} = {index} + 1;");
         }
         _sql.Line("END;");
-        _sql.Line($"UPDATE {HeapRandomState} SET __value = {mj} WHERE __random_id = {random} AND __index = 55;");
+        _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {mj})) WHERE __owner_id = {random} AND __index = 55;");
         _sql.Line($"DECLARE {shuffleIndex} INT = 0;");
         _sql.Line($"SET {index} = 1;");
         _sql.Line($"WHILE {index} < 55");
@@ -127,11 +103,11 @@ public sealed partial class SharpSqlCompiler
         {
             _sql.Line($"SET {shuffleIndex} = {shuffleIndex} + 21;");
             _sql.Line($"IF {shuffleIndex} >= 55 SET {shuffleIndex} = {shuffleIndex} - 55;");
-            _sql.Line($"UPDATE {HeapRandomState} SET __value = {mk} WHERE __random_id = {random} AND __index = {shuffleIndex};");
+            _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {mk})) WHERE __owner_id = {random} AND __index = {shuffleIndex};");
             _sql.Line($"SET {mk} = {mj} - {mk};");
             EmitInt32Wrap(mk);
             _sql.Line($"IF {mk} < 0 SET {mk} = {mk} + {RandomMax};");
-            _sql.Line($"SET {mj} = (SELECT __value FROM {HeapRandomState} WHERE __random_id = {random} AND __index = {shuffleIndex});");
+            _sql.Line($"SET {mj} = CONVERT(INT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = {shuffleIndex}));");
             _sql.Line($"SET {index} = {index} + 1;");
         }
         _sql.Line("END;");
@@ -149,10 +125,10 @@ public sealed partial class SharpSqlCompiler
             {
                 _sql.Line($"SET {offsetIndex} = {index} + 30;");
                 _sql.Line($"IF {offsetIndex} >= 55 SET {offsetIndex} = {offsetIndex} - 55;");
-                _sql.Line($"SET {stateValue} = CONVERT(BIGINT, (SELECT __value FROM {HeapRandomState} WHERE __random_id = {random} AND __index = {index})) - CONVERT(BIGINT, (SELECT __value FROM {HeapRandomState} WHERE __random_id = {random} AND __index = 1 + {offsetIndex}));");
+                _sql.Line($"SET {stateValue} = CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = {index})) - CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = 1 + {offsetIndex}));");
                 EmitInt32Wrap(stateValue);
                 _sql.Line($"IF {stateValue} < 0 SET {stateValue} = {stateValue} + {RandomMax};");
-                _sql.Line($"UPDATE {HeapRandomState} SET __value = {stateValue} WHERE __random_id = {random} AND __index = {index};");
+                _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {stateValue})) WHERE __owner_id = {random} AND __index = {index};");
                 _sql.Line($"SET {index} = {index} + 1;");
             }
             _sql.Line("END;");
@@ -259,16 +235,16 @@ public sealed partial class SharpSqlCompiler
         var next = _names.Allocate("_random_inext");
         var nextPartner = _names.Allocate("_random_inextp");
         var sample = _names.Allocate("_random_sample");
-        _sql.Line($"DECLARE {next} INT = (SELECT __inext FROM {HeapRandoms} WHERE __object_id = {random}) + 1;");
+        _sql.Line($"DECLARE {next} INT = (SELECT __random_inext FROM {HeapObjects} WHERE __id = {random}) + 1;");
         _sql.Line($"IF {next} >= 56 SET {next} = 1;");
-        _sql.Line($"DECLARE {nextPartner} INT = (SELECT __inextp FROM {HeapRandoms} WHERE __object_id = {random}) + 1;");
+        _sql.Line($"DECLARE {nextPartner} INT = (SELECT __random_inextp FROM {HeapObjects} WHERE __id = {random}) + 1;");
         _sql.Line($"IF {nextPartner} >= 56 SET {nextPartner} = 1;");
-        _sql.Line($"DECLARE {sample} BIGINT = CONVERT(BIGINT, (SELECT __value FROM {HeapRandomState} WHERE __random_id = {random} AND __index = {next})) - CONVERT(BIGINT, (SELECT __value FROM {HeapRandomState} WHERE __random_id = {random} AND __index = {nextPartner}));");
+        _sql.Line($"DECLARE {sample} BIGINT = CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = {next})) - CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = {nextPartner}));");
         EmitInt32Wrap(sample);
         _sql.Line($"IF {sample} = {RandomMax} SET {sample} = {sample} - 1;");
         _sql.Line($"IF {sample} < 0 SET {sample} = {sample} + {RandomMax};");
-        _sql.Line($"UPDATE {HeapRandomState} SET __value = {sample} WHERE __random_id = {random} AND __index = {next};");
-        _sql.Line($"UPDATE {HeapRandoms} SET __inext = {next}, __inextp = {nextPartner} WHERE __object_id = {random};");
+        _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {sample})) WHERE __owner_id = {random} AND __index = {next};");
+        _sql.Line($"UPDATE {HeapObjects} SET __random_inext = {next}, __random_inextp = {nextPartner} WHERE __id = {random};");
         return sample;
     }
 
