@@ -332,6 +332,22 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void ConvertsSingleInterpolationHolesWithoutUnaryConcat()
+    {
+        const string source = """
+            int value = 42;
+            string text = $"{value}";
+            Console.WriteLine(text);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DECLARE @text NVARCHAR(MAX) = CONCAT(N'', @value);", result.Sql);
+        Assert.DoesNotContain("CONCAT(@value)", result.Sql);
+    }
+
+    [Fact]
     public void HeapReferencesSurviveRecursiveVmFrames()
     {
         const string source = """

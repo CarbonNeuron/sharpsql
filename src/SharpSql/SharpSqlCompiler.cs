@@ -935,7 +935,13 @@ public sealed partial class SharpSqlCompiler
             InterpolationSyntax interpolation => EmitInterpolation(interpolation, scope, substitutions),
             _ => "N''"
         }).ToArray();
-        return EmittedExpression.Primary(parts.Length == 0 ? "N''" : $"CONCAT({string.Join(", ", parts)})");
+        return parts.Length switch
+        {
+            0 => EmittedExpression.Primary("N''"),
+            1 when interpolated.Contents[0] is InterpolatedStringTextSyntax => EmittedExpression.Primary(parts[0]),
+            1 => EmittedExpression.Primary($"CONCAT(N'', {parts[0]})"),
+            _ => EmittedExpression.Primary($"CONCAT({string.Join(", ", parts)})")
+        };
     }
 
     private string EmitInterpolation(
