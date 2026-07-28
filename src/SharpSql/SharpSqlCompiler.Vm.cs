@@ -26,7 +26,7 @@ public sealed partial class SharpSqlCompiler
     private void PrepareVmMethods()
     {
         var selected = _methods.Values
-            .Where(method => _recursiveMethods.Contains(method.Name) || ExceedsInlineBudget(method))
+            .Where(method => _recursiveMethods.Contains(method.Name) || ExceedsInlineBudget(method) || MethodUsesRandom(method))
             .Select(method => method.Name)
             .ToHashSet(StringComparer.Ordinal);
 

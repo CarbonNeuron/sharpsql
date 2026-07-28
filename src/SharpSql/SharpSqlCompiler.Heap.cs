@@ -34,6 +34,8 @@ public sealed partial class SharpSqlCompiler
                 _usesLists = true;
             else if (IsDictionaryType(name))
                 _usesDictionaries = true;
+            else if (IsRandomType(name))
+                _usesRandom = true;
             else if (!_heapTypes.ContainsKey(name))
                 continue;
             _heapRuntimeNeeded = true;
@@ -137,6 +139,11 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"DROP TABLE IF EXISTS {HeapListItems};");
             _sql.Line($"DROP TABLE IF EXISTS {HeapLists};");
         }
+        if (_usesRandom)
+        {
+            _sql.Line($"DROP TABLE IF EXISTS {HeapRandomState};");
+            _sql.Line($"DROP TABLE IF EXISTS {HeapRandoms};");
+        }
         _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
 
         _sql.Line($"CREATE TABLE {HeapObjects} (");
@@ -168,6 +175,8 @@ public sealed partial class SharpSqlCompiler
             EmitListTables();
         if (_usesDictionaries)
             EmitDictionaryTables();
+        if (_usesRandom)
+            EmitRandomTables();
         _sql.Line();
     }
 
@@ -225,6 +234,11 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"DROP TABLE IF EXISTS {HeapListItems};");
             _sql.Line($"DROP TABLE IF EXISTS {HeapLists};");
         }
+        if (_usesRandom)
+        {
+            _sql.Line($"DROP TABLE IF EXISTS {HeapRandomState};");
+            _sql.Line($"DROP TABLE IF EXISTS {HeapRandoms};");
+        }
         _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
     }
 
@@ -233,13 +247,14 @@ public sealed partial class SharpSqlCompiler
 
     private bool ContainsHeapEffect(ExpressionSyntax expression) =>
         expression.DescendantNodesAndSelf().OfType<ObjectCreationExpressionSyntax>().Any(IsHeapCreation) ||
+        expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsRandomInvocation) ||
         expression.DescendantNodesAndSelf().OfType<ArrayCreationExpressionSyntax>()
             .Any(creation => creation.Type.ElementType.ToString() != "byte");
 
     private bool IsHeapCreation(ObjectCreationExpressionSyntax creation)
     {
         var name = NormalizeTypeName(creation.Type.ToString());
-        return _heapTypes.ContainsKey(name) || IsListType(name) || IsDictionaryType(name);
+        return _heapTypes.ContainsKey(name) || IsListType(name) || IsDictionaryType(name) || IsRandomType(name);
     }
 
     private bool TryEmitHeapExpression(
@@ -248,6 +263,9 @@ public sealed partial class SharpSqlCompiler
         VmMethod? context,
         Action<string> continuation)
     {
+        if (TryEmitRandomExpression(expression, scope, context, continuation))
+            return true;
+
         if (expression is ArrayCreationExpressionSyntax arrayCreation &&
             arrayCreation.Type.ElementType.ToString() != "byte")
         {
@@ -263,6 +281,8 @@ public sealed partial class SharpSqlCompiler
             EmitNewList(creation, typeName, scope, context, continuation);
         else if (IsDictionaryType(typeName))
             EmitNewDictionary(creation, typeName, scope, context, continuation);
+        else if (IsRandomType(typeName))
+            EmitNewRandom(creation, scope, context, continuation);
         else
             EmitNewObject(creation, _heapTypes[typeName], scope, context, continuation);
         return true;

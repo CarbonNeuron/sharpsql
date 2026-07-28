@@ -92,6 +92,8 @@ Arrays and `List<T>` share an indexed item runtime with separate scalar, string,
 
 References are normal VM scalar values, so callers spill object, list, and dictionary IDs into activation slots just like integers. There is no per-object garbage collection: scripts are ephemeral, and dropping the heap tables reclaims the entire heap at once.
 
+`Random` instances are also heap references. Their cursor pair and 56-element state arrays live in dedicated temporary tables. Seeded construction implements .NET's compatibility subtractive PRNG, allowing `Next()`, `Next(max)`, `Next(min,max)`, and `NextDouble()` to advance independently per object and reproduce seeded .NET sequences. Parameterless construction supplies a SQL-generated seed to that same state machine.
+
 Current heap lowering deliberately diagnoses constructors containing behavior beyond direct field assignments. The next object-runtime layers are constructor-body lowering, inheritance and virtual dispatch, structs and boxing, delegates/closures, exception unwinding, and then `IEnumerable<T>`/`IQueryable<T>` LINQ lowering.
 
 ## Comment preservation

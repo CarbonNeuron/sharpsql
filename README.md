@@ -95,6 +95,7 @@ Console.WriteLine(result.Sql);
 - Classes and records with reference identity, typed fields, object initializers, mapped constructors, and instance methods
 - One-dimensional arrays and `List<T>` with indexing, mutation, iteration, and common operations
 - `Dictionary<TKey,TValue>` with indexing and common mutation/query operations
+- Stateful `Random` instances with `Next()`, bounded/ranged `Next(...)`, and `NextDouble()`
 - Roslyn semantic typing for `var`, generics, members, and expression results
 - C# line, block, and documentation comments preserved near their generated SQL
 - Source-positioned diagnostics for unsupported syntax
@@ -113,8 +114,21 @@ The files under [`examples/`](examples) are more than demos: Testcontainers exec
 - Initialized/default arrays, indexed mutation, and `foreach`
 - List and dictionary mutation, clearing, removal, lookup, and case-sensitive string keys
 - Mutable class aliasing, constructors, instance methods, inlining, direct recursion, and mutual recursion
+- Independent seeded/unseeded random instances, bounded ranges, and deterministic seeded sequences
 
 Adding another `.cs` file to that directory automatically adds it to the parity suite.
+
+### Random numbers
+
+`Random` is an ephemeral heap object, so each instance advances independently and can be passed around like any other reference:
+
+```csharp
+Random random = new Random(12345);
+int die = random.Next(1, 7);
+double fraction = random.NextDouble();
+```
+
+For `new Random(seed)`, SharpSql implements the same compatibility PRNG used by .NET 10, producing the same sequence in C# and SQL. Parameterless construction uses a SQL-generated seed; it has the same range and state behavior, but—as with parameterless `Random` in C#—its exact sequence is intentionally nondeterministic. `NextInt64`, `NextSingle`, and `NextBytes` are not implemented yet.
 
 ## How method calls stay ephemeral
 

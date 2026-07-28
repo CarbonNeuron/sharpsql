@@ -348,6 +348,33 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void LowersRandomInstancesToIndependentEphemeralState()
+    {
+        const string source = """
+            Random random = new Random(12345);
+            int value = random.Next();
+            int bounded = random.Next(100);
+            int ranged = random.Next(-10, 11);
+            double fraction = random.NextDouble();
+            int roll = Roll(random);
+            int Roll(Random source) => source.Next(1, 7);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("CREATE TABLE #__sharpsql_randoms", result.Sql);
+        Assert.Contains("CREATE TABLE #__sharpsql_random_state", result.Sql);
+        Assert.Contains("DECLARE @_random_seed INT = 12345;", result.Sql);
+        Assert.Contains("Random maximum must be non-negative.", result.Sql);
+        Assert.Contains("Random minimum must not exceed maximum.", result.Sql);
+        Assert.Contains("DECLARE @_random_double FLOAT", result.Sql);
+        Assert.Contains("stack-machine body: Roll", result.Sql);
+        Assert.Contains("DROP TABLE IF EXISTS #__sharpsql_random_state;", result.Sql);
+        Assert.DoesNotContain("RAND(", result.Sql);
+    }
+
+    [Fact]
     public void HeapReferencesSurviveRecursiveVmFrames()
     {
         const string source = """

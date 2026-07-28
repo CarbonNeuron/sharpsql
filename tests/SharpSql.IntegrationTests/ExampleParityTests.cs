@@ -118,6 +118,7 @@ public sealed class ExampleParityTests
             "Transpilation failed:" + Environment.NewLine + string.Join(Environment.NewLine, transpileResult.Diagnostics));
 
         using var output = new StringWriter(CultureInfo.InvariantCulture);
+        var sqlErrors = new List<string>();
         await using var connection = new SqlConnection(connectionString)
         {
             FireInfoMessageEventOnUserErrors = true
@@ -125,7 +126,12 @@ public sealed class ExampleParityTests
         connection.InfoMessage += (_, args) =>
         {
             foreach (SqlError error in args.Errors)
-                output.WriteLine(error.Message);
+            {
+                if (error.Class == 0)
+                    output.WriteLine(error.Message);
+                else
+                    sqlErrors.Add($"SQL error {error.Number} at line {error.LineNumber}: {error.Message}");
+            }
         };
         await connection.OpenAsync(cancellationToken);
 
@@ -133,6 +139,7 @@ public sealed class ExampleParityTests
         command.CommandText = transpileResult.Sql;
         command.CommandTimeout = 60;
         await command.ExecuteNonQueryAsync(cancellationToken);
+        Assert.Empty(sqlErrors);
         return NormalizeOutput(output.ToString());
     }
 
