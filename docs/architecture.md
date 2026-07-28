@@ -98,4 +98,10 @@ Current heap lowering deliberately diagnoses constructors containing behavior be
 
 Comments are read from Roslyn trivia rather than by scanning source text, so comment markers inside string literals are never mistaken for comments. Leading and trailing comments are attached to their generated statement; comments inside a rewritten expression are emitted immediately before its containing SQL statement. Method, type, and member documentation follows the inlined/stack-machine body or temporary heap table it describes. Each source comment is tracked by source position and emitted once, with any otherwise unattached comment retained near the end of the batch.
 
+## Differential integration tests
+
+Every source file under `examples/` is executable specification. The integration suite compiles each file with Roslyn and captures its real .NET console output, then transpiles the same source, executes the batch against a SQL Server 2022 container, and captures `PRINT` messages through `SqlConnection.InfoMessage`. Output is compared ordinally after normalizing line endings.
+
+Testcontainers owns container startup, readiness, random host-port allocation, and cleanup. The suite shares one SQL Server instance for the example corpus but opens a fresh connection for every batch, preserving local-temporary-table isolation. Adding an example automatically adds it to the parity suite.
+
 SQL Server's scalar-UDF inlining feature does not solve object lifetime: it optimizes eligible schema UDFs after they have been created. Persisted UDF emission should therefore remain an opt-in deployment mode, never the script default.

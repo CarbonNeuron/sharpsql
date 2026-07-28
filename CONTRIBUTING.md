@@ -4,7 +4,7 @@ SharpSql is an experimental compiler, and focused contributions are welcome. Bug
 
 ## Development setup
 
-You need the .NET 10 SDK. SQL Server is optional for most changes; the compiler test suite does not require a database.
+You need the .NET 10 SDK and Docker. The integration suite uses Testcontainers to manage SQL Server 2022; no manually configured database or connection string is required.
 
 ```bash
 dotnet restore SharpSql.slnx
@@ -19,6 +19,8 @@ dotnet run --project src/SharpSql.Cli -- examples/inlining.cs
 ```
 
 Before opening a pull request, run `dotnet format SharpSql.slnx --verify-no-changes` and the Release test suite.
+
+Every `examples/*.cs` file is a differential test input. The integration suite compiles and executes it as C#, transpiles and executes it in SQL Server, and compares the captured output. Examples therefore need to be valid in both runtimes.
 
 ## Adding language support
 

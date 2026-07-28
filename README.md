@@ -48,7 +48,9 @@ PRINT CONCAT(N'result=', @result);
 Requirements:
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- SQL Server 2016 or newer to execute generated batches; no database is needed to build or test the compiler
+- [Docker](https://docs.docker.com/get-docker/) for the SQL Server parity tests
+
+No preinstalled database is required. Testcontainers starts and removes SQL Server automatically.
 
 From the repository root:
 
@@ -120,7 +122,17 @@ Dictionary<string, Person> byName = new Dictionary<string, Person>();
 byName.Add("ada", people[0]);
 byName["ada"].Age = 37;
 
-record Person(string Name, int Age);
+class Person
+{
+    public Person(string name, int age)
+    {
+        Name = name;
+        Age = age;
+    }
+
+    public string Name { get; set; }
+    public int Age { get; set; }
+}
 ```
 
 The heap is allocation-only for the life of the script. Dropping its temporary tables reclaims the whole heap at once.
@@ -135,7 +147,7 @@ The long-term experiment is to discover how much idiomatic C# can execute faithf
 - Delegates, closures, iterators, and async-state-machine diagnostics
 - Exceptions and structured unwinding across VM frames
 - More of the base class library through explicit compiler intrinsics
-- Differential tests that compare C# execution with generated SQL Server results
+- A larger differential corpus covering more C# and SQL Server edge cases
 
 ## Build and contribute
 
@@ -143,6 +155,12 @@ The long-term experiment is to discover how much idiomatic C# can execute faithf
 dotnet restore SharpSql.slnx
 dotnet build SharpSql.slnx --configuration Release --no-restore
 dotnet test SharpSql.slnx --configuration Release --no-build
+```
+
+The full test command starts SQL Server 2022 through Testcontainers and runs every file in `examples/` both as C# and as transpiled SQL. Their normalized outputs must match. To run only the compiler unit tests without Docker:
+
+```bash
+dotnet test tests/SharpSql.Tests --configuration Release
 ```
 
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing new language behavior, and include tests that make any C#/T-SQL semantic difference explicit.

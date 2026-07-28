@@ -35,7 +35,7 @@ jobs:
       - name: Build
         run: dotnet build SharpSql.slnx --configuration Release --no-restore
 
-      - name: Test
+      - name: Test C# and SQL Server parity
         run: dotnet test SharpSql.slnx --configuration Release --no-build --logger trx --results-directory TestResults
 
       - name: Upload test results
