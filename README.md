@@ -91,6 +91,16 @@ Retained containers are labeled
 `io.sharpsql.verify.reusable=true` so they can be found or removed with Docker
 Desktop or the Docker CLI.
 
+Use `--debug` to report actual SQL plan statement/operator counts, estimated
+cost, compile resources, generated SQL size, and SharpSql heap allocations
+captured immediately before cleanup. Use `--profile` for one warm-up followed
+by three measured C# and SQL Server runs; the reported median excludes container
+startup:
+
+```bash
+sharpsql verify examples/linq_sum.cs --debug --profile --keep-container
+```
+
 Compile all C# documents in an MSBuild project by selecting a parameterless static entry method:
 
 ```bash
@@ -150,12 +160,15 @@ var result = await new SharpSqlProjectCompiler().TranspileAsync(
 - Classes and records with reference identity, typed fields, object initializers, mapped constructors, and instance methods
 - One-dimensional arrays and `List<T>` with indexing, mutation, iteration, and common operations
 - `Dictionary<TKey,TValue>` with indexing and common mutation/query operations
-- Relational LINQ over arrays, `List<T>`, and `Enumerable.Range`: filtering/projection, ordering/paging, distinct values, joins, grouped-key pipelines, aggregates, and element operators, plus ordered `ToList`/`ToArray` and `Enumerable.Repeat` materialization
+- Relational LINQ over arrays, `List<T>`, and lazy virtual `Enumerable.Range` sources: filtering/projection, ordering/paging, distinct values, joins, grouped-key pipelines, aggregates, and element operators, plus ordered `ToList`/`ToArray` and `Enumerable.Repeat` materialization
 - Deferred query variables, managed `AsEnumerable`/`AsQueryable`, query syntax, stored/captured delegates, helper-method plan flow, LINQ `foreach`, and `ToList`/`ToArray` materialization
 - Stateful `Random` instances with `Next()`, bounded/ranged `Next(...)`, and `NextDouble()`
 - Roslyn semantic typing for `var`, generics, members, and expression results
 - C# line, block, and documentation comments preserved near their generated SQL
 - Source-positioned diagnostics for unsupported syntax
+
+Virtual `Enumerable.Range` sources use SQL Server 2022 `GENERATE_SERIES` and
+therefore require database compatibility level 160.
 
 See the runnable [examples](examples) and the detailed [compiler architecture](docs/architecture.md).
 

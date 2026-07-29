@@ -76,7 +76,7 @@ public sealed partial class SharpSqlCompiler
         }
 
         if (sourceNodes.SelectMany(source => source.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
-            .Any(invocation => IsLinqMaterialization(invocation) || IsEnumerableRangeInvocation(invocation)))
+            .Any(IsLinqMaterialization))
         {
             _usesLists = true;
             _heapRuntimeNeeded = true;
@@ -251,7 +251,15 @@ public sealed partial class SharpSqlCompiler
     private void EmitHeapEpilogue()
     {
         if (!_heapRuntimeNeeded)
+        {
+            EmitHeapDiagnostics(objects: "0", indexedItems: "0", dictionaryEntries: "0");
             return;
+        }
+
+        EmitHeapDiagnostics(
+            $"(SELECT COUNT_BIG(*) FROM {HeapObjects})",
+            _usesLists || _usesRandom ? $"(SELECT COUNT_BIG(*) FROM {HeapIndexedItems})" : "0",
+            _usesDictionaries ? $"(SELECT COUNT_BIG(*) FROM {HeapDictionaryEntries})" : "0");
 
         foreach (var type in _heapTypes.Values.Reverse())
             _sql.Line($"DROP TABLE IF EXISTS {type.TableName};");
@@ -260,6 +268,22 @@ public sealed partial class SharpSqlCompiler
         if (_usesLists || _usesRandom)
             _sql.Line($"DROP TABLE IF EXISTS {HeapIndexedItems};");
         _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
+    }
+
+    private void EmitHeapDiagnostics(string objects, string indexedItems, string dictionaryEntries)
+    {
+        if (!_options.EmitRuntimeDiagnostics)
+            return;
+        var objectCount = _names.Allocate("_debug_heap_objects");
+        var indexedItemCount = _names.Allocate("_debug_indexed_items");
+        var dictionaryEntryCount = _names.Allocate("_debug_dictionary_entries");
+        _sql.Line($"DECLARE {objectCount} BIGINT = {objects};");
+        _sql.Line($"DECLARE {indexedItemCount} BIGINT = {indexedItems};");
+        _sql.Line($"DECLARE {dictionaryEntryCount} BIGINT = {dictionaryEntries};");
+        _sql.Line(
+            "PRINT CONCAT(N'__SHARPSQL_DEBUG_HEAP__|objects=', " + objectCount +
+            ", N'|indexed_items=', " + indexedItemCount +
+            ", N'|dictionary_entries=', " + dictionaryEntryCount + ");");
     }
 
     private bool ContainsRuntimeExpression(ExpressionSyntax expression) =>
@@ -271,7 +295,6 @@ public sealed partial class SharpSqlCompiler
             _heapTypes.ContainsKey(InferType(withExpression.Expression, new VariableScope()).Name)) ||
         expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsRandomInvocation) ||
         expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsLinqMaterialization) ||
-        expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsEnumerableRangeInvocation) ||
         expression.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>().Any() ||
         expression.DescendantNodesAndSelf().OfType<ArrayCreationExpressionSyntax>()
             .Any(creation => creation.Type.ElementType.ToString() != "byte") ||

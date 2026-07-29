@@ -56,8 +56,16 @@ internal sealed record SqlLinqJoinQueryStep(
     IReadOnlyDictionary<string, SqlLinqScalarCapture>? InnerCaptures = null,
     IReadOnlyDictionary<string, SqlLinqScalarCapture>? ResultCaptures = null) : SqlLinqQueryStep;
 
+internal abstract record SqlLinqQuerySource;
+
+internal sealed record SqlLinqHeapQuerySource(string OwnerSql) : SqlLinqQuerySource;
+
+internal sealed record SqlLinqRangeQuerySource(
+    string StartSql,
+    string CountSql) : SqlLinqQuerySource;
+
 internal sealed record SqlLinqQueryPlan(
-    string SourceSql,
+    SqlLinqQuerySource Source,
     IrType SourceElementType,
     IrType ElementType,
     IReadOnlyList<SqlLinqQueryStep> Steps);
@@ -99,11 +107,22 @@ public sealed partial class SharpSqlCompiler
             return true;
         }
 
-        _sql.Line($"DECLARE {sqlName} INT = {query.SourceSql};");
+        var storedQuery = query;
+        if (query.Source is SqlLinqHeapQuerySource heap)
+        {
+            _sql.Line($"DECLARE {sqlName} INT = {heap.OwnerSql};");
+            storedQuery = query with { Source = heap with { OwnerSql = sqlName } };
+        }
+        else
+        {
+            // Virtual sources carry their captured scalar inputs in the plan. The
+            // placeholder keeps ordinary variable bindings uniform without allocating a heap object.
+            _sql.Line($"DECLARE {sqlName} INT = NULL;");
+        }
         scope.Add(sourceName, new VariableBinding(
             sqlName,
             type,
-            query with { SourceSql = sqlName }));
+            storedQuery));
         return true;
     }
 
@@ -234,7 +253,11 @@ public sealed partial class SharpSqlCompiler
 
                 var collectionType = InferType(invocation, scope, substitutions);
                 var itemType = SequenceElementType(collectionType.Name);
-                query = new SqlLinqQueryPlan(collection, itemType, itemType, []);
+                query = new SqlLinqQueryPlan(
+                    new SqlLinqHeapQuerySource(collection),
+                    itemType,
+                    itemType,
+                    []);
                 return true;
             }
 
@@ -381,7 +404,7 @@ public sealed partial class SharpSqlCompiler
         {
             var itemType = SequenceElementType(sequenceType.Name);
             query = new SqlLinqQueryPlan(
-                EmitScalar(expression, scope, substitutions),
+                new SqlLinqHeapQuerySource(EmitScalar(expression, scope, substitutions)),
                 itemType,
                 itemType,
                 []);
@@ -413,19 +436,11 @@ public sealed partial class SharpSqlCompiler
             $"IF {count} < 0 OR ({count} > 0 AND CONVERT(BIGINT, {start}) + CONVERT(BIGINT, {count}) - 1 > 2147483647) " +
             "THROW 51006, 'Enumerable.Range arguments are out of range.', 1;");
 
-        var collection = AllocateHeapHeader(1003, "__count", count);
-        var index = _names.Allocate("_range_index");
-        _sql.Line($"DECLARE {index} INT = 0;");
-        _sql.Line($"WHILE {index} < {count}");
-        _sql.Line("BEGIN");
-        using (_sql.Indent())
-        {
-            InsertListItem(collection, index, IrType.Int, $"{start} + {index}");
-            _sql.Line($"SET {index} = {index} + 1;");
-        }
-        _sql.Line("END;");
-
-        query = new SqlLinqQueryPlan(collection, IrType.Int, IrType.Int, []);
+        query = new SqlLinqQueryPlan(
+            new SqlLinqRangeQuerySource(start, count),
+            IrType.Int,
+            IrType.Int,
+            []);
         return true;
     }
 
@@ -597,10 +612,7 @@ public sealed partial class SharpSqlCompiler
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
-        var itemAlias = NextLinqAlias("item");
-        var sql = $"SELECT {itemAlias}.__index AS __index, " +
-            $"{CollectionReadValue(query.SourceElementType, key: false, qualifier: itemAlias)} AS __value " +
-            $"FROM {HeapIndexedItems} AS {itemAlias} WHERE {itemAlias}.__owner_id = {query.SourceSql}";
+        var sql = RenderLinqSource(query, LeadingRangeTakeCount(query));
 
         var currentType = query.SourceElementType;
         for (var stepIndex = 0; stepIndex < query.Steps.Count; stepIndex++)
@@ -688,10 +700,16 @@ public sealed partial class SharpSqlCompiler
                 var numberedAlias = NextLinqAlias("page_numbered");
                 var count = paging.CountSql;
                 var normalizedCount = $"CASE WHEN {count} < 0 THEN 0 ELSE {count} END";
-                var numbered = $"SELECT ROW_NUMBER() OVER (ORDER BY {sourceAlias}.__index) - 1 AS __ordinal, {sourceAlias}.__value FROM ({sql}) AS {sourceAlias}";
-                sql = paging.IsSkip
-                    ? $"SELECT CONVERT(INT, {numberedAlias}.__ordinal - ({normalizedCount})) AS __index, {numberedAlias}.__value FROM ({numbered}) AS {numberedAlias} WHERE {numberedAlias}.__ordinal >= ({normalizedCount})"
-                    : $"SELECT CONVERT(INT, {numberedAlias}.__ordinal) AS __index, {numberedAlias}.__value FROM ({numbered}) AS {numberedAlias} WHERE {numberedAlias}.__ordinal < ({normalizedCount})";
+                if (paging.IsSkip)
+                {
+                    var numbered = $"SELECT ROW_NUMBER() OVER (ORDER BY {sourceAlias}.__index) - 1 AS __ordinal, {sourceAlias}.__value FROM ({sql}) AS {sourceAlias}";
+                    sql = $"SELECT CONVERT(INT, {numberedAlias}.__ordinal - ({normalizedCount})) AS __index, {numberedAlias}.__value FROM ({numbered}) AS {numberedAlias} WHERE {numberedAlias}.__ordinal >= ({normalizedCount})";
+                }
+                else
+                {
+                    var limited = $"SELECT TOP ({normalizedCount}) {sourceAlias}.__index, {sourceAlias}.__value FROM ({sql}) AS {sourceAlias} ORDER BY {sourceAlias}.__index";
+                    sql = $"SELECT CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {numberedAlias}.__index) - 1) AS __index, {numberedAlias}.__value FROM ({limited}) AS {numberedAlias}";
+                }
                 continue;
             }
 
@@ -749,6 +767,50 @@ public sealed partial class SharpSqlCompiler
             }
         }
         return sql;
+    }
+
+    private static string? LeadingRangeTakeCount(SqlLinqQueryPlan query)
+    {
+        if (query.Source is not SqlLinqRangeQuerySource)
+            return null;
+
+        foreach (var step in query.Steps)
+        {
+            if (step is SqlLinqPagingQueryStep { IsSkip: false } take)
+                return take.CountSql;
+            if (step is not SqlLinqLambdaQueryStep { Kind: LinqQueryStepKind.Select })
+                return null;
+        }
+        return null;
+    }
+
+    private string RenderLinqSource(SqlLinqQueryPlan query, string? takeCount)
+    {
+        if (query.Source is SqlLinqHeapQuerySource heap)
+        {
+            var itemAlias = NextLinqAlias("item");
+            return $"SELECT {itemAlias}.__index AS __index, " +
+                $"{CollectionReadValue(query.SourceElementType, key: false, qualifier: itemAlias)} AS __value " +
+                $"FROM {HeapIndexedItems} AS {itemAlias} WHERE {itemAlias}.__owner_id = {heap.OwnerSql}";
+        }
+
+        if (query.Source is SqlLinqRangeQuerySource range)
+        {
+            var rangeAlias = NextLinqAlias("range");
+            var start = $"CONVERT(BIGINT, {range.StartSql})";
+            var count = $"CONVERT(BIGINT, {range.CountSql})";
+            var generatedCount = count;
+            if (takeCount is not null)
+            {
+                var normalizedTake = $"CONVERT(BIGINT, CASE WHEN {takeCount} < 0 THEN 0 ELSE {takeCount} END)";
+                generatedCount = $"CASE WHEN {normalizedTake} < {count} THEN {normalizedTake} ELSE {count} END";
+            }
+            return $"SELECT CONVERT(INT, {rangeAlias}.[value] - {start}) AS __index, " +
+                $"CONVERT(INT, {rangeAlias}.[value]) AS __value " +
+                $"FROM GENERATE_SERIES({start}, {start} + ({generatedCount}) - 1, CONVERT(BIGINT, 1)) AS {rangeAlias}";
+        }
+
+        throw new InvalidOperationException($"Unknown LINQ source '{query.Source.GetType().Name}'.");
     }
 
     private bool TryEmitLinqInvocation(

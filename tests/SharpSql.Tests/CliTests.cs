@@ -181,7 +181,9 @@ public sealed class CliTests
                 "--entry", "MultiFileProject.SqlJob::Run",
                 "--configuration", "Debug",
                 "--framework", "net10.0",
-                "--keep-container"
+                "--keep-container",
+                "--debug",
+                "--profile"
             ]),
             TestContext.Current.CancellationToken);
 
@@ -195,6 +197,44 @@ public sealed class CliTests
         Assert.Equal("Debug", request.Configuration);
         Assert.Equal("net10.0", request.TargetFramework);
         Assert.True(request.KeepContainer);
+        Assert.True(request.Debug);
+        Assert.True(request.Profile);
+    }
+
+    [Fact]
+    public async Task VerifyCommandRendersDebugAndProfileDiagnostics()
+    {
+        var parityResult = new ParityRunResult(
+            new ParityOutcome("same", null),
+            new ParityOutcome("same", null),
+            "PRINT N'same';",
+            new ParityDebugInfo(
+                PlanStatementCount: 4,
+                PlanOperatorCount: 12,
+                MaximumPlanDepth: 3,
+                EstimatedSubtreeCost: 0.125,
+                CompileTimeMilliseconds: 2,
+                CompileMemoryKilobytes: 128,
+                HeapObjectsAllocated: 7,
+                IndexedItemsAllocated: 15,
+                DictionaryEntriesAllocated: 2),
+            new ParityProfile(
+                WarmupRuns: 1,
+                CSharpSamples: [TimeSpan.FromMilliseconds(1), TimeSpan.FromMilliseconds(2), TimeSpan.FromMilliseconds(3)],
+                SqlServerSamples: [TimeSpan.FromMilliseconds(4), TimeSpan.FromMilliseconds(5), TimeSpan.FromMilliseconds(6)]));
+        var tester = CreateTester("Console.WriteLine(\"same\");", new StubParityRunner(parityResult));
+
+        var result = await tester.RunAsync(
+            ["verify", "--debug", "--profile"],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("Debug diagnostics", result.Output);
+        Assert.Contains("12 operators", result.Output);
+        Assert.Contains("7 objects", result.Output);
+        Assert.Contains("Profile", result.Output);
+        Assert.Contains("C#: 2 ms median", result.Output);
+        Assert.Contains("SQL Server: 5 ms median", result.Output);
     }
 
     [Fact]

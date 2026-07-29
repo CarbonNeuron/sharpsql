@@ -722,10 +722,49 @@ public sealed class CompilerTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("Enumerable.Range arguments are out of range.", result.Sql);
-        Assert.Contains("DECLARE @_range_index INT = 0;", result.Sql);
+        Assert.Contains("FROM GENERATE_SERIES(", result.Sql);
+        Assert.DoesNotContain("_range_index", result.Sql);
         Assert.Equal(2, Count(result.Sql, "INT = @@ROWCOUNT;"));
         Assert.Contains("SELECT SUM(", result.Sql);
         Assert.Contains("SELECT AVG(", result.Sql);
+    }
+
+    [Fact]
+    public void KeepsLargeRangeLazyThroughTake()
+    {
+        const string source = """
+            var numbers = Enumerable.Range(1, 1_000_000_000);
+            var values = numbers.Take(5).ToList();
+            Console.WriteLine(values.Sum());
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("FROM GENERATE_SERIES(", result.Sql);
+        Assert.Contains("SELECT TOP (CASE WHEN 5 < 0 THEN 0 ELSE 5 END)", result.Sql);
+        Assert.Contains("CASE WHEN CONVERT(BIGINT, CASE WHEN 5 < 0 THEN 0 ELSE 5 END) < CONVERT(BIGINT, @_range_count)", result.Sql);
+        Assert.DoesNotContain("_range_index", result.Sql);
+        Assert.DoesNotContain("WHILE @_range", result.Sql);
+    }
+
+    [Fact]
+    public void EmitsOptInRuntimeHeapDiagnosticsBeforeCleanup()
+    {
+        const string source = """
+            var values = new List<int> { 1, 2, 3 };
+            Console.WriteLine(values.Count);
+            """;
+
+        var result = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions { EmitRuntimeDiagnostics = true });
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("__SHARPSQL_DEBUG_HEAP__|objects=", result.Sql);
+        Assert.True(
+            result.Sql.IndexOf("__SHARPSQL_DEBUG_HEAP__", StringComparison.Ordinal) <
+            result.Sql.LastIndexOf("DROP TABLE IF EXISTS #__sharpsql_objects", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -756,7 +795,7 @@ public sealed class CompilerTests
         Assert.Contains("GROUP BY", result.Sql);
         Assert.Contains("INNER JOIN", result.Sql);
         Assert.Contains("__ordinal >=", result.Sql);
-        Assert.Contains("__ordinal <", result.Sql);
+        Assert.Contains("SELECT TOP (", result.Sql);
     }
 
     [Fact]

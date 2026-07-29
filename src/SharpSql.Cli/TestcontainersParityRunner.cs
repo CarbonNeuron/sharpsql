@@ -1,7 +1,9 @@
 using System.Globalization;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text;
+using System.Xml.Linq;
 using Docker.DotNet.Models;
 using DotNet.Testcontainers.Configurations;
 using Microsoft.CodeAnalysis;
@@ -16,6 +18,9 @@ namespace SharpSql.Cli;
 
 public sealed class TestcontainersParityRunner : IParityRunner
 {
+    private const int ProfileWarmupRuns = 1;
+    private const int ProfileSampleRuns = 3;
+    private const string HeapDebugPrefix = "__SHARPSQL_DEBUG_HEAP__|";
     private const string GlobalUsings =
         "global using System; global using System.Collections.Generic; global using System.Linq;";
     private static readonly CSharpParseOptions ParseOptions = new(LanguageVersion.Preview);
@@ -43,12 +48,32 @@ public sealed class TestcontainersParityRunner : IParityRunner
 
         var compilation = compilationResult.Compilation!;
         reportStage?.Invoke(new ParityStageUpdate(ParityStage.SqlGenerated));
-        var transpileResult = new SharpSqlCompiler().Transpile(compilation, request.EntryPoint);
+        var transpileResult = new SharpSqlCompiler().Transpile(
+            compilation,
+            request.EntryPoint,
+            new TranspileOptions { EmitRuntimeDiagnostics = request.Debug });
         reportStage?.Invoke(new ParityStageUpdate(
             ParityStage.SqlGenerated,
             ParityRunResult.CountLines(transpileResult.Sql)));
         reportStage?.Invoke(new ParityStageUpdate(ParityStage.EvaluatingCSharp));
-        var csharp = await ExecuteCSharpAsync(compilation, request.InputPath, request.EntryPoint);
+        var preparedCSharp = PrepareCSharp(compilation, request.InputPath, request.EntryPoint);
+        var csharpSamples = new List<TimeSpan>();
+        ParityOutcome csharp;
+        if (preparedCSharp.Failure is not null)
+        {
+            csharp = preparedCSharp.Failure;
+        }
+        else if (request.Profile)
+        {
+            csharp = await ExecuteCSharpProfileAsync(
+                preparedCSharp.Program!,
+                csharpSamples,
+                cancellationToken);
+        }
+        else
+        {
+            csharp = await preparedCSharp.Program!.ExecuteAsync();
+        }
         if (!transpileResult.Success)
         {
             var failure = new ParityFailure(
@@ -74,12 +99,54 @@ public sealed class TestcontainersParityRunner : IParityRunner
             await container.StartAsync(cancellationToken);
             containerId = container.Id;
             reportStage?.Invoke(new ParityStageUpdate(ParityStage.EvaluatingSqlServer));
-            var sqlServer = await ExecuteSqlAsync(
+            await using var connection = new SqlConnection(container.GetConnectionString())
+            {
+                FireInfoMessageEventOnUserErrors = true
+            };
+            await connection.OpenAsync(cancellationToken);
+
+            var sqlSamples = new List<TimeSpan>();
+            SqlExecutionResult sqlExecution;
+            ParityDebugInfo? debugInfo = null;
+            if (request.Profile)
+            {
+                sqlExecution = await ExecuteSqlProfileAsync(
+                    connection,
+                    transpileResult.Sql,
+                    request.CommandTimeoutSeconds,
+                    sqlSamples,
+                    cancellationToken);
+                if (request.Debug && sqlExecution.Outcome.Failure is null)
+                {
+                    var debugExecution = await ExecuteSqlAsync(
+                        connection,
+                        transpileResult.Sql,
+                        request.CommandTimeoutSeconds,
+                        collectDebug: true,
+                        cancellationToken);
+                    debugInfo = debugExecution.DebugInfo;
+                }
+            }
+            else
+            {
+                sqlExecution = await ExecuteSqlAsync(
+                    connection,
+                    transpileResult.Sql,
+                    request.CommandTimeoutSeconds,
+                    request.Debug,
+                    cancellationToken);
+                debugInfo = sqlExecution.DebugInfo;
+            }
+
+            var profile = request.Profile
+                ? new ParityProfile(ProfileWarmupRuns, csharpSamples, sqlSamples)
+                : null;
+            return new ParityRunResult(
+                csharp,
+                sqlExecution.Outcome,
                 transpileResult.Sql,
-                container.GetConnectionString(),
-                request.CommandTimeoutSeconds,
-                cancellationToken);
-            return new ParityRunResult(csharp, sqlServer, transpileResult.Sql);
+                debugInfo,
+                profile);
         }
         finally
         {
@@ -138,13 +205,13 @@ public sealed class TestcontainersParityRunner : IParityRunner
             new CSharpCompilationOptions(OutputKind.ConsoleApplication, optimizationLevel: OptimizationLevel.Release));
     }
 
-    private static async Task<ParityOutcome> ExecuteCSharpAsync(
+    private static CSharpPreparation PrepareCSharp(
         CSharpCompilation compilation,
         string sourcePath,
         string? requestedEntryPoint)
     {
-        await using var assemblyStream = new MemoryStream();
-        await using var symbolsStream = new MemoryStream();
+        using var assemblyStream = new MemoryStream();
+        using var symbolsStream = new MemoryStream();
         var emitResult = compilation.Emit(
             assemblyStream,
             symbolsStream,
@@ -152,31 +219,53 @@ public sealed class TestcontainersParityRunner : IParityRunner
         if (!emitResult.Success)
         {
             var errors = emitResult.Diagnostics.Where(item => item.Severity == DiagnosticSeverity.Error).ToArray();
-            return new ParityOutcome(
-                string.Empty,
-                new ParityFailure(
-                    ParityFailureCategory.Compilation,
-                    string.Join(",", errors.Select(item => item.Id).Distinct(StringComparer.Ordinal)),
-                    string.Join(Environment.NewLine, errors.Select(item => item.ToString()))));
+            return new CSharpPreparation(
+                null,
+                new ParityOutcome(
+                    string.Empty,
+                    new ParityFailure(
+                        ParityFailureCategory.Compilation,
+                        string.Join(",", errors.Select(item => item.Id).Distinct(StringComparer.Ordinal)),
+                        string.Join(Environment.NewLine, errors.Select(item => item.ToString())))));
         }
 
-        assemblyStream.Position = 0;
-        symbolsStream.Position = 0;
-        var loadContext = new VerificationLoadContext(sourcePath, compilation.References);
-        try
+        return new CSharpPreparation(
+            new PreparedCSharpProgram(
+                assemblyStream.ToArray(),
+                symbolsStream.ToArray(),
+                sourcePath,
+                requestedEntryPoint,
+                compilation.References),
+            null);
+    }
+
+    private static async Task<ParityOutcome> ExecuteCSharpProfileAsync(
+        PreparedCSharpProgram program,
+        List<TimeSpan> samples,
+        CancellationToken cancellationToken)
+    {
+        ParityOutcome outcome = new(string.Empty, null);
+        for (var index = 0; index < ProfileWarmupRuns; index++)
         {
-            var assembly = loadContext.LoadFromStream(assemblyStream, symbolsStream);
-            return await CaptureConsoleAsync(async () =>
-            {
-                var entryPoint = ResolveEntryPoint(assembly, requestedEntryPoint) ??
-                                 throw new InvalidOperationException($"{sourcePath} has no matching entry point.");
-                await InvokeEntryPointAsync(entryPoint);
-            });
+            cancellationToken.ThrowIfCancellationRequested();
+            outcome = await program.ExecuteAsync();
+            if (outcome.Failure is not null)
+                return outcome;
         }
-        finally
+
+        for (var index = 0; index < ProfileSampleRuns; index++)
         {
-            loadContext.Unload();
+            cancellationToken.ThrowIfCancellationRequested();
+            var timer = Stopwatch.StartNew();
+            var sampleOutcome = await program.ExecuteAsync();
+            timer.Stop();
+            samples.Add(timer.Elapsed);
+            if (index == 0)
+                outcome = sampleOutcome;
+            if (sampleOutcome.Failure is not null)
+                return sampleOutcome;
         }
+        return outcome;
     }
 
     private static MethodInfo? ResolveEntryPoint(Assembly assembly, string? requestedEntryPoint)
@@ -199,37 +288,108 @@ public sealed class TestcontainersParityRunner : IParityRunner
             .SingleOrDefault();
     }
 
-    private static async Task<ParityOutcome> ExecuteSqlAsync(
+    private static async Task<SqlExecutionResult> ExecuteSqlProfileAsync(
+        SqlConnection connection,
         string sql,
-        string connectionString,
         int commandTimeoutSeconds,
+        List<TimeSpan> samples,
+        CancellationToken cancellationToken)
+    {
+        SqlExecutionResult execution = new(new ParityOutcome(string.Empty, null), null);
+        for (var index = 0; index < ProfileWarmupRuns; index++)
+        {
+            execution = await ExecuteSqlAsync(
+                connection,
+                sql,
+                commandTimeoutSeconds,
+                collectDebug: false,
+                cancellationToken);
+            if (execution.Outcome.Failure is not null)
+                return execution;
+        }
+
+        for (var index = 0; index < ProfileSampleRuns; index++)
+        {
+            var timer = Stopwatch.StartNew();
+            var sample = await ExecuteSqlAsync(
+                connection,
+                sql,
+                commandTimeoutSeconds,
+                collectDebug: false,
+                cancellationToken);
+            timer.Stop();
+            samples.Add(timer.Elapsed);
+            if (index == 0)
+                execution = sample;
+            if (sample.Outcome.Failure is not null)
+                return sample;
+        }
+        return execution;
+    }
+
+    private static async Task<SqlExecutionResult> ExecuteSqlAsync(
+        SqlConnection connection,
+        string sql,
+        int commandTimeoutSeconds,
+        bool collectDebug,
         CancellationToken cancellationToken)
     {
         using var output = new StringWriter(CultureInfo.InvariantCulture);
         var reportedErrors = new List<SqlErrorInfo>();
-        await using var connection = new SqlConnection(connectionString)
-        {
-            FireInfoMessageEventOnUserErrors = true
-        };
-        connection.InfoMessage += (_, args) =>
+        var plans = new PlanAccumulator();
+        long heapObjects = 0;
+        long indexedItems = 0;
+        long dictionaryEntries = 0;
+
+        void HandleInfoMessage(object sender, SqlInfoMessageEventArgs args)
         {
             foreach (SqlError error in args.Errors)
             {
                 if (error.Class == 0)
-                    output.WriteLine(error.Message);
+                {
+                    if (!TryParseHeapDiagnostics(
+                            error.Message,
+                            ref heapObjects,
+                            ref indexedItems,
+                            ref dictionaryEntries))
+                        output.WriteLine(error.Message);
+                }
                 else
                     reportedErrors.Add(new SqlErrorInfo(error.Number, error.Message));
             }
-        };
+        }
 
-        await connection.OpenAsync(cancellationToken);
+        connection.InfoMessage += HandleInfoMessage;
         ParityFailure? failure = null;
         try
         {
             await using var command = connection.CreateCommand();
-            command.CommandText = sql;
+            command.CommandText = collectDebug
+                ? $"SET STATISTICS XML ON;{Environment.NewLine}{sql}{Environment.NewLine}SET STATISTICS XML OFF;"
+                : sql;
             command.CommandTimeout = commandTimeoutSeconds;
-            await command.ExecuteNonQueryAsync(cancellationToken);
+            if (collectDebug)
+            {
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                do
+                {
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        for (var field = 0; field < reader.FieldCount; field++)
+                        {
+                            if (await reader.IsDBNullAsync(field, cancellationToken))
+                                continue;
+                            var value = Convert.ToString(reader.GetValue(field), CultureInfo.InvariantCulture);
+                            if (value?.Contains("<ShowPlanXML", StringComparison.Ordinal) == true)
+                                plans.Add(value);
+                        }
+                    }
+                } while (await reader.NextResultAsync(cancellationToken));
+            }
+            else
+            {
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
         }
         catch (SqlException exception)
         {
@@ -238,9 +398,49 @@ public sealed class TestcontainersParityRunner : IParityRunner
                 ?? exception.Errors.Cast<SqlError>().First();
             failure = NormalizeSqlFailure(new SqlErrorInfo(error.Number, error.Message));
         }
+        finally
+        {
+            connection.InfoMessage -= HandleInfoMessage;
+        }
 
         failure ??= reportedErrors.Count > 0 ? NormalizeSqlFailure(reportedErrors[0]) : null;
-        return new ParityOutcome(NormalizeOutput(output.ToString()), failure);
+        var debugInfo = collectDebug
+            ? plans.ToDebugInfo(heapObjects, indexedItems, dictionaryEntries)
+            : null;
+        return new SqlExecutionResult(
+            new ParityOutcome(NormalizeOutput(output.ToString()), failure),
+            debugInfo);
+    }
+
+    private static bool TryParseHeapDiagnostics(
+        string message,
+        ref long heapObjects,
+        ref long indexedItems,
+        ref long dictionaryEntries)
+    {
+        var marker = message.IndexOf(HeapDebugPrefix, StringComparison.Ordinal);
+        if (marker < 0)
+            return false;
+
+        foreach (var item in message[(marker + HeapDebugPrefix.Length)..].Split('|'))
+        {
+            var parts = item.Split('=', 2);
+            if (parts.Length != 2 || !long.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+                continue;
+            switch (parts[0])
+            {
+                case "objects":
+                    heapObjects = value;
+                    break;
+                case "indexed_items":
+                    indexedItems = value;
+                    break;
+                case "dictionary_entries":
+                    dictionaryEntries = value;
+                    break;
+            }
+        }
+        return true;
     }
 
     private static async Task<ParityOutcome> CaptureConsoleAsync(Func<Task> action)
@@ -310,6 +510,41 @@ public sealed class TestcontainersParityRunner : IParityRunner
     private static string NormalizeOutput(string output) =>
         output.Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd('\r', '\n');
 
+    private sealed record CSharpPreparation(
+        PreparedCSharpProgram? Program,
+        ParityOutcome? Failure);
+
+    private sealed class PreparedCSharpProgram(
+        byte[] assemblyBytes,
+        byte[] symbolBytes,
+        string sourcePath,
+        string? requestedEntryPoint,
+        IEnumerable<MetadataReference> references)
+    {
+        private readonly MetadataReference[] _references = references.ToArray();
+
+        public async Task<ParityOutcome> ExecuteAsync()
+        {
+            await using var assemblyStream = new MemoryStream(assemblyBytes, writable: false);
+            await using var symbolsStream = new MemoryStream(symbolBytes, writable: false);
+            var loadContext = new VerificationLoadContext(sourcePath, _references);
+            try
+            {
+                var assembly = loadContext.LoadFromStream(assemblyStream, symbolsStream);
+                return await CaptureConsoleAsync(async () =>
+                {
+                    var entryPoint = ResolveEntryPoint(assembly, requestedEntryPoint) ??
+                                     throw new InvalidOperationException($"{sourcePath} has no matching entry point.");
+                    await InvokeEntryPointAsync(entryPoint);
+                });
+            }
+            finally
+            {
+                loadContext.Unload();
+            }
+        }
+    }
+
     private sealed class VerificationLoadContext(
         string sourcePath,
         IEnumerable<MetadataReference> references)
@@ -337,6 +572,85 @@ public sealed class TestcontainersParityRunner : IParityRunner
                 : null;
         }
     }
+
+    private sealed class PlanAccumulator
+    {
+        private readonly HashSet<string> _seenStatements = new(StringComparer.Ordinal);
+        private int _statementCount;
+        private int _operatorCount;
+        private int _maximumDepth;
+        private double _estimatedCost;
+        private long _compileTimeMilliseconds;
+        private long _compileMemoryKilobytes;
+
+        public void Add(string xml)
+        {
+            var document = XDocument.Parse(xml);
+            foreach (var statement in document.Descendants().Where(element =>
+                         element.Name.LocalName.StartsWith("Stmt", StringComparison.Ordinal) &&
+                         element.Attribute("StatementId") is not null))
+            {
+                var operators = statement.Descendants()
+                    .Where(element => element.Name.LocalName == "RelOp")
+                    .ToArray();
+                var signature = (statement.Attribute("StatementText")?.Value ?? statement.Name.LocalName) + "|" +
+                    string.Join(",", operators.Select(item =>
+                        $"{item.Attribute("LogicalOp")?.Value}/{item.Attribute("PhysicalOp")?.Value}"));
+                if (!_seenStatements.Add(signature))
+                    continue;
+
+                _statementCount++;
+                _operatorCount += operators.Length;
+                _maximumDepth = Math.Max(
+                    _maximumDepth,
+                    operators.Select(element =>
+                            element.Ancestors()
+                                .TakeWhile(ancestor => !ReferenceEquals(ancestor, statement))
+                                .Count(ancestor => ancestor.Name.LocalName == "RelOp") + 1)
+                        .DefaultIfEmpty(0)
+                        .Max());
+                if (double.TryParse(
+                        statement.Attribute("StatementSubTreeCost")?.Value,
+                        NumberStyles.Float,
+                        CultureInfo.InvariantCulture,
+                        out var cost))
+                    _estimatedCost += cost;
+                foreach (var queryPlan in statement.Descendants().Where(element => element.Name.LocalName == "QueryPlan"))
+                {
+                    if (long.TryParse(
+                            queryPlan.Attribute("CompileTime")?.Value,
+                            NumberStyles.Integer,
+                            CultureInfo.InvariantCulture,
+                            out var compileTime))
+                        _compileTimeMilliseconds += compileTime;
+                    if (long.TryParse(
+                            queryPlan.Attribute("CompileMemory")?.Value,
+                            NumberStyles.Integer,
+                            CultureInfo.InvariantCulture,
+                            out var compileMemory))
+                        _compileMemoryKilobytes += compileMemory;
+                }
+            }
+        }
+
+        public ParityDebugInfo ToDebugInfo(
+            long heapObjects,
+            long indexedItems,
+            long dictionaryEntries) => new(
+            _statementCount,
+            _operatorCount,
+            _maximumDepth,
+            _estimatedCost,
+            _compileTimeMilliseconds,
+            _compileMemoryKilobytes,
+            heapObjects,
+            indexedItems,
+            dictionaryEntries);
+    }
+
+    private sealed record SqlExecutionResult(
+        ParityOutcome Outcome,
+        ParityDebugInfo? DebugInfo);
 
     private sealed record SqlErrorInfo(int Number, string Message);
 }

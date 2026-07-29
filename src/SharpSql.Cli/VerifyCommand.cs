@@ -46,6 +46,14 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
         [Description("Keep and reuse the SQL Server container across verify runs.")]
         public bool KeepContainer { get; init; }
 
+        [CommandOption("--debug")]
+        [Description("Show SQL plan and live SharpSql heap diagnostics.")]
+        public bool Debug { get; init; }
+
+        [CommandOption("--profile")]
+        [Description("Warm up and repeatedly measure the C# and SQL executions.")]
+        public bool Profile { get; init; }
+
         public override ValidationResult Validate()
         {
             var isProject = InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
@@ -82,7 +90,9 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
             settings.TargetFramework,
             settings.SqlServerImage,
             settings.CommandTimeoutSeconds,
-            settings.KeepContainer);
+            settings.KeepContainer,
+            settings.Debug,
+            settings.Profile);
         var runner = environment.ParityRunner ?? new TestcontainersParityRunner();
 
         ParityRunResult result;
@@ -141,6 +151,9 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
         if (settings.KeepContainer)
             environment.Console.MarkupLine("[grey]SQL Server container kept running for reuse.[/]");
 
+        RenderDebugDiagnostics(environment.Console, result);
+        RenderProfile(environment.Console, result.Profile);
+
         if (result.Matches)
         {
             environment.Console.MarkupLine(
@@ -172,6 +185,57 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
         : elapsed.TotalMinutes < 1
             ? $"{elapsed.TotalSeconds:0.00} s"
             : $"{(int)elapsed.TotalMinutes}:{elapsed.Seconds:00}.{elapsed.Milliseconds / 10:00}";
+
+    private static void RenderDebugDiagnostics(IAnsiConsole console, ParityRunResult result)
+    {
+        if (result.DebugInfo is not { } debug)
+            return;
+
+        console.MarkupLine("[blue]Debug diagnostics[/]");
+        console.MarkupLine(
+            $"  Plan: [yellow]{debug.PlanOperatorCount:N0} operators[/], " +
+            $"{debug.PlanStatementCount:N0} statements, maximum depth {debug.MaximumPlanDepth:N0}");
+        console.MarkupLine(
+            $"  Estimate: subtree cost {debug.EstimatedSubtreeCost:0.####}, " +
+            $"compile {debug.CompileTimeMilliseconds:N0} ms, " +
+            $"compile memory {debug.CompileMemoryKilobytes:N0} KB");
+        console.MarkupLine(
+            $"  Heap now: [yellow]{debug.HeapObjectsAllocated:N0} objects[/], " +
+            $"{debug.IndexedItemsAllocated:N0} indexed items, " +
+            $"{debug.DictionaryEntriesAllocated:N0} dictionary entries");
+        console.MarkupLine(
+            $"  Generated SQL: {result.GeneratedSqlLineCount:N0} lines, " +
+            $"{result.GeneratedSql.Length:N0} characters");
+    }
+
+    private static void RenderProfile(IAnsiConsole console, ParityProfile? profile)
+    {
+        if (profile is null)
+            return;
+
+        console.MarkupLine(
+            $"[blue]Profile[/] [grey]({profile.WarmupRuns} warm-up, " +
+            $"{Math.Max(profile.CSharpSamples.Count, profile.SqlServerSamples.Count)} measured runs)[/]");
+        RenderSamples(console, "C#", profile.CSharpSamples);
+        RenderSamples(console, "SQL Server", profile.SqlServerSamples);
+    }
+
+    private static void RenderSamples(IAnsiConsole console, string label, IReadOnlyList<TimeSpan> samples)
+    {
+        if (samples.Count == 0)
+        {
+            console.MarkupLine($"  {label}: [grey]no successful samples[/]");
+            return;
+        }
+
+        var ordered = samples.Order().ToArray();
+        var median = ordered.Length % 2 == 1
+            ? ordered[ordered.Length / 2]
+            : TimeSpan.FromTicks((ordered[ordered.Length / 2 - 1].Ticks + ordered[ordered.Length / 2].Ticks) / 2);
+        console.MarkupLine(
+            $"  {label}: [yellow]{FormatDuration(median)} median[/] " +
+            $"[grey]({FormatDuration(ordered[0])}–{FormatDuration(ordered[^1])})[/]");
+    }
 
     private sealed class VerificationProgress
     {

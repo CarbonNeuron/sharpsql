@@ -26,7 +26,9 @@ public sealed record ParityRunRequest(
     string? TargetFramework,
     string SqlServerImage,
     int CommandTimeoutSeconds,
-    bool KeepContainer)
+    bool KeepContainer,
+    bool Debug = false,
+    bool Profile = false)
 {
     public bool IsProject => Source is null;
 }
@@ -35,10 +37,28 @@ public sealed record ParityFailure(ParityFailureCategory Category, string Type, 
 
 public sealed record ParityOutcome(string StandardOutput, ParityFailure? Failure);
 
+public sealed record ParityDebugInfo(
+    int PlanStatementCount,
+    int PlanOperatorCount,
+    int MaximumPlanDepth,
+    double EstimatedSubtreeCost,
+    long CompileTimeMilliseconds,
+    long CompileMemoryKilobytes,
+    long HeapObjectsAllocated,
+    long IndexedItemsAllocated,
+    long DictionaryEntriesAllocated);
+
+public sealed record ParityProfile(
+    int WarmupRuns,
+    IReadOnlyList<TimeSpan> CSharpSamples,
+    IReadOnlyList<TimeSpan> SqlServerSamples);
+
 public sealed record ParityRunResult(
     ParityOutcome CSharp,
     ParityOutcome SqlServer,
-    string GeneratedSql)
+    string GeneratedSql,
+    ParityDebugInfo? DebugInfo = null,
+    ParityProfile? Profile = null)
 {
     public int GeneratedSqlLineCount => CountLines(GeneratedSql);
 
