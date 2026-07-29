@@ -7,10 +7,14 @@
     <Description>Command-line compiler for transpiling supported C# programs to self-contained T-SQL batches.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>csharp;sql;transpiler;compiler;roslyn;sqlserver;dotnet-tool</PackageTags>
+    <RuntimeIdentifiers>linux-x64;linux-arm64;win-x64;win-arm64;osx-x64;osx-arm64</RuntimeIdentifiers>
+    <PublishReadyToRun Condition="'$(Configuration)' == 'Release'">true</PublishReadyToRun>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Build.Framework" Version="17.11.31" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
     <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
+    <PackageReference Include="Testcontainers.MsSql" Version="4.13.0" />
     <ProjectReference Include="../SharpSql.MSBuild/SharpSql.MSBuild.csproj" />
     <ProjectReference Include="../SharpSql/SharpSql.csproj" />
     <None Include="../../README.md" Pack="true" PackagePath="/" />

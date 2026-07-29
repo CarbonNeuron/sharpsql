@@ -16,11 +16,27 @@ public sealed class SharpSqlProjectCompiler
         ProjectTranspileOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        options ??= new ProjectTranspileOptions();
+        var loaded = await LoadCompilationAsync(projectPath, options, cancellationToken);
+        if (!loaded.Success)
+            return new TranspileResult(string.Empty, loaded.Diagnostics);
+
+        return new SharpSqlCompiler().Transpile(
+            loaded.Compilation!,
+            options.EntryPoint,
+            options.CompilerOptions);
+    }
+
+    public async Task<ProjectCompilationResult> LoadCompilationAsync(
+        string projectPath,
+        ProjectTranspileOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectPath);
         options ??= new ProjectTranspileOptions();
         projectPath = Path.GetFullPath(projectPath);
         if (!File.Exists(projectPath))
-            return Failure("SSP0001", $"Project file was not found: {projectPath}");
+            return CompilationFailure("SSP0001", $"Project file was not found: {projectPath}");
 
         EnsureMSBuildRegistered();
         var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -43,7 +59,7 @@ public sealed class SharpSqlProjectCompiler
             var project = await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken);
             var compilation = await project.GetCompilationAsync(cancellationToken) as CSharpCompilation;
             if (compilation is null)
-                return Failure("SSP0003", $"Project '{projectPath}' did not produce a C# compilation.", workspaceFailures);
+                return CompilationFailure("SSP0003", $"Project '{projectPath}' did not produce a C# compilation.", workspaceFailures);
 
             var compilationErrors = compilation.GetDiagnostics(cancellationToken)
                 .Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
@@ -59,19 +75,13 @@ public sealed class SharpSqlProjectCompiler
                 })
                 .ToArray();
             if (compilationErrors.Length > 0)
-                return new TranspileResult(string.Empty, compilationErrors.Concat(workspaceFailures).ToArray());
+                return new ProjectCompilationResult(null, compilationErrors.Concat(workspaceFailures).ToArray());
 
-            var result = new SharpSqlCompiler().Transpile(compilation, options.EntryPoint, options.CompilerOptions);
-            if (workspaceFailures.Count == 0)
-                return result;
-            return result with
-            {
-                Diagnostics = result.Diagnostics.Concat(workspaceFailures).Distinct().ToArray()
-            };
+            return new ProjectCompilationResult(compilation, workspaceFailures.Distinct().ToArray());
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            return Failure("SSP0003", $"Could not load project '{projectPath}': {exception.Message}", workspaceFailures);
+            return CompilationFailure("SSP0003", $"Could not load project '{projectPath}': {exception.Message}", workspaceFailures);
         }
     }
 
@@ -95,5 +105,14 @@ public sealed class SharpSqlProjectCompiler
         if (additionalDiagnostics is not null)
             diagnostics.AddRange(additionalDiagnostics);
         return new TranspileResult(string.Empty, diagnostics);
+    }
+
+    private static ProjectCompilationResult CompilationFailure(
+        string code,
+        string message,
+        IEnumerable<CompilerDiagnostic>? additionalDiagnostics = null)
+    {
+        var failure = Failure(code, message, additionalDiagnostics);
+        return new ProjectCompilationResult(null, failure.Diagnostics);
     }
 }

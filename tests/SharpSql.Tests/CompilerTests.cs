@@ -125,6 +125,11 @@ public sealed class CompilerTests
         Assert.Contains("DROP TABLE IF EXISTS #__sharpsql_stack;", result.Sql);
         Assert.Equal(1, Count(result.Sql, "__sharpsql_dispatch:;"));
         Assert.Equal(3, Count(result.Sql, "IF @__sharpsql_jump ="));
+        Assert.Contains("__caller_id INT NULL", result.Sql);
+        Assert.Contains("SET @__sharpsql_frame_id = @__sharpsql_caller_frame_id;", result.Sql);
+        Assert.DoesNotContain("SELECT MAX(__id) FROM #__sharpsql_stack", result.Sql);
+        Assert.Contains("UPDATE #__sharpsql_slots SET __value", result.Sql);
+        Assert.DoesNotContain("DELETE FROM #__sharpsql_slots WHERE __frame_id = @__sharpsql_frame_id AND __slot_id", result.Sql);
         Assert.DoesNotContain("CREATE PROCEDURE", result.Sql);
         Assert.DoesNotContain("CREATE FUNCTION", result.Sql);
     }
@@ -282,9 +287,59 @@ public sealed class CompilerTests
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("CREATE TABLE #__sharpsql_objects", result.Sql);
         Assert.Contains("[Name] NVARCHAR(MAX)", result.Sql);
-        Assert.Contains("DECLARE @alias BIGINT = @person;", result.Sql);
+        Assert.Contains("DECLARE @alias INT = @person;", result.Sql);
         Assert.Contains("UPDATE #__sharpsql_type_1 SET [Name] = N'Grace'", result.Sql);
         Assert.Contains("WHERE __object_id = @alias", result.Sql);
+    }
+
+    [Fact]
+    public void FormatsRecordsWhenWritingOrInterpolatingThem()
+    {
+        const string source = """
+            var item = new InvItem("Gold", 256);
+            Console.WriteLine(item);
+            Console.WriteLine($"item={item}");
+            record InvItem(string Name, int Quantity);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("N'InvItem { '", result.Sql);
+        Assert.Contains("N'Name = '", result.Sql);
+        Assert.Contains("N'Quantity = '", result.Sql);
+        Assert.Contains("WHERE __object_id = @item", result.Sql);
+        Assert.DoesNotContain("PRINT @item;", result.Sql);
+    }
+
+    [Fact]
+    public void SupportsTargetTypedRecordCreationAndWithExpressionsContainingRuntimeCalls()
+    {
+        const string source = """
+            var inventory = new List<InvItem>
+            {
+                new("Wood", 64),
+                new("Iron", 64),
+                new("Gold", 256)
+            };
+            var random = new Random(4);
+            var item = inventory[random.Next(0, inventory.Count)];
+            inventory.Add(item with
+            {
+                Quantity = random.Next(
+                    inventory.Min(candidate => candidate.Quantity),
+                    inventory.Max(candidate => candidate.Quantity))
+            });
+            record InvItem(string Name, int Quantity);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("SELECT [Name] FROM #__sharpsql_type_1", result.Sql);
+        Assert.Contains("SELECT MIN(", result.Sql);
+        Assert.Contains("SELECT MAX(", result.Sql);
+        Assert.Contains("INSERT INTO #__sharpsql_type_1 (__object_id, [Name], [Quantity])", result.Sql);
     }
 
     [Fact]
@@ -305,10 +360,30 @@ public sealed class CompilerTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("CREATE TABLE #__sharpsql_indexed_items", result.Sql);
-        Assert.Contains("__reference_value BIGINT", result.Sql);
+        Assert.Contains("__reference_value INT", result.Sql);
         Assert.Contains("CREATE TABLE #__sharpsql_dictionary_entries", result.Sql);
+        Assert.Contains("PRIMARY KEY (__dictionary_id, __id)", result.Sql);
+        Assert.Contains("CREATE INDEX __sharpsql_dictionary_hash_key", result.Sql);
+        Assert.Contains("__key_hash = HASHBYTES('SHA2_256'", result.Sql);
         Assert.Contains("__key_text COLLATE Latin1_General_100_BIN2", result.Sql);
         Assert.Contains("CASE WHEN EXISTS", result.Sql);
+    }
+
+    [Fact]
+    public void ScalarDictionaryKeysUseASeekableTypedIndexPredicate()
+    {
+        const string source = """
+            var values = new Dictionary<int, string>();
+            values.Add(42, "answer");
+            Console.WriteLine(values.ContainsKey(42));
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("CREATE INDEX __sharpsql_dictionary_scalar_key", result.Sql);
+        Assert.Contains("__key = CONVERT(SQL_VARIANT, 42)", result.Sql);
+        Assert.DoesNotContain("CONVERT(INT, __key) = 42", result.Sql);
     }
 
     [Fact]
@@ -571,8 +646,8 @@ public sealed class CompilerTests
         var result = Compile(source);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
-        Assert.Contains("DECLARE @query BIGINT = @people;", result.Sql);
-        Assert.Contains("DECLARE @adults BIGINT = @query;", result.Sql);
+        Assert.Contains("DECLARE @query INT = @people;", result.Sql);
+        Assert.Contains("DECLARE @adults INT = @query;", result.Sql);
         Assert.Contains("SELECT SUM(__linq_terminal_", result.Sql);
         Assert.Contains("SELECT COUNT(*)", result.Sql);
         Assert.Contains("CASE WHEN EXISTS", result.Sql);
@@ -604,8 +679,10 @@ public sealed class CompilerTests
         var result = Compile(source);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
-        Assert.Contains("DECLARE @ages BIGINT = @people;", result.Sql);
+        Assert.Contains("DECLARE @ages INT = @people;", result.Sql);
         Assert.Contains("ROW_NUMBER() OVER (ORDER BY", result.Sql);
+        Assert.Contains("INT = @@ROWCOUNT;", result.Sql);
+        Assert.DoesNotContain("SET __count = (SELECT COUNT(*) FROM #__sharpsql_indexed_items", result.Sql);
         Assert.Contains("__sharpsql_linq_foreach_condition", result.Sql);
         Assert.Contains("CASE WHEN EXISTS", result.Sql);
         Assert.Contains("SELECT TOP (1)", result.Sql);
@@ -707,8 +784,8 @@ public sealed class CompilerTests
         var result = Compile(source);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
-        Assert.Contains("DECLARE @predicate BIGINT = NULL;", result.Sql);
-        Assert.Contains("DECLARE @filtered BIGINT = @values;", result.Sql);
+        Assert.Contains("DECLARE @predicate INT = NULL;", result.Sql);
+        Assert.Contains("DECLARE @filtered INT = @values;", result.Sql);
         Assert.Contains("__value > @threshold", result.Sql);
         Assert.Contains("DECLARE @_linq_capture", result.Sql);
         Assert.Contains("__value > @_linq_capture", result.Sql);
@@ -727,6 +804,17 @@ public sealed class CompilerTests
 
         Assert.False(result.Success);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "CS0165");
+    }
+
+    [Theory]
+    [InlineData("void Assign(out int value) { }", "CS0177")]
+    [InlineData("Console.WriteLine(value); int value = 1;", "CS0841")]
+    public void ReportsOtherMethodBodyFlowFailures(string source, string expectedCode)
+    {
+        var result = Compile(source);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == expectedCode);
     }
 
     [Fact]
@@ -807,7 +895,7 @@ public sealed class CompilerTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("stack-machine body: AddYears", result.Sql);
-        Assert.Contains("DECLARE @_vm_AddYears_value BIGINT;", result.Sql);
+        Assert.Contains("DECLARE @_vm_AddYears_value INT;", result.Sql);
         Assert.Contains("UPDATE #__sharpsql_type_1 SET [Age]", result.Sql);
         Assert.Contains("DROP TABLE IF EXISTS #__sharpsql_objects;", result.Sql);
     }
@@ -849,7 +937,7 @@ public sealed class CompilerTests
         var result = Compile(source);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
-        Assert.Contains("DECLARE @_birthday_1_this BIGINT = @person;", result.Sql);
+        Assert.Contains("DECLARE @_birthday_1_this INT = @person;", result.Sql);
         Assert.Contains("UPDATE #__sharpsql_type_1 SET [Age]", result.Sql);
         Assert.Contains("WHERE __object_id = @person", result.Sql);
     }

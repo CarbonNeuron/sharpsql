@@ -15,8 +15,8 @@ public sealed partial class SharpSqlCompiler
         VmMethod? context,
         Action<string> continuation)
     {
-        if (expression is ObjectCreationExpressionSyntax creation &&
-            IsRandomType(NormalizeTypeName(creation.Type.ToString())))
+        if (expression is BaseObjectCreationExpressionSyntax creation &&
+            IsRandomType(CreationTypeName(creation)))
         {
             EmitNewRandom(creation, scope, context, continuation);
             return true;
@@ -42,7 +42,7 @@ public sealed partial class SharpSqlCompiler
             .Any(IsRandomInvocation);
 
     private void EmitNewRandom(
-        ObjectCreationExpressionSyntax creation,
+        BaseObjectCreationExpressionSyntax creation,
         VariableScope scope,
         VmMethod? context,
         Action<string> continuation)
@@ -78,9 +78,9 @@ public sealed partial class SharpSqlCompiler
         var offsetIndex = _names.Allocate("_random_offset_index");
         var stateValue = _names.Allocate("_random_state_value");
 
-        _sql.Line($"DECLARE {random} BIGINT;");
+        _sql.Line($"DECLARE {random} INT;");
         _sql.Line($"INSERT INTO {HeapObjects} (__type_id, __random_inext, __random_inextp) VALUES (1004, 0, 21);");
-        _sql.Line($"SET {random} = CONVERT(BIGINT, SCOPE_IDENTITY());");
+        _sql.Line($"SET {random} = CONVERT(INT, SCOPE_IDENTITY());");
         _sql.Line($"DECLARE {seedVariable} INT = {seed};");
         _sql.Line($"DECLARE {subtraction} BIGINT = CASE WHEN {seedVariable} = -2147483648 THEN {RandomMax} WHEN {seedVariable} < 0 THEN -CONVERT(BIGINT, {seedVariable}) ELSE {seedVariable} END;");
         _sql.Line($"DECLARE {mj} BIGINT = 161803398 - {subtraction};");

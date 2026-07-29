@@ -7,6 +7,23 @@ namespace SharpSql;
 
 public sealed partial class SharpSqlCompiler
 {
+    private static readonly Lazy<MetadataReference[]> DefaultReferences = new(CreateDefaultReferences);
+
+    private static readonly HashSet<string> DefaultReferenceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Microsoft.CSharp.dll",
+        "netstandard.dll",
+        "System.Collections.dll",
+        "System.Console.dll",
+        "System.Linq.dll",
+        "System.Linq.Expressions.dll",
+        "System.Linq.Queryable.dll",
+        "System.ObjectModel.dll",
+        "System.Private.CoreLib.dll",
+        "System.Runtime.dll",
+        "System.Runtime.Extensions.dll"
+    };
+
     private static readonly HashSet<string> DataFlowDiagnosticIds =
         ["CS0161", "CS0165", "CS0177", "CS0841"];
 
@@ -213,7 +230,7 @@ public sealed partial class SharpSqlCompiler
             .Where(item => item.Severity == DiagnosticSeverity.Error)
             .Select(item => (item.Id, item.Location.SourceSpan))
             .ToHashSet();
-        _semanticDiagnostics ??= _compilation.GetDiagnostics()
+        _semanticDiagnostics ??= _compilation.GetMethodBodyDiagnostics()
             .Where(item => item.Severity == DiagnosticSeverity.Error && DataFlowDiagnosticIds.Contains(item.Id))
             .ToArray();
         foreach (var diagnostic in _semanticDiagnostics
@@ -233,18 +250,25 @@ public sealed partial class SharpSqlCompiler
 
     private static CSharpCompilation CreateCompilation(SyntaxTree sourceTree)
     {
-        var trustedAssemblies = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))?
-            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries) ?? [];
-        var references = trustedAssemblies.Select(path => MetadataReference.CreateFromFile(path));
         var globalUsings = CSharpSyntaxTree.ParseText(
             "global using System; global using System.Collections.Generic; global using System.Linq;",
             new CSharpParseOptions(LanguageVersion.Preview));
         var compilation = CSharpCompilation.Create(
             "SharpSqlInput",
             [sourceTree, globalUsings],
-            references,
+            DefaultReferences.Value,
             new CSharpCompilationOptions(OutputKind.ConsoleApplication));
         return compilation;
+    }
+
+    private static MetadataReference[] CreateDefaultReferences()
+    {
+        var trustedAssemblies = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))?
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries) ?? [];
+        return trustedAssemblies
+            .Where(path => DefaultReferenceNames.Contains(Path.GetFileName(path)))
+            .Select(path => MetadataReference.CreateFromFile(path))
+            .ToArray();
     }
 
     private SemanticModel? SemanticModelFor(SyntaxNode node)
@@ -681,10 +705,11 @@ public sealed partial class SharpSqlCompiler
             if (IsConsoleWrite(invocation))
             {
                 var value = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
+                var valueType = value is null ? IrType.String : InferType(value, scope);
                 if (value is not null && ContainsRuntimeExpression(value))
-                    EmitVmExpression(value, scope, null, EmitPrintSql);
+                    EmitVmExpression(value, scope, null, sql => EmitPrintSql(FormatTextValue(valueType, sql)));
                 else
-                    EmitPrintSql(value is null ? "N''" : EmitScalar(value, scope));
+                    EmitPrintSql(value is null ? "N''" : FormatTextValue(valueType, EmitScalar(value, scope)));
                 return;
             }
 
@@ -889,7 +914,7 @@ public sealed partial class SharpSqlCompiler
             var continueLabel = _names.AllocateLabel("foreach_continue");
             var breakLabel = _names.AllocateLabel("foreach_break");
 
-            _sql.Line($"DECLARE {collectionSql} BIGINT = {collectionValue};");
+            _sql.Line($"DECLARE {collectionSql} INT = {collectionValue};");
             _sql.Line($"DECLARE {indexSql} INT = 0;");
             _sql.Line($"DECLARE {itemSql} {itemType.SqlType()};");
             scope.Add(statement.Element, new VariableBinding(itemSql, itemType));
@@ -1344,12 +1369,7 @@ public sealed partial class SharpSqlCompiler
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
         var value = EmitScalar(interpolation.Expression, scope, substitutions);
-        if (!InferType(interpolation.Expression, scope, substitutions).IsBoolean)
-            return value;
-
-        return $"CASE {value} " +
-            "WHEN CAST(1 AS BIT) THEN N'True' " +
-            "WHEN CAST(0 AS BIT) THEN N'False' ELSE N'' END";
+        return FormatTextValue(InferType(interpolation.Expression, scope, substitutions), value);
     }
 
     private string EmitAssignable(ExpressionSyntax expression, VariableScope scope) => expression switch

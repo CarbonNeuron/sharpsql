@@ -10,6 +10,9 @@ public sealed partial class SharpSqlCompiler
     private bool _heapRuntimeNeeded;
     private bool _usesLists;
     private bool _usesDictionaries;
+    private bool _usesScalarDictionaryKeys;
+    private bool _usesStringOrBinaryDictionaryKeys;
+    private bool _usesReferenceDictionaryKeys;
     private int _nextHeapTypeId;
 
     private const string HeapObjects = "#__sharpsql_objects";
@@ -22,10 +25,11 @@ public sealed partial class SharpSqlCompiler
     {
         var sourceNodes = compilationSources ?? roots.Cast<SyntaxNode>().ToArray();
         var creations = sourceNodes
-            .SelectMany(source => source.DescendantNodesAndSelf().OfType<ObjectCreationExpressionSyntax>())
+            .SelectMany(source => source.DescendantNodesAndSelf().OfType<BaseObjectCreationExpressionSyntax>())
             .ToArray();
         var usedHeapTypeNames = creations
-            .Select(creation => NormalizeTypeName(creation.Type.ToString()))
+            .Select(CreationTypeName)
+            .Where(name => name.Length > 0)
             .ToHashSet(StringComparer.Ordinal);
         foreach (var declaration in roots.SelectMany(root => root.DescendantNodes().OfType<TypeDeclarationSyntax>()))
         {
@@ -38,11 +42,23 @@ public sealed partial class SharpSqlCompiler
 
         foreach (var creation in creations)
         {
-            var name = NormalizeTypeName(creation.Type.ToString());
+            var name = CreationTypeName(creation);
             if (IsListType(name))
                 _usesLists = true;
             else if (IsDictionaryType(name))
+            {
                 _usesDictionaries = true;
+                var keyType = GenericArguments(name).FirstOrDefault();
+                if (keyType is not null)
+                {
+                    if (keyType.IsString || keyType.Name == "byte[]")
+                        _usesStringOrBinaryDictionaryKeys = true;
+                    else if (keyType.IsReference)
+                        _usesReferenceDictionaryKeys = true;
+                    else
+                        _usesScalarDictionaryKeys = true;
+                }
+            }
             else if (IsRandomType(name))
                 _usesRandom = true;
             else if (!_heapTypes.ContainsKey(name))
@@ -153,7 +169,7 @@ public sealed partial class SharpSqlCompiler
         _sql.Line($"CREATE TABLE {HeapObjects} (");
         using (_sql.Indent())
         {
-            _sql.Line("__id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
+            _sql.Line("__id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
             _sql.Line("__type_id INT NOT NULL,");
             _sql.Line("__count INT NULL,");
             _sql.Line("__random_inext INT NULL,");
@@ -167,7 +183,7 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"CREATE TABLE {type.TableName} (");
             using (_sql.Indent())
             {
-                _sql.Line("__object_id BIGINT NOT NULL PRIMARY KEY" + (type.Fields.Count == 0 ? string.Empty : ","));
+                _sql.Line("__object_id INT NOT NULL PRIMARY KEY" + (type.Fields.Count == 0 ? string.Empty : ","));
                 var fields = type.Fields.Values.ToArray();
                 for (var index = 0; index < fields.Length; index++)
                 {
@@ -190,12 +206,12 @@ public sealed partial class SharpSqlCompiler
         _sql.Line($"CREATE TABLE {HeapIndexedItems} (");
         using (_sql.Indent())
         {
-            _sql.Line("__owner_id BIGINT NOT NULL,");
+            _sql.Line("__owner_id INT NOT NULL,");
             _sql.Line("__index INT NOT NULL,");
             _sql.Line("__value SQL_VARIANT NULL,");
             _sql.Line("__text_value NVARCHAR(MAX) NULL,");
             _sql.Line("__binary_value VARBINARY(MAX) NULL,");
-            _sql.Line("__reference_value BIGINT NULL,");
+            _sql.Line("__reference_value INT NULL,");
             _sql.Line("PRIMARY KEY (__owner_id, __index)");
         }
         _sql.Line(");");
@@ -206,18 +222,27 @@ public sealed partial class SharpSqlCompiler
         _sql.Line($"CREATE TABLE {HeapDictionaryEntries} (");
         using (_sql.Indent())
         {
-            _sql.Line("__id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
-            _sql.Line("__dictionary_id BIGINT NOT NULL,");
+            _sql.Line("__id INT IDENTITY(1,1) NOT NULL,");
+            _sql.Line("__dictionary_id INT NOT NULL,");
             _sql.Line("__key SQL_VARIANT NULL,");
             _sql.Line("__key_text NVARCHAR(MAX) NULL,");
             _sql.Line("__key_binary VARBINARY(MAX) NULL,");
-            _sql.Line("__key_reference BIGINT NULL,");
+            _sql.Line("__key_reference INT NULL,");
+            if (_usesStringOrBinaryDictionaryKeys)
+                _sql.Line("__key_hash BINARY(32) NULL,");
             _sql.Line("__value SQL_VARIANT NULL,");
             _sql.Line("__text_value NVARCHAR(MAX) NULL,");
             _sql.Line("__binary_value VARBINARY(MAX) NULL,");
-            _sql.Line("__reference_value BIGINT NULL");
+            _sql.Line("__reference_value INT NULL,");
+            _sql.Line("PRIMARY KEY (__dictionary_id, __id)");
         }
         _sql.Line(");");
+        if (_usesScalarDictionaryKeys)
+            _sql.Line($"CREATE INDEX __sharpsql_dictionary_scalar_key ON {HeapDictionaryEntries} (__dictionary_id, __key) WHERE __key IS NOT NULL;");
+        if (_usesReferenceDictionaryKeys)
+            _sql.Line($"CREATE INDEX __sharpsql_dictionary_reference_key ON {HeapDictionaryEntries} (__dictionary_id, __key_reference) WHERE __key_reference IS NOT NULL;");
+        if (_usesStringOrBinaryDictionaryKeys)
+            _sql.Line($"CREATE INDEX __sharpsql_dictionary_hash_key ON {HeapDictionaryEntries} (__dictionary_id, __key_hash) WHERE __key_hash IS NOT NULL;");
     }
 
     private void EmitHeapEpilogue()
@@ -238,17 +263,27 @@ public sealed partial class SharpSqlCompiler
         ContainsVmCall(expression) || ContainsHeapEffect(expression) || ContainsGuardedLinqExpression(expression);
 
     private bool ContainsHeapEffect(ExpressionSyntax expression) =>
-        expression.DescendantNodesAndSelf().OfType<ObjectCreationExpressionSyntax>().Any(IsHeapCreation) ||
+        expression.DescendantNodesAndSelf().OfType<BaseObjectCreationExpressionSyntax>().Any(IsHeapCreation) ||
+        expression.DescendantNodesAndSelf().OfType<WithExpressionSyntax>().Any(withExpression =>
+            _heapTypes.ContainsKey(InferType(withExpression.Expression, new VariableScope()).Name)) ||
         expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsRandomInvocation) ||
         expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsLinqMaterialization) ||
         expression.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>().Any() ||
         expression.DescendantNodesAndSelf().OfType<ArrayCreationExpressionSyntax>()
             .Any(creation => creation.Type.ElementType.ToString() != "byte");
 
-    private bool IsHeapCreation(ObjectCreationExpressionSyntax creation)
+    private bool IsHeapCreation(BaseObjectCreationExpressionSyntax creation)
     {
-        var name = NormalizeTypeName(creation.Type.ToString());
+        var name = CreationTypeName(creation);
         return _heapTypes.ContainsKey(name) || IsListType(name) || IsDictionaryType(name) || IsRandomType(name);
+    }
+
+    private string CreationTypeName(BaseObjectCreationExpressionSyntax creation)
+    {
+        if (creation is ObjectCreationExpressionSyntax explicitCreation)
+            return NormalizeTypeName(explicitCreation.Type.ToString());
+        var type = SemanticModelFor(creation)?.GetTypeInfo(creation).Type;
+        return type is null ? string.Empty : NormalizeTypeName(CSharpTypeFactory.From(type).Name);
     }
 
     private bool TryEmitHeapExpression(
@@ -260,6 +295,12 @@ public sealed partial class SharpSqlCompiler
         if (expression is ElementAccessExpressionSyntax element &&
             TryEmitHeapElementExpression(element, scope, context, continuation))
             return true;
+
+        if (expression is WithExpressionSyntax withExpression)
+        {
+            EmitRecordWith(withExpression, scope, context, continuation);
+            return true;
+        }
 
         if (TryEmitLinqMaterialization(expression, scope, context, continuation))
             return true;
@@ -274,10 +315,10 @@ public sealed partial class SharpSqlCompiler
             return true;
         }
 
-        if (expression is not ObjectCreationExpressionSyntax creation || !IsHeapCreation(creation))
+        if (expression is not BaseObjectCreationExpressionSyntax creation || !IsHeapCreation(creation))
             return false;
 
-        var typeName = NormalizeTypeName(creation.Type.ToString());
+        var typeName = CreationTypeName(creation);
         if (IsListType(typeName))
             EmitNewList(creation, typeName, scope, context, continuation);
         else if (IsDictionaryType(typeName))
@@ -352,7 +393,7 @@ public sealed partial class SharpSqlCompiler
     }
 
     private void EmitNewObject(
-        ObjectCreationExpressionSyntax creation,
+        BaseObjectCreationExpressionSyntax creation,
         HeapType heapType,
         VariableScope scope,
         VmMethod? context,
@@ -417,9 +458,9 @@ public sealed partial class SharpSqlCompiler
         void Allocate()
         {
             var objectSql = _names.Allocate("_object");
-            _sql.Line($"DECLARE {objectSql} BIGINT;");
+            _sql.Line($"DECLARE {objectSql} INT;");
             _sql.Line($"INSERT INTO {HeapObjects} (__type_id) VALUES ({heapType.Id});");
-            _sql.Line($"SET {objectSql} = CONVERT(BIGINT, SCOPE_IDENTITY());");
+            _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
             var columns = new List<string> { "__object_id" };
             var values = new List<string> { objectSql };
             foreach (var field in heapType.Fields.Values)
@@ -433,8 +474,95 @@ public sealed partial class SharpSqlCompiler
         }
     }
 
+    private void EmitRecordWith(
+        WithExpressionSyntax expression,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        var typeName = InferType(expression.Expression, scope).Name;
+        if (!_heapTypes.TryGetValue(typeName, out var heapType))
+        {
+            AddDiagnostic("SS6004", $"Record clone type '{typeName}' is not available in the managed heap.", expression);
+            continuation("NULL");
+            return;
+        }
+
+        var initializers = InitializerAssignments(expression.Initializer).ToArray();
+        var unknownMember = initializers.FirstOrDefault(initializer => !heapType.Fields.ContainsKey(initializer.Name));
+        if (unknownMember != default)
+        {
+            AddDiagnostic("SS6004", $"Unknown member '{unknownMember.Name}' on '{heapType.Name}'.", unknownMember.Value);
+            continuation("NULL");
+            return;
+        }
+
+        EmitVmExpression(expression.Expression, scope, context, receiver =>
+        {
+            var receiverStorage = AllocateVmTemporary(new IrType(heapType.Name, IsReference: true), context);
+            StoreVmTemporary(receiverStorage, receiver);
+            var savedReceiver = ReadVmTemporary(receiverStorage);
+            var assignments = new List<HeapValueAssignment>();
+            CaptureField(0);
+
+            void CaptureField(int index)
+            {
+                if (index == heapType.Fields.Count)
+                {
+                    EvaluateInitializer(0);
+                    return;
+                }
+
+                var field = heapType.Fields.Values.ElementAt(index);
+                var storage = AllocateVmTemporary(field.Type, context);
+                StoreVmTemporary(
+                    storage,
+                    $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE __object_id = {savedReceiver})");
+                assignments.Add(new HeapValueAssignment(field, storage));
+                CaptureField(index + 1);
+            }
+
+            void EvaluateInitializer(int index)
+            {
+                if (index == initializers.Length)
+                {
+                    AllocateClone();
+                    return;
+                }
+
+                var initializer = initializers[index];
+                var field = heapType.Fields[initializer.Name];
+                EmitVmExpression(initializer.Value, scope, context, value =>
+                {
+                    var storage = AllocateVmTemporary(field.Type, context);
+                    StoreVmTemporary(storage, value);
+                    assignments.RemoveAll(item => item.Field.Name == field.Name);
+                    assignments.Add(new HeapValueAssignment(field, storage));
+                    EvaluateInitializer(index + 1);
+                });
+            }
+
+            void AllocateClone()
+            {
+                var objectSql = _names.Allocate("_object");
+                _sql.Line($"DECLARE {objectSql} INT;");
+                _sql.Line($"INSERT INTO {HeapObjects} (__type_id) VALUES ({heapType.Id});");
+                _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
+                var columns = new List<string> { "__object_id" };
+                var values = new List<string> { objectSql };
+                foreach (var field in heapType.Fields.Values)
+                {
+                    columns.Add(field.SqlName);
+                    values.Add(ReadVmTemporary(assignments.Single(item => item.Field.Name == field.Name).Value));
+                }
+                _sql.Line($"INSERT INTO {heapType.TableName} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", values)});");
+                continuation(objectSql);
+            }
+        });
+    }
+
     private void EmitNewList(
-        ObjectCreationExpressionSyntax creation,
+        BaseObjectCreationExpressionSyntax creation,
         string typeName,
         VariableScope scope,
         VmMethod? context,
@@ -475,7 +603,7 @@ public sealed partial class SharpSqlCompiler
     }
 
     private void EmitNewDictionary(
-        ObjectCreationExpressionSyntax creation,
+        BaseObjectCreationExpressionSyntax creation,
         string typeName,
         VariableScope scope,
         VmMethod? context,
@@ -489,9 +617,9 @@ public sealed partial class SharpSqlCompiler
     private string AllocateHeapHeader(int typeId, string column, string value)
     {
         var objectSql = _names.Allocate("_object");
-        _sql.Line($"DECLARE {objectSql} BIGINT;");
+        _sql.Line($"DECLARE {objectSql} INT;");
         _sql.Line($"INSERT INTO {HeapObjects} (__type_id, {column}) VALUES ({typeId}, {value});");
-        _sql.Line($"SET {objectSql} = CONVERT(BIGINT, SCOPE_IDENTITY());");
+        _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
         return objectSql;
     }
 
@@ -767,8 +895,20 @@ public sealed partial class SharpSqlCompiler
         });
     }
 
-    private void InsertDictionaryEntry(string dictionary, IrType keyType, string key, IrType valueType, string value) =>
-        _sql.Line($"INSERT INTO {HeapDictionaryEntries} (__dictionary_id, {CollectionValueColumn(keyType, true)}, {CollectionValueColumn(valueType, false)}) VALUES ({dictionary}, {CollectionStoredValue(keyType, key)}, {CollectionStoredValue(valueType, value)});");
+    private void InsertDictionaryEntry(string dictionary, IrType keyType, string key, IrType valueType, string value)
+    {
+        var columns = new List<string> { "__dictionary_id", CollectionValueColumn(keyType, true) };
+        var values = new List<string> { dictionary, CollectionStoredValue(keyType, key) };
+        var hash = DictionaryKeyHash(keyType, key);
+        if (hash is not null)
+        {
+            columns.Add("__key_hash");
+            values.Add(hash);
+        }
+        columns.Add(CollectionValueColumn(valueType, false));
+        values.Add(CollectionStoredValue(valueType, value));
+        _sql.Line($"INSERT INTO {HeapDictionaryEntries} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", values)});");
+    }
 
     private SqlScalarExpression EmitHeapMemberScalar(
         MemberAccessExpressionSyntax member,
@@ -1068,18 +1208,56 @@ public sealed partial class SharpSqlCompiler
 
     private static string DictionaryKeyPredicate(IrType type, string value)
     {
-        var column = CollectionReadValue(type, true);
         if (type.IsString)
-            return $"{column} COLLATE Latin1_General_100_BIN2 = {value} COLLATE Latin1_General_100_BIN2";
-        return $"{column} = {value}";
+            return $"__key_hash = {DictionaryKeyHash(type, value)} AND __key_text COLLATE Latin1_General_100_BIN2 = {value} COLLATE Latin1_General_100_BIN2";
+        if (type.Name == "byte[]")
+            return $"__key_hash = {DictionaryKeyHash(type, value)} AND __key_binary = {value}";
+        return $"{CollectionValueColumn(type, true)} = {CollectionStoredValue(type, value)}";
+    }
+
+    private static string? DictionaryKeyHash(IrType type, string value)
+    {
+        if (type.IsString)
+            return $"HASHBYTES('SHA2_256', CONVERT(VARBINARY(MAX), {value} COLLATE Latin1_General_100_BIN2))";
+        if (type.Name == "byte[]")
+            return $"HASHBYTES('SHA2_256', {value})";
+        return null;
     }
 
     private static string CollectionValuePredicate(IrType type, string value, bool key)
     {
-        var column = CollectionReadValue(type, key);
+        var column = CollectionValueColumn(type, key);
         if (type.IsString)
             return $"{column} COLLATE Latin1_General_100_BIN2 = {value} COLLATE Latin1_General_100_BIN2";
-        return $"{column} = {value}";
+        return $"{column} = {CollectionStoredValue(type, value)}";
+    }
+
+    private string FormatTextValue(IrType type, string value)
+    {
+        if (type.IsBoolean)
+            return $"CASE {value} WHEN CAST(1 AS BIT) THEN N'True' " +
+                   "WHEN CAST(0 AS BIT) THEN N'False' ELSE N'' END";
+        return _heapTypes.TryGetValue(type.Name, out var heapType) &&
+               heapType.Syntax is RecordDeclarationSyntax
+            ? FormatRecordText(heapType, value)
+            : value;
+    }
+
+    private string FormatRecordText(HeapType type, string reference)
+    {
+        var parts = new List<string> { $"N'{EscapeSqlString(type.Name)} {{ '" };
+        var fields = type.Fields.Values.ToArray();
+        for (var index = 0; index < fields.Length; index++)
+        {
+            var field = fields[index];
+            if (index > 0)
+                parts.Add("N', '");
+            parts.Add($"N'{EscapeSqlString(field.Name)} = '");
+            var fieldValue = $"(SELECT {field.SqlName} FROM {type.TableName} WHERE __object_id = {reference})";
+            parts.Add(FormatTextValue(field.Type, fieldValue));
+        }
+        parts.Add("N' }'");
+        return $"CASE WHEN {reference} IS NULL THEN N'' ELSE CONCAT({string.Join(", ", parts)}) END";
     }
 
     private static string DefaultSql(IrType type)

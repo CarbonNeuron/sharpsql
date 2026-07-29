@@ -28,7 +28,7 @@ internal static class SqlTypeMapper
         "byte[]" => "VARBINARY(MAX)",
         "void" => string.Empty,
         "unknown" => "SQL_VARIANT",
-        _ when type.IsReference => "BIGINT",
+        _ when type.IsReference => "INT",
         _ => "SQL_VARIANT"
     };
     }

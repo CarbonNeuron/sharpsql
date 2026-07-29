@@ -31,6 +31,21 @@ public sealed class ProjectCompilerTests
     }
 
     [Fact]
+    public async Task LoadsTheProjectCompilationForVerification()
+    {
+        var result = await new SharpSqlProjectCompiler().LoadCompilationAsync(
+            ProjectPath,
+            new ProjectTranspileOptions { Configuration = "Release" },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.NotNull(result.Compilation);
+        Assert.Equal("MultiFileProject", result.Compilation.AssemblyName);
+        Assert.Contains(result.Compilation.SyntaxTrees, tree => tree.FilePath.EndsWith("SqlJob.cs"));
+        Assert.Contains(result.Compilation.SyntaxTrees, tree => tree.FilePath.EndsWith("Calculations.cs"));
+    }
+
+    [Fact]
     public async Task DiagnosesAnUnknownProjectEntryPoint()
     {
         var result = await new SharpSqlProjectCompiler().TranspileAsync(

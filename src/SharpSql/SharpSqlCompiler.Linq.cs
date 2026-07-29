@@ -77,7 +77,7 @@ public sealed partial class SharpSqlCompiler
     {
         if (!TryBuildLinqLambda(initializer, scope, substitutions: null, out var lambda))
             return false;
-        _sql.Line($"DECLARE {sqlName} BIGINT = NULL;");
+        _sql.Line($"DECLARE {sqlName} INT = NULL;");
         scope.Add(sourceName, new VariableBinding(sqlName, type, Lambda: lambda));
         return true;
     }
@@ -94,12 +94,12 @@ public sealed partial class SharpSqlCompiler
 
         if (!TryBuildLinqQuery(initializer, scope, substitutions: null, out var query))
         {
-            _sql.Line($"DECLARE {sqlName} BIGINT = NULL;");
+            _sql.Line($"DECLARE {sqlName} INT = NULL;");
             scope.Add(sourceName, new VariableBinding(sqlName, type));
             return true;
         }
 
-        _sql.Line($"DECLARE {sqlName} BIGINT = {query.SourceSql};");
+        _sql.Line($"DECLARE {sqlName} INT = {query.SourceSql};");
         scope.Add(sourceName, new VariableBinding(
             sqlName,
             type,
@@ -1103,7 +1103,9 @@ public sealed partial class SharpSqlCompiler
             $"INSERT INTO {HeapIndexedItems} (__owner_id, __index, {column}) " +
             $"SELECT {collection}, CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {sourceAlias}.__index) - 1), {value} " +
             $"FROM ({querySql}) AS {sourceAlias};");
-        _sql.Line($"UPDATE {HeapObjects} SET __count = (SELECT COUNT(*) FROM {HeapIndexedItems} WHERE __owner_id = {collection}) WHERE __id = {collection};");
+        var materializedCount = _names.Allocate("_linq_materialized_count");
+        _sql.Line($"DECLARE {materializedCount} INT = @@ROWCOUNT;");
+        _sql.Line($"UPDATE {HeapObjects} SET __count = {materializedCount} WHERE __id = {collection};");
         continuation(collection);
         return true;
     }

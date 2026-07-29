@@ -65,6 +65,25 @@ Compile to a file:
 dotnet run --project src/SharpSql.Cli -- examples/objects.cs -o objects.sql
 ```
 
+Verify a source file by running it as C# locally and running its generated SQL
+against an ephemeral SQL Server 2022 container, then comparing console output
+and runtime success or failure:
+
+```bash
+dotnet run --project src/SharpSql.Cli -- verify examples/hello.cs
+```
+
+Use `--sql-output generated.sql` to retain the generated batch. The `verify`
+command requires Docker and accepts `.cs` files, `.csproj` projects, or standard
+input. Project verification supports the same `--entry`, `--configuration`, and
+`--framework` options as transpilation:
+
+```bash
+sharpsql verify path/to/MyProject.csproj \
+  --entry MyProject.SqlJob::Run \
+  --configuration Release
+```
+
 Compile all C# documents in an MSBuild project by selecting a parameterless static entry method:
 
 ```bash
@@ -173,7 +192,10 @@ The fallback stores activation frames and typed slots in local temporary tables.
 
 ## Managed objects and collections
 
-References are represented by `BIGINT` object IDs. Each reachable class or record receives a typed local temporary table. A shared object header holds identity, collection counts, and small intrinsic metadata; arrays, lists, and `Random` state reuse one indexed runtime table. Dictionaries add an entry table only when needed. Copying a class variable copies its ID, so aliases observe the same mutations.
+References are represented by `INT` object IDs. Each reachable class or record receives a typed local temporary table. A shared object header holds identity, collection counts, and small intrinsic metadata; arrays, lists, and `Random` state reuse one indexed runtime table. Dictionaries add an entry table only when needed. Copying a class variable copies its ID, so aliases observe the same mutations.
+Target-typed `new(...)` participates in the same heap lowering, and record `with`
+expressions allocate a clone before applying their member initializers in C#
+evaluation order.
 
 ```csharp
 Person ada = new Person("Ada", 36);

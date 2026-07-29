@@ -55,9 +55,15 @@ public sealed partial class SharpSqlCompiler
             if (invocationExpression.Arguments.Count == 0)
                 EmitPrintSql("N''");
             else if (ContainsRuntimeExpression(invocationExpression.Arguments[0]))
-                EmitVmExpression(invocationExpression.Arguments[0], scope, null, EmitPrintSql);
+                EmitVmExpression(
+                    invocationExpression.Arguments[0],
+                    scope,
+                    null,
+                    value => EmitPrintSql(FormatTextValue(invocationExpression.Arguments[0].Type, value)));
             else
-                EmitPrintSql(EmitScalar(invocationExpression.Arguments[0], scope));
+                EmitPrintSql(FormatTextValue(
+                    invocationExpression.Arguments[0].Type,
+                    EmitScalar(invocationExpression.Arguments[0], scope)));
             return;
         }
 
@@ -315,11 +321,7 @@ public sealed partial class SharpSqlCompiler
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
-        var value = EmitScalar(expression, scope, substitutions);
-        if (!expression.Type.IsBoolean)
-            return value;
-        return $"CASE {value} WHEN CAST(1 AS BIT) THEN N'True' " +
-            "WHEN CAST(0 AS BIT) THEN N'False' ELSE N'' END";
+        return FormatTextValue(expression.Type, EmitScalar(expression, scope, substitutions));
     }
 
     private SqlScalarExpression EmitIrObjectCreation(

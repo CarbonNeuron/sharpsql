@@ -15,6 +15,7 @@ public sealed partial class SharpSqlCompiler
     private const string VmSlots = "#__sharpsql_slots";
     private const string VmFrameId = "@__sharpsql_frame_id";
     private const string VmNewFrameId = "@__sharpsql_new_frame_id";
+    private const string VmCallerFrameId = "@__sharpsql_caller_frame_id";
     private const string VmJump = "@__sharpsql_jump";
     private const string VmResult = "@__sharpsql_result";
     private const string VmTextResult = "@__sharpsql_text_result";
@@ -166,15 +167,16 @@ public sealed partial class SharpSqlCompiler
         _sql.Line($"CREATE TABLE {VmStack} (");
         using (_sql.Indent())
         {
-            _sql.Line("__id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
+            _sql.Line("__id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
             _sql.Line("__function_id INT NOT NULL,");
-            _sql.Line("__return_id INT NOT NULL");
+            _sql.Line("__return_id INT NOT NULL,");
+            _sql.Line("__caller_id INT NULL");
         }
         _sql.Line(");");
         _sql.Line($"CREATE TABLE {VmSlots} (");
         using (_sql.Indent())
         {
-            _sql.Line("__frame_id BIGINT NOT NULL,");
+            _sql.Line("__frame_id INT NOT NULL,");
             _sql.Line("__slot_id INT NOT NULL,");
             _sql.Line("__value SQL_VARIANT NULL,");
             _sql.Line("__text_value NVARCHAR(MAX) NULL,");
@@ -182,8 +184,9 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("PRIMARY KEY (__frame_id, __slot_id)");
         }
         _sql.Line(");");
-        _sql.Line($"DECLARE {VmFrameId} BIGINT;");
-        _sql.Line($"DECLARE {VmNewFrameId} BIGINT;");
+        _sql.Line($"DECLARE {VmFrameId} INT;");
+        _sql.Line($"DECLARE {VmNewFrameId} INT;");
+        _sql.Line($"DECLARE {VmCallerFrameId} INT;");
         _sql.Line($"DECLARE {VmJump} INT;");
         _sql.Line($"DECLARE {VmResult} SQL_VARIANT;");
         _sql.Line($"DECLARE {VmTextResult} NVARCHAR(MAX);");
@@ -396,9 +399,7 @@ public sealed partial class SharpSqlCompiler
                         var storage = AllocateVmTemporary(interpolation.Expression.Type, context);
                         StoreVmTemporary(storage, value);
                         var storedValue = ReadVmTemporary(storage);
-                        parts.Add(interpolation.Expression.Type.IsBoolean
-                            ? $"CASE {storedValue} WHEN CAST(1 AS BIT) THEN N'True' WHEN CAST(0 AS BIT) THEN N'False' ELSE N'' END"
-                            : storedValue);
+                        parts.Add(FormatTextValue(interpolation.Expression.Type, storedValue));
                         EmitPart(index + 1);
                     });
                     break;
@@ -545,18 +546,19 @@ public sealed partial class SharpSqlCompiler
             var returnLabel = _names.AllocateLabel($"vm_return_{callee.Definition.Name}");
             var returnId = ++_nextVmContinuationId;
             _vmContinuations.Add(new VmContinuation(returnId, returnLabel));
-            _sql.Line($"INSERT INTO {VmStack} (__function_id, __return_id) VALUES ({callee.Id}, {returnId});");
-            _sql.Line($"SET {VmNewFrameId} = CONVERT(BIGINT, SCOPE_IDENTITY());");
+            _sql.Line($"INSERT INTO {VmStack} (__function_id, __return_id, __caller_id) VALUES ({callee.Id}, {returnId}, {(context is null ? "NULL" : VmFrameId)});");
+            _sql.Line($"SET {VmNewFrameId} = CONVERT(INT, SCOPE_IDENTITY());");
             for (var index = 0; index < capturedArguments.Count; index++)
             {
                 var parameter = callee.Variables[callee.Definition.Parameters[index].Name];
                 InsertVmSlot(VmNewFrameId, parameter.Slot, parameter.Type, ReadVmTemporary(capturedArguments[index]));
             }
+            _sql.Line($"SET {VmFrameId} = {VmNewFrameId};");
             _sql.Line($"GOTO {callee.EntryLabel};");
             EmitLabel(returnLabel);
             if (context is not null)
             {
-                _sql.Line($"SET {VmFrameId} = (SELECT MAX(__id) FROM {VmStack});");
+                _sql.Line($"SET {VmFrameId} = {VmCallerFrameId};");
                 LoadVmRegisters(context);
             }
             continuation(ReadVmResult(callee.Definition.ReturnType));
@@ -718,19 +720,20 @@ public sealed partial class SharpSqlCompiler
             var returnId = ++_nextVmContinuationId;
             _vmContinuations.Add(new VmContinuation(returnId, returnLabel));
 
-            _sql.Line($"INSERT INTO {VmStack} (__function_id, __return_id) VALUES ({callee.Id}, {returnId});");
-            _sql.Line($"SET {VmNewFrameId} = CONVERT(BIGINT, SCOPE_IDENTITY());");
+            _sql.Line($"INSERT INTO {VmStack} (__function_id, __return_id, __caller_id) VALUES ({callee.Id}, {returnId}, {(context is null ? "NULL" : VmFrameId)});");
+            _sql.Line($"SET {VmNewFrameId} = CONVERT(INT, SCOPE_IDENTITY());");
             for (var index = 0; index < capturedArguments.Count; index++)
             {
                 var parameter = callee.Variables[callee.Definition.Parameters[index].Name];
                 InsertVmSlot(VmNewFrameId, parameter.Slot, parameter.Type, ReadVmTemporary(capturedArguments[index]));
             }
+            _sql.Line($"SET {VmFrameId} = {VmNewFrameId};");
             _sql.Line($"GOTO {callee.EntryLabel};");
             EmitLabel(returnLabel);
 
             if (context is not null)
             {
-                _sql.Line($"SET {VmFrameId} = (SELECT MAX(__id) FROM {VmStack});");
+                _sql.Line($"SET {VmFrameId} = {VmCallerFrameId};");
                 LoadVmRegisters(context);
             }
 
@@ -764,7 +767,6 @@ public sealed partial class SharpSqlCompiler
         EmitLeadingComments(method.Definition.Source);
         _sql.Line($"-- stack-machine body: {method.Definition.Name}");
         EmitLabel(method.EntryLabel);
-        _sql.Line($"SET {VmFrameId} = (SELECT MAX(__id) FROM {VmStack});");
         LoadVmRegisters(method);
 
         if (method.Definition.Body is not null)
@@ -891,7 +893,14 @@ public sealed partial class SharpSqlCompiler
             if (argument is null)
                 EmitPrintSql("N''");
             else
-                EmitVmExpression(argument, method.Scope, method, EmitPrintSql);
+            {
+                var argumentType = InferType(argument, method.Scope);
+                EmitVmExpression(
+                    argument,
+                    method.Scope,
+                    method,
+                    value => EmitPrintSql(FormatTextValue(argumentType, value)));
+            }
             return;
         }
 
@@ -930,7 +939,11 @@ public sealed partial class SharpSqlCompiler
             if (invocation.Arguments.Count == 0)
                 EmitPrintSql("N''");
             else
-                EmitVmExpression(invocation.Arguments[0], method.Scope, method, EmitPrintSql);
+                EmitVmExpression(
+                    invocation.Arguments[0],
+                    method.Scope,
+                    method,
+                    value => EmitPrintSql(FormatTextValue(invocation.Arguments[0].Type, value)));
             return;
         }
         if (expression is IrUnaryExpression
@@ -1132,7 +1145,7 @@ public sealed partial class SharpSqlCompiler
         else if (method.Definition.ReturnType.Name != "void")
             _sql.Line($"SET {VmResult} = CONVERT(SQL_VARIANT, {method.ReturnSqlName});");
 
-        _sql.Line($"SET {VmJump} = (SELECT __return_id FROM {VmStack} WHERE __id = {VmFrameId});");
+        _sql.Line($"SELECT {VmJump} = __return_id, {VmCallerFrameId} = __caller_id FROM {VmStack} WHERE __id = {VmFrameId};");
         _sql.Line($"DELETE FROM {VmSlots} WHERE __frame_id = {VmFrameId};");
         _sql.Line($"DELETE FROM {VmStack} WHERE __id = {VmFrameId};");
         _sql.Line($"GOTO {VmDispatchLabel};");
@@ -1163,7 +1176,13 @@ public sealed partial class SharpSqlCompiler
 
     private void StoreVmSlot(string frameId, int slot, IrType type, string value)
     {
-        _sql.Line($"DELETE FROM {VmSlots} WHERE __frame_id = {frameId} AND __slot_id = {slot};");
+        var (column, storedValue) = type.IsString
+            ? ("__text_value", value)
+            : type.Name == "byte[]"
+                ? ("__binary_value", value)
+                : ("__value", $"CONVERT(SQL_VARIANT, {value})");
+        _sql.Line($"UPDATE {VmSlots} SET {column} = {storedValue} WHERE __frame_id = {frameId} AND __slot_id = {slot};");
+        _sql.Line("IF @@ROWCOUNT = 0");
         InsertVmSlot(frameId, slot, type, value);
     }
 

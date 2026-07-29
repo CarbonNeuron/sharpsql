@@ -70,7 +70,7 @@ The fallback stays inside one T-SQL batch. `#__sharpsql_stack` holds activation 
 ```sql
 -- call site
 INSERT INTO #__sharpsql_stack (__function_id, __return_id) VALUES (1, 7);
-SET @__sharpsql_new_frame_id = CONVERT(BIGINT, SCOPE_IDENTITY());
+SET @__sharpsql_new_frame_id = CONVERT(INT, SCOPE_IDENTITY());
 -- store arguments in slots for the new frame
 GOTO __sharpsql_vm_Fibonacci_entry;
 
@@ -96,7 +96,7 @@ Both runtime tables are dropped at normal halt and pre-dropped at startup to rec
 
 ## Managed heap and collections
 
-Every allocated reference receives a `BIGINT` ID from `#__sharpsql_objects`. Each closed-world class or record gets a typed table keyed by that ID. Consequently, member reads remain typed scalar subqueries and member writes are direct updates; no universal EAV conversion is required for ordinary objects.
+Every allocated reference receives an `INT` ID from `#__sharpsql_objects`. Each closed-world class or record gets a typed table keyed by that ID. Consequently, member reads remain typed scalar subqueries and member writes are direct updates; no universal EAV conversion is required for ordinary objects. The ephemeral runtime therefore supports up to roughly 2.1 billion allocations per batch while keeping its keys and indexes narrow.
 
 The object header also stores collection counts and small intrinsic metadata. Arrays and `List<T>` share an indexed item runtime with separate scalar, string, binary, and reference columns. `Random` reuses that table for its indexed state array, since globally unique owner IDs prevent collisions with collection elements. `Dictionary<TKey,TValue>` uses the same typed-union layout for keys and values in its entry table. Closed generic types determine which column and conversion the compiler emits. String dictionary operations use a binary collation to approximate ordinal .NET equality.
 
@@ -106,7 +106,7 @@ References are normal VM scalar values, so callers spill object, list, and dicti
 
 Current heap lowering deliberately diagnoses constructors containing behavior beyond direct field assignments. The next object-runtime layers are constructor-body lowering, inheritance and virtual dispatch, structs and boxing, broader delegate execution outside LINQ, exception unwinding, and external-source `IQueryable<T>` lowering.
 
-The LINQ lowerer builds a compile-time relational plan over an array or `List<T>` heap source. Filtering, projection, ordering, pagination, distinct, joins, and grouped-key stages compose as derived-table operations. Aggregates and element operators render terminal scalar queries; operators whose .NET contracts throw emit explicit guards for empty, multiply populated, or out-of-range results. A query variable stores its plan in the compiler binding while its SQL `BIGINT` captures the original source object, retaining deferred predicate/projection evaluation. `AsEnumerable()`, managed `AsQueryable()`, query syntax, direct `foreach`, and `ToList()`/`ToArray()` materialization all consume the same plan.
+The LINQ lowerer builds a compile-time relational plan over an array or `List<T>` heap source. Filtering, projection, ordering, pagination, distinct, joins, and grouped-key stages compose as derived-table operations. Aggregates and element operators render terminal scalar queries; operators whose .NET contracts throw emit explicit guards for empty, multiply populated, or out-of-range results. A query variable stores its plan in the compiler binding while its SQL `INT` captures the original source object, retaining deferred predicate/projection evaluation. `AsEnumerable()`, managed `AsQueryable()`, query syntax, direct `foreach`, and `ToList()`/`ToArray()` materialization all consume the same plan.
 
 Lambda bindings carry their syntax plus scalar captures. This lets stored delegates, lexical closures, returned delegate factories, and expression-bodied or single-return helper methods pass predicates and deferred query plans through parameters and return values. Method-local captures are spilled when the helper is invoked, preserving capture-by-value for returned closures while ordinary lexical closures continue to observe later mutations. Grouping currently represents distinct group keys, which supports group counts and `group.Key` projections; full `IGrouping<TKey,TElement>` materialization and per-group aggregate projections require a richer nested-sequence representation.
 
