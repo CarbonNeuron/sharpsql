@@ -1,0 +1,28 @@
+<Project>
+  <PropertyGroup>
+    <SharpSqlBuildHostPath Condition="'$(SharpSqlBuildHostPath)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../tools/net10.0/any/SharpSql.Build.dll'))</SharpSqlBuildHostPath>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(SharpSqlEnabled)' == 'true' and '$(SharpSqlEnableAnalyzer)' == 'true'">
+    <Analyzer Include="$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../tools/analyzers/SharpSql.Analyzers.dll'))" />
+    <Analyzer Include="$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../tools/analyzers/SharpSql.dll'))" />
+    <Analyzer Include="$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../tools/analyzers/SharpSql.Ir.dll'))" />
+  </ItemGroup>
+
+  <Target Name="SharpSqlTranspile"
+          Condition="'$(SharpSqlEnabled)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <Error Condition="!Exists('$(SharpSqlBuildHostPath)')"
+           Text="SharpSql build host was not found at '$(SharpSqlBuildHostPath)'." />
+    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --project &quot;$(MSBuildProjectFullPath)&quot; --output &quot;$(SharpSqlOutputPath)&quot; --configuration &quot;$(Configuration)&quot; --framework &quot;$(TargetFramework)&quot; --entry &quot;$(SharpSqlEntryPoint)&quot;"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="High"
+          StandardErrorImportance="High" />
+    <ItemGroup>
+      <FileWrites Include="$(SharpSqlOutputPath)" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="SharpSqlGenerateOnBuild"
+          AfterTargets="CoreCompile"
+          DependsOnTargets="SharpSqlTranspile"
+          Condition="'$(SharpSqlEnabled)' == 'true' and '$(SharpSqlGenerateOnBuild)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'" />
+</Project>

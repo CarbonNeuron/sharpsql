@@ -2,17 +2,17 @@ namespace SharpSql;
 
 internal sealed class MethodGraph
 {
-    private readonly IReadOnlyDictionary<IrMethodId, IReadOnlySet<IrMethodId>> _callees;
-    private readonly IReadOnlyDictionary<IrMethodId, IReadOnlySet<IrMethodId>> _callers;
+    private readonly IReadOnlyDictionary<IrMethodId, IReadOnlyCollection<IrMethodId>> _callees;
+    private readonly IReadOnlyDictionary<IrMethodId, IReadOnlyCollection<IrMethodId>> _callers;
     private readonly IReadOnlyDictionary<IrMethodId, int> _callSiteCounts;
     private readonly IReadOnlyDictionary<IrMethodId, string> _names;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<IrMethodId>> _idsByName;
 
     private MethodGraph(
-        IReadOnlyDictionary<IrMethodId, IReadOnlySet<IrMethodId>> callees,
-        IReadOnlyDictionary<IrMethodId, IReadOnlySet<IrMethodId>> callers,
+        IReadOnlyDictionary<IrMethodId, IReadOnlyCollection<IrMethodId>> callees,
+        IReadOnlyDictionary<IrMethodId, IReadOnlyCollection<IrMethodId>> callers,
         IReadOnlyDictionary<IrMethodId, int> callSiteCounts,
-        IReadOnlySet<IrMethodId> recursiveMethods,
+        IReadOnlyCollection<IrMethodId> recursiveMethods,
         IReadOnlyDictionary<IrMethodId, string> names,
         IReadOnlyDictionary<string, IReadOnlyList<IrMethodId>> idsByName)
     {
@@ -24,8 +24,8 @@ internal sealed class MethodGraph
         _idsByName = idsByName;
     }
 
-    public IReadOnlySet<IrMethodId> RecursiveMethodIds { get; }
-    public IReadOnlySet<string> RecursiveMethods => RecursiveMethodIds
+    public IReadOnlyCollection<IrMethodId> RecursiveMethodIds { get; }
+    public IReadOnlyCollection<string> RecursiveMethods => RecursiveMethodIds
         .Select(id => _names[id])
         .ToHashSet(StringComparer.Ordinal);
 
@@ -35,19 +35,19 @@ internal sealed class MethodGraph
     public int CallSiteCount(string methodName) =>
         Ids(methodName).Sum(CallSiteCount);
 
-    public IReadOnlySet<IrMethodId> Callees(IrMethodId methodId) =>
+    public IReadOnlyCollection<IrMethodId> Callees(IrMethodId methodId) =>
         _callees.GetValueOrDefault(methodId, EmptyIds);
 
-    public IReadOnlySet<IrMethodId> Callers(IrMethodId methodId) =>
+    public IReadOnlyCollection<IrMethodId> Callers(IrMethodId methodId) =>
         _callers.GetValueOrDefault(methodId, EmptyIds);
 
-    public IReadOnlySet<string> Callees(string methodName) =>
+    public IReadOnlyCollection<string> Callees(string methodName) =>
         Ids(methodName).SelectMany(Callees).Select(id => _names[id]).ToHashSet(StringComparer.Ordinal);
 
-    public IReadOnlySet<string> Callers(string methodName) =>
+    public IReadOnlyCollection<string> Callers(string methodName) =>
         Ids(methodName).SelectMany(Callers).Select(id => _names[id]).ToHashSet(StringComparer.Ordinal);
 
-    public IReadOnlySet<IrMethodId> ConnectedClosure(IEnumerable<IrMethodId> roots)
+    public IReadOnlyCollection<IrMethodId> ConnectedClosure(IEnumerable<IrMethodId> roots)
     {
         var selected = roots.ToHashSet();
         var pending = new Queue<IrMethodId>(selected);
@@ -62,7 +62,7 @@ internal sealed class MethodGraph
         return selected;
     }
 
-    public IReadOnlySet<string> ConnectedClosure(IEnumerable<string> roots)
+    public IReadOnlyCollection<string> ConnectedClosure(IEnumerable<string> roots)
     {
         return ConnectedClosure(roots.SelectMany(Ids))
             .Select(id => _names[id])
@@ -111,10 +111,10 @@ internal sealed class MethodGraph
 
         var readonlyCallees = callees.ToDictionary(
             item => item.Key,
-            item => (IReadOnlySet<IrMethodId>)item.Value);
+            item => (IReadOnlyCollection<IrMethodId>)item.Value);
         var readonlyCallers = callers.ToDictionary(
             item => item.Key,
-            item => (IReadOnlySet<IrMethodId>)item.Value);
+            item => (IReadOnlyCollection<IrMethodId>)item.Value);
         return new MethodGraph(
             readonlyCallees,
             readonlyCallers,
@@ -289,8 +289,8 @@ internal sealed class MethodGraph
         }
     }
 
-    private static IReadOnlySet<IrMethodId> FindRecursiveMethods(
-        IReadOnlyDictionary<IrMethodId, IReadOnlySet<IrMethodId>> callees)
+    private static IReadOnlyCollection<IrMethodId> FindRecursiveMethods(
+        IReadOnlyDictionary<IrMethodId, IReadOnlyCollection<IrMethodId>> callees)
     {
         var recursive = new HashSet<IrMethodId>();
         foreach (var origin in callees.Keys)
@@ -310,5 +310,5 @@ internal sealed class MethodGraph
         }
     }
 
-    private static IReadOnlySet<IrMethodId> EmptyIds { get; } = new HashSet<IrMethodId>();
+    private static IReadOnlyCollection<IrMethodId> EmptyIds { get; } = new HashSet<IrMethodId>();
 }

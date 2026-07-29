@@ -59,6 +59,48 @@ dotnet tool install --global SharpSql.Tool
 sharpsql --help
 ```
 
+### Project build and IDE integration
+
+Add the SDK package to a project that should be transpiled:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="SharpSql.Sdk" Version="0.1.0" PrivateAssets="all" />
+</ItemGroup>
+
+<PropertyGroup>
+  <!-- Required for libraries; executable projects use their normal entry point. -->
+  <SharpSqlEntryPoint>MyApp.SqlJob::Run</SharpSqlEntryPoint>
+  <SharpSqlOutputPath>$(OutputPath)MyApp.sql</SharpSqlOutputPath>
+</PropertyGroup>
+```
+
+The package reports SharpSql compatibility errors through Roslyn while editing
+and emits SQL during a normal build:
+
+```bash
+dotnet build
+```
+
+Without `SharpSqlOutputPath`, output is written to
+`$(IntermediateOutputPath)sharpsql/$(AssemblyName).sql`. To generate SQL without
+running the C# compiler, use transpile-only mode, or invoke the dedicated target:
+
+```bash
+dotnet build -p:SharpSqlTranspileOnly=true
+dotnet msbuild -t:SharpSqlTranspile
+```
+
+Set `SharpSqlGenerateOnBuild` to `false` for IDE/build diagnostics without SQL
+generation, `SharpSqlEnableAnalyzer` to `false` to disable live diagnostics, or
+`SharpSqlEnabled` to `false` to disable both integrations. Standard Roslyn
+`.editorconfig` severity settings apply, including category-wide configuration:
+
+```ini
+[*.cs]
+dotnet_analyzer_diagnostic.category-SharpSql.severity = warning
+```
+
 From the repository root:
 
 ```bash
@@ -157,6 +199,7 @@ var result = await new SharpSqlProjectCompiler().TranspileAsync(
 
 - Top-level C# statements and conventional `Main` bodies
 - Multi-file SDK-style C# projects loaded with their real references, generated sources, global usings, language version, and conditional symbols
+- Installable `SharpSql.Sdk` integration with build-time SQL output, a dedicated transpile target, transpile-only builds, and live Roslyn compatibility diagnostics
 - Core numeric types, `bool`, `char`, `string`, nullable values, date/time types, `Guid`, `byte[]`, and `object`
 - Declarations, assignment, arithmetic, comparisons, boolean expressions, interpolation, and casts
 - String length/indexing and `string(char[])` construction

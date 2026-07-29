@@ -2,14 +2,15 @@ using System.Text.RegularExpressions;
 
 namespace SharpSql;
 
-internal sealed partial class NameAllocator
+internal sealed class NameAllocator
 {
+    private static readonly Regex UnsafeNamePattern = new("[^A-Za-z0-9_]", RegexOptions.Compiled);
     private readonly HashSet<string> _used = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _usedLabels = new(StringComparer.OrdinalIgnoreCase);
 
     public string Allocate(string preferred)
     {
-        var safe = UnsafeName().Replace(preferred, "_");
+        var safe = UnsafeNamePattern.Replace(preferred, "_");
         if (safe.Length == 0 || char.IsDigit(safe[0]))
             safe = "_" + safe;
 
@@ -21,7 +22,7 @@ internal sealed partial class NameAllocator
 
     public string AllocateLabel(string preferred)
     {
-        var safe = UnsafeName().Replace(preferred, "_");
+        var safe = UnsafeNamePattern.Replace(preferred, "_");
         if (safe.Length == 0 || char.IsDigit(safe[0]))
             safe = "_" + safe;
 
@@ -30,7 +31,4 @@ internal sealed partial class NameAllocator
             candidate = $"__sharpsql_{safe}_{suffix}";
         return candidate;
     }
-
-    [GeneratedRegex("[^A-Za-z0-9_]")]
-    private static partial Regex UnsafeName();
 }

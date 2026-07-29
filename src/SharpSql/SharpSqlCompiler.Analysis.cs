@@ -424,7 +424,7 @@ public sealed partial class SharpSqlCompiler
     }
 
     private sealed record AliasValue(
-        IReadOnlySet<int> Parameters,
+        IReadOnlyCollection<int> Parameters,
         bool IsFresh,
         bool IsUnknown)
     {

@@ -58,6 +58,17 @@ jobs:
             --no-http-cache
           test "$(artifacts/tool/sharpsql --version)" = "$PACKAGE_VERSION"
 
+      - name: Pack project SDK
+        run: >-
+          dotnet pack src/SharpSql.Sdk/SharpSql.Sdk.csproj
+          --configuration Release
+          --output artifacts/packages
+          -p:Version="$PACKAGE_VERSION"
+          -p:PackageVersion="$PACKAGE_VERSION"
+
+      - name: Smoke-test project SDK
+        run: ./scripts/test-sdk-package.sh artifacts/packages "$PACKAGE_VERSION"
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v7

@@ -6,7 +6,7 @@ namespace SharpSql;
 
 public sealed partial class SharpSqlCompiler
 {
-    private readonly Dictionary<IrSource, SyntaxNode> _csharpSourceNodes = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<IrSource, SyntaxNode> _csharpSourceNodes = new(ReferenceComparer<IrSource>.Instance);
     private readonly Dictionary<SyntaxTree, int> _sourceOffsets = [];
     private readonly Dictionary<ISymbol, IrSymbol> _irSymbols = new(SymbolEqualityComparer.Default);
     private int _nextSourceOffset;

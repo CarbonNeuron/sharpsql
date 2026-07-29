@@ -182,7 +182,7 @@ public sealed partial class SharpSqlCompiler
             }
             var scalarReplacements = substitutions is null
                 ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
-                : new Dictionary<string, Substitution>(substitutions, StringComparer.Ordinal);
+                : substitutions.CopyToDictionary(StringComparer.Ordinal);
             var planReplacements = new Dictionary<string, SqlLinqQueryPlan>(StringComparer.Ordinal);
             var lambdaReplacements = new Dictionary<string, SqlLinqLambdaPlan>(StringComparer.Ordinal);
             for (var index = 0; index < arguments.Count; index++)
@@ -443,7 +443,7 @@ public sealed partial class SharpSqlCompiler
 
             var scalarReplacements = substitutions is null
                 ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
-                : new Dictionary<string, Substitution>(substitutions, StringComparer.Ordinal);
+                : substitutions.CopyToDictionary(StringComparer.Ordinal);
             var planReplacements = new Dictionary<string, SqlLinqQueryPlan>(StringComparer.Ordinal);
             var lambdaReplacements = new Dictionary<string, SqlLinqLambdaPlan>(StringComparer.Ordinal);
             for (var index = 0; index < arguments.Count; index++)
@@ -1126,7 +1126,7 @@ public sealed partial class SharpSqlCompiler
                     substitutions);
                 var resultReplacements = joinSubstitutions is null
                     ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
-                    : new Dictionary<string, Substitution>(joinSubstitutions, StringComparer.Ordinal);
+                    : joinSubstitutions.CopyToDictionary(StringComparer.Ordinal);
                 resultReplacements[join.ResultOuterParameterName] = new Substitution(
                     SqlScalarExpression.Primary($"{outerAlias}.__value", currentType));
                 resultReplacements[join.ResultInnerParameterName] = new Substitution(
@@ -2147,7 +2147,7 @@ public sealed partial class SharpSqlCompiler
     {
         var replacements = substitutions is null
             ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
-            : new Dictionary<string, Substitution>(substitutions, StringComparer.Ordinal);
+            : substitutions.CopyToDictionary(StringComparer.Ordinal);
         replacements[parameterName] = new Substitution(SqlScalarExpression.Primary(value, type));
         return replacements;
     }
@@ -2207,7 +2207,7 @@ public sealed partial class SharpSqlCompiler
             return current;
         if (current is null || current.Count == 0)
             return captured;
-        var merged = new Dictionary<string, Substitution>(captured, StringComparer.Ordinal);
+        var merged = captured.CopyToDictionary(StringComparer.Ordinal);
         foreach (var item in current)
             merged[item.Key] = item.Value;
         return merged;
@@ -2276,7 +2276,7 @@ public sealed partial class SharpSqlCompiler
             {
                 var scalarReplacements = substitutions is null
                     ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
-                    : new Dictionary<string, Substitution>(substitutions, StringComparer.Ordinal);
+                    : substitutions.CopyToDictionary(StringComparer.Ordinal);
                 var planReplacements = new Dictionary<string, SqlLinqQueryPlan>(StringComparer.Ordinal);
                 var lambdaReplacements = new Dictionary<string, SqlLinqLambdaPlan>(StringComparer.Ordinal);
                 for (var index = 0; index < arguments.Count; index++)
@@ -2314,7 +2314,7 @@ public sealed partial class SharpSqlCompiler
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
         var captures = CaptureLinqSubstitutions(substitutions) is { } existing
-            ? new Dictionary<string, SqlLinqScalarCapture>(existing, StringComparer.Ordinal)
+            ? existing.CopyToDictionary(StringComparer.Ordinal)
             : new Dictionary<string, SqlLinqScalarCapture>(StringComparer.Ordinal);
         var parameters = lambda.Parameters.Select(parameter => parameter.Name).ToHashSet(StringComparer.Ordinal);
         if (lambda.ExpressionBody is not null) Visit(lambda.ExpressionBody);
@@ -2387,7 +2387,7 @@ public sealed partial class SharpSqlCompiler
             {
                 var scalarReplacements = substitutions is null
                     ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
-                    : new Dictionary<string, Substitution>(substitutions, StringComparer.Ordinal);
+                    : substitutions.CopyToDictionary(StringComparer.Ordinal);
                 var planReplacements = new Dictionary<string, SqlLinqQueryPlan>(StringComparer.Ordinal);
                 var lambdaReplacements = new Dictionary<string, SqlLinqLambdaPlan>(StringComparer.Ordinal);
                 for (var index = 0; index < arguments.Count; index++)
@@ -2435,7 +2435,7 @@ public sealed partial class SharpSqlCompiler
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
         var captures = CaptureLinqSubstitutions(substitutions) is { } scalarCaptures
-            ? new Dictionary<string, SqlLinqScalarCapture>(scalarCaptures, StringComparer.Ordinal)
+            ? scalarCaptures.CopyToDictionary(StringComparer.Ordinal)
             : new Dictionary<string, SqlLinqScalarCapture>(StringComparer.Ordinal);
         var parameters = lambda switch
         {

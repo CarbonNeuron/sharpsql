@@ -31,9 +31,9 @@ internal enum MethodEffects
 
 internal sealed record MethodBehaviorSummary(
     MethodEffects Effects,
-    IReadOnlySet<int> MutatedParameters,
-    IReadOnlySet<int> EscapingParameters,
-    IReadOnlySet<int> ReturnedParameters,
+    IReadOnlyCollection<int> MutatedParameters,
+    IReadOnlyCollection<int> EscapingParameters,
+    IReadOnlyCollection<int> ReturnedParameters,
     bool ReturnsFreshReference,
     bool ReturnsUnknownReference)
 {

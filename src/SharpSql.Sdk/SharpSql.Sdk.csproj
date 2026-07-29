@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <PackageId>SharpSql.Sdk</PackageId>
+    <Description>Build-time SQL generation and live compatibility diagnostics for SharpSql projects.</Description>
+    <PackageTags>csharp;sql;transpiler;compiler;roslyn;analyzer;msbuild</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <DevelopmentDependency>true</DevelopmentDependency>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <IsPackable>true</IsPackable>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);CollectSharpSqlSdkPackageFiles</TargetsForTfmSpecificContentInPackage>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SharpSql.Analyzers/SharpSql.Analyzers.csproj" PrivateAssets="all" />
+    <ProjectReference Include="../SharpSql.Build/SharpSql.Build.csproj" PrivateAssets="all" />
+    <None Include="buildTransitive/SharpSql.Sdk.props" Pack="true" PackagePath="buildTransitive/" />
+    <None Include="buildTransitive/SharpSql.Sdk.targets" Pack="true" PackagePath="buildTransitive/" />
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+  <Target Name="CollectSharpSqlSdkPackageFiles" DependsOnTargets="Build" Returns="@(TfmSpecificPackageFile)">
+    <ItemGroup>
+      <_SharpSqlBuildHost Include="$(MSBuildProjectDirectory)/../SharpSql.Build/bin/$(Configuration)/$(TargetFramework)/**/*" />
+      <_SharpSqlAnalyzer Include="$(MSBuildProjectDirectory)/../SharpSql.Analyzers/bin/$(Configuration)/netstandard2.0/SharpSql.Analyzers.dll" />
+      <_SharpSqlAnalyzer Include="$(MSBuildProjectDirectory)/../SharpSql/bin/$(Configuration)/netstandard2.0/SharpSql.dll" />
+      <_SharpSqlAnalyzer Include="$(MSBuildProjectDirectory)/../SharpSql.Ir/bin/$(Configuration)/netstandard2.0/SharpSql.Ir.dll" />
+      <TfmSpecificPackageFile Include="@(_SharpSqlBuildHost)">
+        <PackagePath>tools/$(TargetFramework)/any/</PackagePath>
+      </TfmSpecificPackageFile>
+      <TfmSpecificPackageFile Include="@(_SharpSqlAnalyzer)">
+        <PackagePath>tools/analyzers/</PackagePath>
+      </TfmSpecificPackageFile>
+    </ItemGroup>
+  </Target>
+</Project>

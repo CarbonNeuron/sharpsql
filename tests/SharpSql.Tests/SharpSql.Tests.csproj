@@ -13,6 +13,8 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <ProjectReference Include="../../src/SharpSql.Cli/SharpSql.Cli.csproj" />
+    <ProjectReference Include="../../src/SharpSql.Analyzers/SharpSql.Analyzers.csproj" />
+    <ProjectReference Include="../../src/SharpSql.Build/SharpSql.Build.csproj" />
     <ProjectReference Include="../../src/SharpSql.MSBuild/SharpSql.MSBuild.csproj" />
     <ProjectReference Include="../../src/SharpSql/SharpSql.csproj" />
     <None Include="../fixtures/MultiFileProject/**/*" Exclude="../fixtures/MultiFileProject/bin/**/*;../fixtures/MultiFileProject/obj/**/*" Link="fixtures/MultiFileProject/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />

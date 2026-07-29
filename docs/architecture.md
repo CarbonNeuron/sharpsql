@@ -16,6 +16,15 @@ C# source text or MSBuild project
 
 Single-file mode creates a Roslyn compilation directly. Project mode is isolated in `SharpSql.MSBuild`: `MSBuildWorkspace` performs a design-time build and supplies the resulting `CSharpCompilation`, so all documents share the project's actual references, generated sources, global usings, language version, nullable context, and conditional symbols. The user selects a parameterless static method with `Namespace.Type::Method`, or an executable project's compiler-selected entry point is used. The frontend collects methods and heap types across all syntax trees before lowering, while generated-file banner comments are excluded from SQL output. Project-reference assemblies participate in semantic binding, but SharpSql currently lowers method bodies only from the selected project's source compilation.
 
+`SharpSql.Sdk` packages this boundary for ordinary C# projects. Its
+`buildTransitive` assets attach `SharpSqlTranspile` after `CoreCompile`, while an
+out-of-process .NET build host opens a design-time workspace and writes SQL for
+the selected entry point. Design-time builds skip the target, preventing
+recursive project loading. A `netstandard2.0` Roslyn analyzer uses the same
+compiler frontend and diagnostics against the IDE's active `CSharpCompilation`;
+the compiler and IR assemblies therefore multi-target `net10.0` for execution
+and `netstandard2.0` for analyzer-host compatibility.
+
 `IrType` carries only language/runtime type identity. `CSharpTypeFactory` is the frontend mapping from Roslyn, while `SqlTypeMapper` belongs to the SQL Server backend. Likewise, `SqlScalarExpression` and the `SqlLinq*` plans are explicitly backend models: SQL text and precedence never appear in compiler IR. LINQ lambda bodies are bound IR expressions, and query syntax is represented by neutral query clauses before the backend chooses relational SQL.
 
 Roslyn supplies semantic types, nullable flow state, constants, and data-flow facts while binding. A semantic preflight imports definite-assignment, use-before-declaration, out-parameter, and missing-return failures while leaving intentional SharpSql extensions—such as mutable positional-record fields—to the supported-subset validator. Each method carries the endpoint-reachability and statement-cost facts consumed by lowering. An overload-aware method catalog and the IR method graph use stable semantic IDs for call-site counts, caller/callee edges, recursion membership, effect propagation, and the connected closure required by VM selection; identical method names in different signatures or declaring types are never conflated. Method definitions retain abstract/virtual/override slots and implemented-interface identities for runtime dispatch. A backend-neutral fixed-point pass propagates effects through resolved calls, including mutable-state reads/writes, allocation, throwing, nondeterminism, I/O, unknown calls, parameter mutation and escape, returned parameter aliases, and fresh references. A shared intrinsic catalog supplies conservative behavior and recognition for collections, LINQ, console output, and stateful `Random` calls.

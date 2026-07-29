@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <Description>Build host used by the SharpSql.Sdk package.</Description>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>SharpSql.Build</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SharpSql.MSBuild/SharpSql.MSBuild.csproj" />
+  </ItemGroup>
+</Project>
