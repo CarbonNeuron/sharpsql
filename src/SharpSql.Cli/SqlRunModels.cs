@@ -14,7 +14,8 @@ public sealed record SqlRunRequest(
     bool KeepContainer,
     string SqlServerImage,
     string DatabaseName,
-    int CommandTimeoutSeconds)
+    int CommandTimeoutSeconds,
+    RuntimeStorageKind RuntimeStorage = RuntimeStorageKind.Ephemeral)
 {
     public bool IsProject => Sql is null;
 }
@@ -46,7 +47,8 @@ public sealed class SqlRunService : ISqlRunService
                 {
                     EntryPoint = request.EntryPoint,
                     Configuration = request.Configuration,
-                    TargetFramework = request.TargetFramework
+                    TargetFramework = request.TargetFramework,
+                    CompilerOptions = new TranspileOptions { RuntimeStorage = request.RuntimeStorage }
                 },
                 cancellationToken);
             if (!transpileResult.Success)
@@ -79,18 +81,33 @@ public sealed class SqlRunService : ISqlRunService
                 request.DatabaseName,
                 request.KeepContainer),
             cancellationToken);
-        var execution = await SqlBatchExecutor.ExecuteAsync(
-            session.Connection,
-            sql,
-            request.CommandTimeoutSeconds,
-            cancellationToken);
-        return new SqlRunResult(
-            execution.Success,
-            session.Description,
-            execution.Messages,
-            [],
-            session.KeepContainer,
-            execution.ErrorNumber,
-            execution.ErrorMessage);
+        var messages = new List<string>();
+        foreach (var batch in CreateExecutionBatches(request.RuntimeStorage, sql))
+        {
+            var execution = await SqlBatchExecutor.ExecuteAsync(
+                session.Connection,
+                batch,
+                request.CommandTimeoutSeconds,
+                cancellationToken);
+            messages.AddRange(execution.Messages);
+            if (!execution.Success)
+            {
+                return new SqlRunResult(
+                    false,
+                    session.Description,
+                    messages,
+                    [],
+                    session.KeepContainer,
+                    execution.ErrorNumber,
+                    execution.ErrorMessage);
+            }
+        }
+
+        return new SqlRunResult(true, session.Description, messages, [], session.KeepContainer);
     }
+
+    internal static IReadOnlyList<string> CreateExecutionBatches(RuntimeStorageKind runtimeStorage, string sql) =>
+        runtimeStorage == RuntimeStorageKind.ServiceBroker
+            ? [SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), sql]
+            : [sql];
 }

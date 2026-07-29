@@ -122,7 +122,7 @@ public sealed partial class SharpSqlCompiler
         }
 
         expression = SqlScalarExpression.Primary(
-            $"CASE (SELECT __type_id FROM {HeapObjects} WHERE __id = {receiver}) {string.Join(" ", branches)} END",
+            $"CASE (SELECT __type_id FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {receiver}) {string.Join(" ", branches)} END",
             invocation.Type);
         return true;
     }

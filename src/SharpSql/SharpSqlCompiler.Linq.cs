@@ -68,6 +68,10 @@ internal sealed record SqlLinqRepeatQuerySource(
     string ValueSql,
     string CountSql) : SqlLinqQuerySource;
 
+internal sealed record SqlLinqTaskResultQuerySource(
+    string TaskIdsJsonSql,
+    string ExecutionIdSql) : SqlLinqQuerySource;
+
 internal sealed record SqlLinqQueryPlan(
     SqlLinqQuerySource Source,
     IrType SourceElementType,
@@ -1163,7 +1167,7 @@ public sealed partial class SharpSqlCompiler
             var itemAlias = NextLinqAlias("item");
             return $"SELECT {itemAlias}.__index AS __index, " +
                 $"{CollectionReadValue(query.SourceElementType, key: false, qualifier: itemAlias)} AS __value " +
-                $"FROM {HeapIndexedItems} AS {itemAlias} WHERE {itemAlias}.__owner_id = {heap.OwnerSql}";
+                $"FROM {HeapIndexedItems} AS {itemAlias} WHERE {HeapExecutionFilter(itemAlias)}{itemAlias}.__owner_id = {heap.OwnerSql}";
         }
 
         if (query.Source is SqlLinqRangeQuerySource range)
@@ -1197,6 +1201,25 @@ public sealed partial class SharpSqlCompiler
                 $"FROM GENERATE_SERIES(CONVERT(BIGINT, 0), ({generatedCount}) - 1, CONVERT(BIGINT, 1)) AS {repeatAlias}";
         }
 
+        if (query.Source is SqlLinqTaskResultQuerySource taskResults)
+        {
+            var idsAlias = NextLinqAlias("task_ids");
+            var tasksAlias = NextLinqAlias("tasks");
+            var result = query.SourceElementType.IsReference
+                ? $"CONVERT(INT, {tasksAlias}.[ResultReferenceId])"
+                : query.SourceElementType.IsString
+                    ? $"{tasksAlias}.[ResultText]"
+                    : query.SourceElementType.Name == "byte[]"
+                        ? $"{tasksAlias}.[ResultBinary]"
+                        : $"CONVERT({query.SourceElementType.SqlType()}, {tasksAlias}.[ResultScalar])";
+            return $"SELECT CONVERT(INT, {idsAlias}.[key]) AS __index, {result} AS __value " +
+                $"FROM OPENJSON({taskResults.TaskIdsJsonSql}) AS {idsAlias} " +
+                $"INNER JOIN [SharpSql].[Tasks] AS {tasksAlias} " +
+                $"ON {tasksAlias}.[ExecutionId] = {taskResults.ExecutionIdSql} " +
+                $"AND {tasksAlias}.[TaskId] = CONVERT(BIGINT, {idsAlias}.[value]) " +
+                $"WHERE {tasksAlias}.[State] = 4";
+        }
+
         throw new InvalidOperationException($"Unknown LINQ source '{query.Source.GetType().Name}'.");
     }
 
@@ -1212,7 +1235,7 @@ public sealed partial class SharpSqlCompiler
         var count = query.Source switch
         {
             SqlLinqHeapQuerySource heap =>
-                $"(SELECT __count FROM {HeapObjects} WHERE __id = {heap.OwnerSql})",
+                $"(SELECT __count FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {heap.OwnerSql})",
             SqlLinqRangeQuerySource range => range.CountSql,
             SqlLinqRepeatQuerySource repeat => repeat.CountSql,
             _ => null
@@ -1875,12 +1898,12 @@ public sealed partial class SharpSqlCompiler
         var column = CollectionValueColumn(query.ElementType, key: false);
         var value = CollectionStoredValue(query.ElementType, $"{sourceAlias}.__value");
         _sql.Line(
-            $"INSERT INTO {HeapIndexedItems} (__owner_id, __index, {column}) " +
-            $"SELECT {collection}, CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {sourceAlias}.__index) - 1), {value} " +
+            $"INSERT INTO {HeapIndexedItems} ({HeapInsertColumns($"__owner_id, __index, {column}")}) " +
+            $"SELECT {HeapInsertValues($"{collection}, CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {sourceAlias}.__index) - 1), {value}")} " +
             $"FROM ({querySql}) AS {sourceAlias};");
         var materializedCount = _names.Allocate("_linq_materialized_count");
         _sql.Line($"DECLARE {materializedCount} INT = @@ROWCOUNT;");
-        _sql.Line($"UPDATE {HeapObjects} SET __count = {materializedCount} WHERE __id = {collection};");
+        _sql.Line($"UPDATE {HeapObjects} SET __count = {materializedCount} WHERE {HeapExecutionFilter()}__id = {collection};");
         continuation(collection);
         return true;
     }
@@ -1917,12 +1940,12 @@ public sealed partial class SharpSqlCompiler
         var column = CollectionValueColumn(query.ElementType, false);
         var value = CollectionStoredValue(query.ElementType, $"{alias}.__value");
         _sql.Line(
-            $"INSERT INTO {HeapIndexedItems} (__owner_id, __index, {column}) " +
-            $"SELECT {collection}, CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {alias}.__index) - 1), {value} " +
+            $"INSERT INTO {HeapIndexedItems} ({HeapInsertColumns($"__owner_id, __index, {column}")}) " +
+            $"SELECT {HeapInsertValues($"{collection}, CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {alias}.__index) - 1), {value}")} " +
             $"FROM ({querySql}) AS {alias};");
         var count = _names.Allocate("_linq_materialized_count");
         _sql.Line($"DECLARE {count} INT = @@ROWCOUNT;");
-        _sql.Line($"UPDATE {HeapObjects} SET __count = {count} WHERE __id = {collection};");
+        _sql.Line($"UPDATE {HeapObjects} SET __count = {count} WHERE {HeapExecutionFilter()}__id = {collection};");
         continuation(collection);
         return true;
     }
@@ -2026,6 +2049,7 @@ public sealed partial class SharpSqlCompiler
                 case IrBinaryExpression binary: Visit(binary.Left); Visit(binary.Right); break;
                 case IrUnaryExpression unary: Visit(unary.Operand); break;
                 case IrConversionExpression conversion: Visit(conversion.Operand); break;
+                case IrAwaitExpression awaitExpression: Visit(awaitExpression.Operand); break;
                 case IrConditionalExpression conditional:
                     Visit(conditional.Condition); Visit(conditional.WhenTrue); Visit(conditional.WhenFalse); break;
                 case IrMemberExpression member: Visit(member.Receiver); break;
@@ -2335,6 +2359,7 @@ public sealed partial class SharpSqlCompiler
                 case IrBinaryExpression binary: Visit(binary.Left); Visit(binary.Right); break;
                 case IrUnaryExpression unary: Visit(unary.Operand); break;
                 case IrConversionExpression conversion: Visit(conversion.Operand); break;
+                case IrAwaitExpression awaitExpression: Visit(awaitExpression.Operand); break;
                 case IrConditionalExpression conditional:
                     Visit(conditional.Condition); Visit(conditional.WhenTrue); Visit(conditional.WhenFalse); break;
                 case IrMemberExpression member: Visit(member.Receiver); break;

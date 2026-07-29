@@ -35,10 +35,11 @@ public sealed partial class SharpSqlCompiler
     private readonly MethodCatalog _methods = new();
     private MethodGraph? _methodGraph;
     private readonly NameAllocator _names = new();
-    private readonly SqlWriter _sql = new();
+    private SqlWriter _sql = new();
     private readonly Dictionary<SyntaxTree, SemanticModel> _semanticModels = [];
     private CSharpCompilation? _compilation;
     private Diagnostic[]? _semanticDiagnostics;
+    private string? _selectedEntryPointIdentity;
     private TranspileOptions _options = new();
     private IrProgram? _boundProgram;
     private VmMethod? _proceduralVmContext;
@@ -95,6 +96,9 @@ public sealed partial class SharpSqlCompiler
         }
 
         var selectedEntryPoint = SelectEntryPoint(compilation, roots, entryPoint);
+        _selectedEntryPointIdentity = selectedEntryPoint is null
+            ? "<top-level>"
+            : $"{selectedEntryPoint.SyntaxTree.FilePath}|{MethodIdentity(SemanticModelFor(selectedEntryPoint)?.GetDeclaredSymbol(selectedEntryPoint) as IMethodSymbol).Value}";
         var topLevelStatements = roots
             .SelectMany(root => root.Members)
             .OfType<GlobalStatementSyntax>()
@@ -169,12 +173,16 @@ public sealed partial class SharpSqlCompiler
             _sql.Line();
         }
 
+        EmitDurableRuntimePreamble();
         EmitVmPreamble();
         EmitHeapPreamble();
+        EmitDurableRuntimeProvisioningEpilogue();
+        EmitDurableExecutionBodyPreamble();
 
         foreach (var vmMethod in _vmMethods.Values)
             vmMethod.Scope.SetParent(scope);
-        EmitProceduralStatementSequence(_boundProgram.EntryPoint.Statements, scope, null, null, null);
+        if (!TryEmitServiceBrokerProgram(_boundProgram))
+            EmitProceduralStatementSequence(_boundProgram.EntryPoint.Statements, scope, null, null, null);
 
         EmitVmEpilogue();
         if (compileReachableOnly)
@@ -187,7 +195,9 @@ public sealed partial class SharpSqlCompiler
             foreach (var root in commentRoots)
                 EmitAllRemainingComments(root);
         }
+        EmitDurableExecutionCleanupLabel();
         EmitHeapEpilogue();
+        EmitDurableExecutionBodyEpilogue();
 
         return new TranspileResult(_sql.ToString(), _diagnostics.AsReadOnly());
     }
@@ -214,11 +224,17 @@ public sealed partial class SharpSqlCompiler
         }
 
         var scope = new VariableScope();
+        EmitDurableRuntimePreamble();
         EmitVmPreamble();
         EmitHeapPreamble();
-        EmitProceduralStatementSequence(program.EntryPoint.Statements, scope, null, null, null);
+        EmitDurableRuntimeProvisioningEpilogue();
+        EmitDurableExecutionBodyPreamble();
+        if (!TryEmitServiceBrokerProgram(_boundProgram))
+            EmitProceduralStatementSequence(program.EntryPoint.Statements, scope, null, null, null);
         EmitVmEpilogue();
+        EmitDurableExecutionCleanupLabel();
         EmitHeapEpilogue();
+        EmitDurableExecutionBodyEpilogue();
         return new TranspileResult(_sql.ToString(), _diagnostics.AsReadOnly());
     }
 
@@ -390,19 +406,15 @@ public sealed partial class SharpSqlCompiler
                 var symbolInfo = SemanticModelFor(invocation)?.GetSymbolInfo(invocation);
                 var method = symbolInfo?.Symbol as IMethodSymbol ??
                              symbolInfo?.CandidateSymbols.OfType<IMethodSymbol>().SingleOrDefault();
-                if (method is null)
-                    continue;
-                method = method.ReducedFrom ?? method;
-                foreach (var reference in method.OriginalDefinition.DeclaringSyntaxReferences)
-                {
-                    var declaration = reference.GetSyntax();
-                    if (declaration is not (MethodDeclarationSyntax or LocalFunctionStatementSyntax) ||
-                        _compilation is null || !_compilation.SyntaxTrees.Contains(declaration.SyntaxTree) ||
-                        !reachable.Add(declaration))
-                        continue;
-                    pending.Enqueue(declaration);
-                }
-                EnqueueDispatchImplementations(method);
+                EnqueueMethod(method);
+            }
+
+            foreach (var argument in ArgumentsIn(source))
+            {
+                var symbolInfo = SemanticModelFor(argument)?.GetSymbolInfo(argument.Expression);
+                var method = symbolInfo?.Symbol as IMethodSymbol ??
+                             symbolInfo?.CandidateSymbols.OfType<IMethodSymbol>().SingleOrDefault();
+                EnqueueMethod(method);
             }
 
             foreach (var creation in ObjectCreationsIn(source))
@@ -442,6 +454,23 @@ public sealed partial class SharpSqlCompiler
                 }
             }
 
+            void EnqueueMethod(IMethodSymbol? method)
+            {
+                if (method is null)
+                    return;
+                method = method.ReducedFrom ?? method;
+                foreach (var reference in method.OriginalDefinition.DeclaringSyntaxReferences)
+                {
+                    var declaration = reference.GetSyntax();
+                    if (declaration is not (MethodDeclarationSyntax or LocalFunctionStatementSyntax) ||
+                        _compilation is null || !_compilation.SyntaxTrees.Contains(declaration.SyntaxTree) ||
+                        !reachable.Add(declaration))
+                        continue;
+                    pending.Enqueue(declaration);
+                }
+                EnqueueDispatchImplementations(method);
+            }
+
             void EnqueueDispatchImplementations(IMethodSymbol target)
             {
                 if (target.IsStatic || target.MethodKind == MethodKind.DelegateInvoke ||
@@ -478,6 +507,11 @@ public sealed partial class SharpSqlCompiler
                     ReferenceEquals(node, source) || node is not (LocalFunctionStatementSyntax or MethodDeclarationSyntax))
                 .OfType<InvocationExpressionSyntax>();
 
+        static IEnumerable<ArgumentSyntax> ArgumentsIn(SyntaxNode source) =>
+            source.DescendantNodesAndSelf(node =>
+                    ReferenceEquals(node, source) || node is not (LocalFunctionStatementSyntax or MethodDeclarationSyntax))
+                .OfType<ArgumentSyntax>();
+
         static IEnumerable<BaseObjectCreationExpressionSyntax> ObjectCreationsIn(SyntaxNode source) =>
             source.DescendantNodesAndSelf(node =>
                     ReferenceEquals(node, source) || node is not (LocalFunctionStatementSyntax or MethodDeclarationSyntax))
@@ -502,7 +536,8 @@ public sealed partial class SharpSqlCompiler
                 local.ExpressionBody is null ? null : BindIrExpression(local.ExpressionBody.Expression, scope),
                 ToIrSource(local))
             {
-                Id = MethodIdentity(localSymbol)
+                Id = MethodIdentity(localSymbol),
+                IsAsync = localSymbol?.IsAsync == true || local.Modifiers.Any(SyntaxKind.AsyncKeyword)
             });
         }
 
@@ -534,6 +569,7 @@ public sealed partial class SharpSqlCompiler
                 isInstance)
             {
                 Id = MethodIdentity(methodSymbol),
+                IsAsync = methodSymbol?.IsAsync == true || method.Modifiers.Any(SyntaxKind.AsyncKeyword),
                 IsAbstract = methodSymbol?.IsAbstract == true,
                 IsVirtual = methodSymbol?.IsVirtual == true,
                 IsOverride = methodSymbol?.IsOverride == true,
@@ -610,6 +646,12 @@ public sealed partial class SharpSqlCompiler
             case ProceduralForEach forEach:
                 EmitForEach(forEach, scope, inlineReturn, namePrefix);
                 break;
+            case ProceduralTry @try:
+                EmitTry(@try, scope, inlineReturn, loop, namePrefix);
+                break;
+            case ProceduralThrow @throw:
+                EmitThrow(@throw, scope, _proceduralVmContext);
+                break;
             case ProceduralBreak:
                 if (loop is null)
                     AddDiagnostic("SS2005", "break must be inside a loop.", statement.Source);
@@ -629,7 +671,12 @@ public sealed partial class SharpSqlCompiler
                 break;
             case ProceduralReturn @return:
                 if (@return.Expression is null)
-                    _sql.Line("RETURN;");
+                {
+                    if (UsesDurableRuntime)
+                        _sql.Line($"GOTO {RuntimeCleanupLabel};");
+                    else
+                        _sql.Line("RETURN;");
+                }
                 else
                     AddDiagnostic("SS2003", "A value cannot be returned from the script entry point.", @return.Source);
                 break;
@@ -651,6 +698,190 @@ public sealed partial class SharpSqlCompiler
     {
         foreach (var statement in statements)
             EmitStatement(statement, scope, inlineReturn, loop, namePrefix);
+    }
+
+    private void EmitTry(
+        ProceduralTry statement,
+        VariableScope scope,
+        InlineReturn? inlineReturn,
+        LoopContext? loop,
+        string? namePrefix)
+    {
+        if (statement.Catches.Count == 0)
+        {
+            AddDiagnostic("SS2010", "A SQL TRY block requires at least one supported catch clause.", statement.Source);
+            EmitProceduralStatementSequence(statement.Body.Statements, scope.Child(), inlineReturn, loop, namePrefix);
+            return;
+        }
+
+        _sql.Line("BEGIN TRY");
+        using (_sql.Indent())
+            EmitProceduralStatementSequence(statement.Body.Statements, scope.Child(), inlineReturn, loop, namePrefix);
+        _sql.Line("END TRY");
+        _sql.Line("BEGIN CATCH");
+        using (_sql.Indent())
+            EmitCatchClauses(
+                statement.Catches,
+                scope,
+                (@catch, catchScope) => EmitEmbedded(@catch.Body, catchScope, inlineReturn, loop, namePrefix));
+        _sql.Line("END CATCH;");
+    }
+
+    private void EmitCatchClauses(
+        IReadOnlyList<ProceduralCatch> catches,
+        VariableScope parentScope,
+        Action<ProceduralCatch, VariableScope> emitBody)
+    {
+        var number = _names.Allocate("_catch_number");
+        var message = _names.Allocate("_catch_message");
+        var severity = _names.Allocate("_catch_severity");
+        var state = _names.Allocate("_catch_state");
+        var procedure = _names.Allocate("_catch_procedure");
+        var lineNumber = _names.Allocate("_catch_line_number");
+        _sql.Line($"DECLARE {number} INT = ERROR_NUMBER();");
+        _sql.Line($"DECLARE {message} NVARCHAR(4000) = ERROR_MESSAGE();");
+        _sql.Line($"DECLARE {severity} INT = ERROR_SEVERITY();");
+        _sql.Line($"DECLARE {state} INT = ERROR_STATE();");
+        _sql.Line($"DECLARE {procedure} NVARCHAR(128) = ERROR_PROCEDURE();");
+        _sql.Line($"DECLARE {lineNumber} INT = ERROR_LINE();");
+
+        var hasConditionalCatch = false;
+        var hasCatchAll = false;
+        foreach (var @catch in catches)
+        {
+            var catchScope = parentScope.Child();
+            if (@catch.Exception is not null)
+            {
+                catchScope.Add(@catch.Exception, new ExceptionVariableBinding(
+                    @catch.Exception.Type,
+                    number,
+                    message,
+                    severity,
+                    state,
+                    procedure,
+                    lineNumber));
+            }
+
+            var condition = EmitCatchCondition(@catch, number, catchScope);
+            if (condition is null)
+            {
+                if (hasConditionalCatch)
+                    _sql.Line("ELSE");
+                emitBody(@catch, catchScope);
+                hasCatchAll = true;
+                break;
+            }
+
+            _sql.Line(hasConditionalCatch ? $"ELSE IF {condition}" : $"IF {condition}");
+            emitBody(@catch, catchScope);
+            hasConditionalCatch = true;
+        }
+
+        if (!hasCatchAll)
+        {
+            if (hasConditionalCatch)
+                _sql.Line("ELSE");
+            _sql.Line("BEGIN");
+            using (_sql.Indent())
+                _sql.Line("THROW;");
+            _sql.Line("END;");
+        }
+    }
+
+    private string? EmitCatchCondition(
+        ProceduralCatch @catch,
+        string errorNumber,
+        VariableScope scope)
+    {
+        string? typeCondition;
+        if (@catch.ExceptionType is null || RuntimeErrorCatalog.IsCatchAll(@catch.ExceptionType))
+        {
+            typeCondition = null;
+        }
+        else if (RuntimeErrorCatalog.IsDatabaseException(@catch.ExceptionType))
+        {
+            typeCondition = $"({errorNumber} < 51000 OR {errorNumber} > 51999)";
+        }
+        else if (RuntimeErrorCatalog.ErrorNumbersCaughtBy(@catch.ExceptionType) is { } numbers)
+        {
+            typeCondition = numbers.Count == 1
+                ? $"{errorNumber} = {numbers[0]}"
+                : $"{errorNumber} IN ({string.Join(", ", numbers)})";
+        }
+        else
+        {
+            AddDiagnostic(
+                "SS2011",
+                $"Catch type '{@catch.ExceptionType.MetadataName}' does not have a SQL exception mapping.",
+                @catch.Source);
+            typeCondition = "1 = 0";
+        }
+
+        if (@catch.Filter is null)
+            return typeCondition;
+        if (ContainsRuntimeExpression(@catch.Filter))
+        {
+            AddDiagnostic("SS2012", "Catch filters cannot invoke the SharpSql runtime.", @catch.Filter.Source);
+            return typeCondition is null ? "1 = 0" : $"({typeCondition}) AND (1 = 0)";
+        }
+
+        var filterCondition = EmitPredicate(@catch.Filter, scope);
+        return typeCondition is null
+            ? filterCondition
+            : $"({typeCondition}) AND ({filterCondition})";
+    }
+
+    private void EmitThrow(ProceduralThrow statement, VariableScope scope, VmMethod? vmContext)
+    {
+        if (statement.Expression is null ||
+            statement.Expression is IrVariableExpression variable &&
+            scope.Find(variable.Symbol) is ExceptionVariableBinding)
+        {
+            _sql.Line("THROW;");
+            return;
+        }
+
+        if (statement.ExceptionType?.MetadataName != "System.ApplicationException" ||
+            statement.Expression is not IrObjectCreationExpression creation)
+        {
+            AddDiagnostic(
+                "SS2013",
+                "Only rethrows and construction of System.ApplicationException can be lowered to SQL THROW.",
+                statement.Source);
+            return;
+        }
+
+        if (creation.Arguments.Count > 1 || creation.Initializers.Count > 0)
+        {
+            AddDiagnostic(
+                "SS2013",
+                "ApplicationException currently supports only the parameterless or message constructor.",
+                statement.Source);
+            return;
+        }
+
+        var messageSql = _names.Allocate("_application_exception_message");
+        _sql.Line($"DECLARE {messageSql} NVARCHAR(2048);");
+        if (creation.Arguments.Count == 0)
+        {
+            _sql.Line($"SET {messageSql} = N'Error in the application.';");
+            _sql.Line($"THROW {RuntimeErrorCatalog.ApplicationExceptionErrorNumber}, {messageSql}, 1;");
+            return;
+        }
+
+        var messageExpression = creation.Arguments[0];
+        if (ContainsRuntimeExpression(messageExpression))
+        {
+            EmitVmExpression(messageExpression, scope, vmContext, EmitApplicationThrow);
+            return;
+        }
+        EmitApplicationThrow(EmitScalar(messageExpression, scope));
+
+        void EmitApplicationThrow(string value)
+        {
+            _sql.Line($"SET {messageSql} = LEFT(COALESCE(CONVERT(NVARCHAR(MAX), {value}), N'Error in the application.'), 2048);");
+            _sql.Line($"THROW {RuntimeErrorCatalog.ApplicationExceptionErrorNumber}, {messageSql}, 1;");
+        }
     }
 
     private void EmitDeclaration(
@@ -913,6 +1144,15 @@ public sealed partial class SharpSqlCompiler
 
     private void EmitPrintSql(string value)
     {
+        if (_emittingServiceBrokerWorker)
+        {
+            var output = _names.Allocate("_async_output");
+            _sql.Line($"DECLARE {output} NVARCHAR(MAX);");
+            _sql.Line($"SET {output} = COALESCE(CONVERT(NVARCHAR(MAX), {value}), N'');");
+            _sql.Line($"EXEC [SharpSql].[AppendOutput] @ExecutionId = {RuntimeExecutionId}, @OutputText = {output};");
+            return;
+        }
+
         if (!value.Contains("(SELECT", StringComparison.Ordinal) &&
             !value.Contains("EXISTS (", StringComparison.Ordinal))
         {
@@ -959,6 +1199,12 @@ public sealed partial class SharpSqlCompiler
         for (var index = 0; index < method.Parameters.Count; index++)
         {
             var parameter = method.Parameters[index];
+            if ((IsSequenceType(parameter.Type.Name) || IsLinqSequenceType(parameter.Type.Name)) &&
+                TryBuildLinqQuery(arguments[index], callerScope, substitutions: null, out var argumentQuery))
+            {
+                methodScope.Add(parameter.Symbol, new QueryVariableBinding(parameter.Type, argumentQuery));
+                continue;
+            }
             var parameterSql = _names.Allocate($"{prefix}_{parameter.Name}");
             var argumentSql = EmitScalar(arguments[index], callerScope);
             _sql.Line($"DECLARE {parameterSql} {parameter.Type.SqlType()} = {argumentSql};");
@@ -1295,9 +1541,9 @@ public sealed partial class SharpSqlCompiler
         creation.ArgumentList?.Arguments is { Count: 1 } arguments &&
         InferType(arguments[0].Expression, scope, substitutions).Name == "char[]";
 
-    private static string StringFromCharacterArraySql(string characters) =>
+    private string StringFromCharacterArraySql(string characters) =>
         $"COALESCE((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), CONVERT(NCHAR(1), __value)), N'') " +
-        $"WITHIN GROUP (ORDER BY __index) FROM {HeapIndexedItems} WHERE __owner_id = {characters}), N'')";
+        $"WITHIN GROUP (ORDER BY __index) FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {characters}), N'')";
 
     private string EmitInterpolation(
         InterpolationSyntax interpolation,

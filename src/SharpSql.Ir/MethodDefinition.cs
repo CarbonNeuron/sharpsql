@@ -70,6 +70,7 @@ internal sealed record MethodDefinition(
     bool IsInstance = false)
 {
     public IrMethodId Id { get; init; } = IrMethodId.None;
+    public bool IsAsync { get; init; }
     public bool IsAbstract { get; init; }
     public bool IsVirtual { get; init; }
     public bool IsOverride { get; init; }

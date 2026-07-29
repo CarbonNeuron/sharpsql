@@ -26,6 +26,24 @@ public sealed class CliTests
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("SET NOCOUNT ON;", result.Output);
         Assert.Contains("PRINT N'from stdin';", result.Output);
+        Assert.DoesNotContain("-- SharpSql durable shared runtime", result.Output);
+        var settings = Assert.IsType<TranspileCommand.Settings>(result.Settings);
+        Assert.Equal(RuntimeStorageKind.Ephemeral, settings.RuntimeStorage);
+    }
+
+    [Fact]
+    public async Task TranspileSelectsServiceBrokerRuntimeForSourceInput()
+    {
+        var tester = CreateTester("Console.WriteLine(\"from broker\");");
+
+        var result = await tester.RunAsync(
+            ["--runtime-storage", "ServiceBroker"],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("-- SharpSql durable shared runtime", result.Output);
+        var settings = Assert.IsType<TranspileCommand.Settings>(result.Settings);
+        Assert.Equal(RuntimeStorageKind.ServiceBroker, settings.RuntimeStorage);
     }
 
     [Fact]
@@ -43,6 +61,24 @@ public sealed class CliTests
         Assert.Equal("MultiFileProject.SqlJob::Run", settings.EntryPoint);
         Assert.Equal("Release", settings.Configuration);
         Assert.Equal("net10.0", settings.TargetFramework);
+    }
+
+    [Fact]
+    public async Task TranspilePassesServiceBrokerRuntimeToProjectCompilation()
+    {
+        var tester = CreateTester();
+
+        var result = await tester.RunAsync(
+            [
+                ProjectPath,
+                "--entry", "MultiFileProject.SqlJob::Run",
+                "--framework", "net10.0",
+                "--runtime-storage", "ServiceBroker"
+            ],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("-- SharpSql durable shared runtime", result.Output);
     }
 
     [Fact]
@@ -564,6 +600,7 @@ public sealed class CliTests
         Assert.True(request.KeepContainer);
         Assert.Equal("DemoDev", request.DatabaseName);
         Assert.Equal(75, request.CommandTimeoutSeconds);
+        Assert.Equal(RuntimeStorageKind.Ephemeral, request.RuntimeStorage);
     }
 
     [Fact]
@@ -584,7 +621,8 @@ public sealed class CliTests
                     "--container",
                     "--database", "Scratch",
                     "--remove-container",
-                    "--timeout", "12"
+                    "--timeout", "12",
+                    "--runtime-storage", "ServiceBroker"
                 ]),
                 TestContext.Current.CancellationToken);
 
@@ -597,11 +635,26 @@ public sealed class CliTests
             Assert.False(request.KeepContainer);
             Assert.Equal("Scratch", request.DatabaseName);
             Assert.Equal(12, request.CommandTimeoutSeconds);
+            Assert.Equal(RuntimeStorageKind.ServiceBroker, request.RuntimeStorage);
         }
         finally
         {
             File.Delete(sqlPath);
         }
+    }
+
+    [Fact]
+    public void SqlRunServiceProvisionsServiceBrokerBeforeExecutingTheProgram()
+    {
+        const string sql = "PRINT N'program';";
+
+        var batches = SqlRunService.CreateExecutionBatches(RuntimeStorageKind.ServiceBroker, sql);
+
+        Assert.Equal(2, batches.Count);
+        Assert.Contains("CREATE QUEUE [SharpSql].[WorkerQueue]", batches[0]);
+        Assert.Contains("PROCEDURE_NAME = [SharpSql].[DispatchWorker]", batches[0]);
+        Assert.Equal(sql, batches[1]);
+        Assert.Equal([sql], SqlRunService.CreateExecutionBatches(RuntimeStorageKind.Ephemeral, sql));
     }
 
     [Theory]

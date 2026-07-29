@@ -5,6 +5,25 @@ namespace SharpSql.Tests;
 public sealed class CompilerTests
 {
     [Fact]
+    public void ReportsOnePreciseDiagnosticWhenAwaitReachesTheSqlBackend()
+    {
+        const string source = "int value = await System.Threading.Tasks.Task.FromResult(42);";
+        var compiler = new SharpSqlCompiler();
+
+        var result = compiler.Transpile(source);
+
+        var diagnostic = Assert.Single(result.Diagnostics);
+        Assert.Equal("SS4002", diagnostic.Code);
+        Assert.Equal(
+            "Await expressions require async scheduling, which is not supported by the SQL backend.",
+            diagnostic.Message);
+        var program = Assert.IsType<IrProgram>(compiler.BoundProgram);
+        var declaration = Assert.IsType<ProceduralDeclarationStatement>(Assert.Single(program.EntryPoint.Statements));
+        var awaitExpression = Assert.IsType<IrAwaitExpression>(Assert.Single(declaration.Declaration.Variables).Initializer);
+        Assert.IsType<IrInvocationExpression>(awaitExpression.Operand);
+    }
+
+    [Fact]
     public void TranslatesConsoleWriteLine()
     {
         var result = Compile("Console.WriteLine(\"Hello World\");");
@@ -132,6 +151,40 @@ public sealed class CompilerTests
         Assert.DoesNotContain("DELETE FROM #__sharpsql_slots WHERE __frame_id = @__sharpsql_frame_id AND __slot_id", result.Sql);
         Assert.DoesNotContain("CREATE PROCEDURE", result.Sql);
         Assert.DoesNotContain("CREATE FUNCTION", result.Sql);
+    }
+
+    [Fact]
+    public void DurableRuntimePartitionsVmFramesAndKeepsSharedTables()
+    {
+        const string source = """
+            int CountDown(int value)
+            {
+                if (value == 0) return 0;
+                return CountDown(value - 1);
+            }
+
+            int result = CountDown(3);
+            """;
+
+        var result = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions { RuntimeStorage = RuntimeStorageKind.Durable });
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("SET QUOTED_IDENTIFIER ON;", result.Sql);
+        Assert.Contains("SET NUMERIC_ROUNDABORT OFF;", result.Sql);
+        Assert.Contains("DECLARE @__sharpsql_execution_id UNIQUEIDENTIFIER = NEWID();", result.Sql);
+        Assert.Contains("IF @@TRANCOUNT > 0 THROW 51904", result.Sql);
+        Assert.Contains("BEGIN TRANSACTION;", result.Sql);
+        Assert.Contains("@LockOwner = 'Transaction'", result.Sql);
+        Assert.Contains("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;", result.Sql);
+        Assert.Contains("CREATE TABLE [SharpSql].[__sharpsql_stack]", result.Sql);
+        Assert.Contains("CREATE TABLE [SharpSql].[__sharpsql_slots]", result.Sql);
+        Assert.Contains("INSERT INTO [SharpSql].[__sharpsql_stack] (__execution_id, __function_id", result.Sql);
+        Assert.Contains("__execution_id = @__sharpsql_execution_id", result.Sql);
+        Assert.Contains("DELETE FROM [SharpSql].[__sharpsql_slots] WHERE __execution_id = @__sharpsql_execution_id;", result.Sql);
+        Assert.Contains("DELETE FROM [SharpSql].[__sharpsql_stack] WHERE __execution_id = @__sharpsql_execution_id;", result.Sql);
+        Assert.DoesNotContain("DROP TABLE IF EXISTS [SharpSql]", result.Sql);
     }
 
     [Fact]
@@ -290,6 +343,95 @@ public sealed class CompilerTests
         Assert.Contains("DECLARE @alias INT = @person;", result.Sql);
         Assert.Contains("UPDATE #__sharpsql_type_1 SET [Name] = N'Grace'", result.Sql);
         Assert.Contains("WHERE __object_id = @alias", result.Sql);
+    }
+
+    [Fact]
+    public void DurableRuntimePartitionsAndReusesEveryManagedHeapTable()
+    {
+        const string source = """
+            var people = new List<Person> { new Person("Ada", 36) };
+            var byName = new Dictionary<string, Person>();
+            byName.Add("Ada", people[0]);
+            var random = new Random(7);
+            var threshold = random.Next(100);
+            var selected = people.Where(person => person.Age > threshold).ToList();
+            Console.WriteLine($"{byName["Ada"].Name}:{selected.Count}");
+            record Person(string Name, int Age);
+            """;
+
+        var result = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions { RuntimeStorage = RuntimeStorageKind.Durable });
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DECLARE @__sharpsql_execution_id UNIQUEIDENTIFIER = NEWID();", result.Sql);
+        Assert.Contains("sys.sp_getapplock", result.Sql);
+        Assert.Contains("IF SCHEMA_ID(N'SharpSql') IS NULL EXEC(N'CREATE SCHEMA [SharpSql] AUTHORIZATION [dbo]');", result.Sql);
+        Assert.Contains("IF OBJECT_ID(N'[SharpSql].[__sharpsql_objects]', N'U') IS NULL", result.Sql);
+        Assert.Contains("IF OBJECT_ID(N'[SharpSql].[__sharpsql_indexed_items]', N'U') IS NULL", result.Sql);
+        Assert.Contains("IF OBJECT_ID(N'[SharpSql].[__sharpsql_dictionary_entries]', N'U') IS NULL", result.Sql);
+        Assert.Matches(@"CREATE TABLE \[SharpSql\]\.\[__sharpsql_type_[0-9a-f]{32}_1\]", result.Sql);
+        Assert.Contains("INSERT INTO [SharpSql].[__sharpsql_objects] (__execution_id, __type_id", result.Sql);
+        Assert.Contains("INSERT INTO [SharpSql].[__sharpsql_indexed_items] (__execution_id, __owner_id", result.Sql);
+        Assert.Contains("INSERT INTO [SharpSql].[__sharpsql_dictionary_entries] (__execution_id, __dictionary_id", result.Sql);
+        Assert.Contains("__execution_id = @__sharpsql_execution_id AND __owner_id", result.Sql);
+        Assert.Contains("N'SharpSql.Random.'", result.Sql);
+        Assert.Contains("@LockMode = 'Exclusive', @LockOwner = 'Session'", result.Sql);
+        Assert.Contains("sys.sp_releaseapplock @Resource = @_random_lock_resource", result.Sql);
+        Assert.Contains("DELETE FROM [SharpSql].[__sharpsql_dictionary_entries] WHERE __execution_id = @__sharpsql_execution_id;", result.Sql);
+        Assert.Contains("DELETE FROM [SharpSql].[__sharpsql_indexed_items] WHERE __execution_id = @__sharpsql_execution_id;", result.Sql);
+        Assert.Contains("DELETE FROM [SharpSql].[__sharpsql_objects] WHERE __execution_id = @__sharpsql_execution_id;", result.Sql);
+        Assert.DoesNotContain("DROP TABLE IF EXISTS [SharpSql]", result.Sql);
+    }
+
+    [Fact]
+    public void EphemeralStorageRemainsTheByteForByteDefault()
+    {
+        const string source = """
+            var values = new List<int> { 1, 2, 3 };
+            var lookup = new Dictionary<int, string>();
+            lookup.Add(values[0], "one");
+            Console.WriteLine(lookup[1]);
+            """;
+
+        var implicitDefault = new SharpSqlCompiler().Transpile(source);
+        var explicitEphemeral = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions { RuntimeStorage = RuntimeStorageKind.Ephemeral });
+
+        Assert.True(implicitDefault.Success, string.Join(Environment.NewLine, implicitDefault.Diagnostics));
+        Assert.Equal(implicitDefault.Sql, explicitEphemeral.Sql);
+        Assert.Contains("CREATE TABLE #__sharpsql_objects", implicitDefault.Sql);
+        Assert.DoesNotContain("@__sharpsql_execution_id", implicitDefault.Sql);
+        Assert.DoesNotContain("[SharpSql].[__sharpsql_objects]", implicitDefault.Sql);
+    }
+
+    [Fact]
+    public void DurableTypedHeapNamesAreStableAndProgramScoped()
+    {
+        const string firstSource = """
+            var value = new Item { Number = 1 };
+            Console.WriteLine(value.Number);
+            class Item { public int Number { get; set; } }
+            """;
+        const string secondSource = """
+            var value = new Item { Number = "one" };
+            Console.WriteLine(value.Number);
+            class Item { public string Number { get; set; } }
+            """;
+        var options = new TranspileOptions { RuntimeStorage = RuntimeStorageKind.Durable };
+
+        var first = new SharpSqlCompiler().Transpile(firstSource, options);
+        var repeated = new SharpSqlCompiler().Transpile(firstSource, options);
+        var second = new SharpSqlCompiler().Transpile(secondSource, options);
+
+        const string pattern = @"\[SharpSql\]\.\[__sharpsql_type_[0-9a-f]{32}_1\]";
+        var firstName = System.Text.RegularExpressions.Regex.Match(first.Sql, pattern).Value;
+        var repeatedName = System.Text.RegularExpressions.Regex.Match(repeated.Sql, pattern).Value;
+        var secondName = System.Text.RegularExpressions.Regex.Match(second.Sql, pattern).Value;
+        Assert.NotEmpty(firstName);
+        Assert.Equal(firstName, repeatedName);
+        Assert.NotEqual(firstName, secondName);
     }
 
     [Fact]

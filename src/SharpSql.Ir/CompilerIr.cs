@@ -170,6 +170,11 @@ internal sealed record IrConversionExpression(
     IrType TargetType,
     IrExpression Operand) : IrExpression(Source, Facts);
 
+internal sealed record IrAwaitExpression(
+    IrSource Source,
+    ExpressionFacts Facts,
+    IrExpression Operand) : IrExpression(Source, Facts);
+
 internal sealed record IrConditionalExpression(
     IrSource Source,
     ExpressionFacts Facts,

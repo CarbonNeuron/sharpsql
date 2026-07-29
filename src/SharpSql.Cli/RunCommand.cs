@@ -62,6 +62,11 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [Description("SQL command timeout in seconds.")]
         public int? CommandTimeoutSeconds { get; init; }
 
+        [CommandOption("--runtime-storage <MODE>")]
+        [Description("Runtime state mode: Ephemeral (default), Durable, or ServiceBroker.")]
+        [DefaultValue(RuntimeStorageKind.Ephemeral)]
+        public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;
+
         public override ValidationResult Validate()
         {
             if (KeepContainer && RemoveContainer)
@@ -128,7 +133,8 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             keepContainer,
             settings.SqlServerImage ?? projectSettings.SqlServerImage,
             settings.DatabaseName ?? projectSettings.DatabaseName,
-            settings.CommandTimeoutSeconds ?? projectSettings.CommandTimeoutSeconds);
+            settings.CommandTimeoutSeconds ?? projectSettings.CommandTimeoutSeconds,
+            settings.RuntimeStorage);
 
         SqlRunResult result;
         try

@@ -11,6 +11,12 @@ public sealed class BuildHostTests
         "MultiFileProject",
         "MultiFileProject.csproj");
 
+    private static string ServiceBrokerProjectPath => Path.Combine(
+        AppContext.BaseDirectory,
+        "fixtures",
+        "ServiceBrokerProject",
+        "ServiceBrokerProject.csproj");
+
     [Fact]
     public async Task GeneratesSqlForAnMsBuildProject()
     {
@@ -56,6 +62,51 @@ public sealed class BuildHostTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(2, exitCode);
+    }
+
+    [Fact]
+    public async Task PassesTheSelectedRuntimeStorageToTheCompiler()
+    {
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-build-{Guid.NewGuid():N}.sql");
+        try
+        {
+            var exitCode = await BuildProgram.RunAsync(
+                [
+                    "--project", ServiceBrokerProjectPath,
+                    "--output", outputPath,
+                    "--configuration", "Release",
+                    "--framework", "net10.0",
+                    "--entry", "ServiceBrokerProject.SqlJob::Main",
+                    "--runtime-storage", "ServiceBroker"
+                ],
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exitCode);
+            var sql = await File.ReadAllTextAsync(outputPath, TestContext.Current.CancellationToken);
+            Assert.Contains("CREATE OR ALTER PROCEDURE [SharpSql].[Program_", sql);
+            Assert.Contains("EXEC [SharpSql].[ScheduleTask]", sql);
+        }
+        finally
+        {
+            File.Delete(outputPath);
+        }
+    }
+
+    [Fact]
+    public async Task RejectsAnInvalidRuntimeStorage()
+    {
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-build-{Guid.NewGuid():N}.sql");
+
+        var exitCode = await BuildProgram.RunAsync(
+            [
+                "--project", ProjectPath,
+                "--output", outputPath,
+                "--runtime-storage", "SomewhereElse"
+            ],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, exitCode);
+        Assert.False(File.Exists(outputPath));
     }
 
     [Fact]

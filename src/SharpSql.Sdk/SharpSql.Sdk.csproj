@@ -5,8 +5,7 @@
     <PackageTags>csharp;sql;transpiler;compiler;roslyn;analyzer;msbuild</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <DevelopmentDependency>true</DevelopmentDependency>
-    <IncludeBuildOutput>false</IncludeBuildOutput>
-    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <IncludeBuildOutput>true</IncludeBuildOutput>
     <IsPackable>true</IsPackable>
     <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);CollectSharpSqlSdkPackageFiles</TargetsForTfmSpecificContentInPackage>
   </PropertyGroup>

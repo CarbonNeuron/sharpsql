@@ -63,6 +63,34 @@ internal sealed record ProceduralForEach(
     public IrType ElementType => Element.Type;
 }
 
+internal sealed record IrExceptionType(
+    string MetadataName,
+    IReadOnlyList<string> BaseMetadataNames)
+{
+    public string Name => MetadataName.Split('.').Last();
+
+    public bool IsOrDerivesFrom(string metadataName) =>
+        string.Equals(MetadataName, metadataName, StringComparison.Ordinal) ||
+        BaseMetadataNames.Contains(metadataName, StringComparer.Ordinal);
+}
+
+internal sealed record ProceduralCatch(
+    IrSource Source,
+    IrExceptionType? ExceptionType,
+    IrSymbol? Exception,
+    IrExpression? Filter,
+    ProceduralBlock Body);
+
+internal sealed record ProceduralTry(
+    IrSource Source,
+    ProceduralBlock Body,
+    IReadOnlyList<ProceduralCatch> Catches) : ProceduralStatement(Source);
+
+internal sealed record ProceduralThrow(
+    IrSource Source,
+    IrExpression? Expression,
+    IrExceptionType? ExceptionType) : ProceduralStatement(Source);
+
 internal sealed record ProceduralBreak(IrSource Source) : ProceduralStatement(Source);
 
 internal sealed record ProceduralContinue(IrSource Source) : ProceduralStatement(Source);

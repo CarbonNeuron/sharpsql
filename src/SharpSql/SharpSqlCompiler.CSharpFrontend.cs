@@ -81,6 +81,11 @@ public sealed partial class SharpSqlCompiler
                     InferProceduralForEachElementType(forEach, scope)),
                 BindIrExpression(forEach.Expression, scope),
                 BindProceduralStatement(forEach.Statement, scope)),
+            TryStatementSyntax @try => BindProceduralTry(@try, scope),
+            ThrowStatementSyntax @throw => new ProceduralThrow(
+                ToIrSource(@throw),
+                @throw.Expression is null ? null : BindIrExpression(@throw.Expression, scope),
+                @throw.Expression is null ? null : BindExceptionType(@throw.Expression)),
             BreakStatementSyntax @break => new ProceduralBreak(ToIrSource(@break)),
             ContinueStatementSyntax @continue => new ProceduralContinue(ToIrSource(@continue)),
             ReturnStatementSyntax @return => new ProceduralReturn(
@@ -89,6 +94,73 @@ public sealed partial class SharpSqlCompiler
             EmptyStatementSyntax empty => new ProceduralEmpty(ToIrSource(empty)),
             _ => new ProceduralUnsupported(ToIrSource(statement), statement.Kind().ToString())
         };
+
+    private ProceduralStatement BindProceduralTry(TryStatementSyntax statement, VariableScope scope)
+    {
+        if (statement.Finally is not null)
+            return new ProceduralUnsupported(ToIrSource(statement), "try/finally");
+
+        return new ProceduralTry(
+            ToIrSource(statement),
+            (ProceduralBlock)BindProceduralStatement(statement.Block, scope),
+            statement.Catches.Select(catchClause =>
+            {
+                var declaration = catchClause.Declaration;
+                var exceptionType = declaration is null ? null : BindExceptionType(declaration.Type);
+                var exceptionSymbol = declaration is null || declaration.Identifier.IsKind(SyntaxKind.None)
+                    ? null
+                    : GetOrCreateIrSymbol(
+                        SemanticModelFor(declaration)?.GetDeclaredSymbol(declaration),
+                        declaration.Identifier.ValueText,
+                        CSharpTypeFactory.From(declaration.Type));
+                return new ProceduralCatch(
+                    ToIrSource(catchClause),
+                    exceptionType,
+                    exceptionSymbol,
+                    catchClause.Filter is null ? null : BindIrExpression(catchClause.Filter.FilterExpression, scope),
+                    (ProceduralBlock)BindProceduralStatement(catchClause.Block, scope));
+            }).ToArray());
+    }
+
+    private IrExceptionType BindExceptionType(SyntaxNode syntax)
+    {
+        var symbol = syntax switch
+        {
+            TypeSyntax type => SemanticModelFor(type)?.GetTypeInfo(type).Type,
+            ExpressionSyntax expression => SemanticModelFor(expression)?.GetTypeInfo(expression).Type,
+            _ => null
+        };
+        if (symbol is not null && symbol.TypeKind != TypeKind.Error)
+        {
+            var baseTypes = new List<string>();
+            for (var current = symbol.BaseType; current is not null; current = current.BaseType)
+                baseTypes.Add(ExceptionMetadataName(current));
+            return new IrExceptionType(ExceptionMetadataName(symbol), baseTypes);
+        }
+
+        var fallbackName = syntax switch
+        {
+            TypeSyntax type => type.ToString(),
+            ObjectCreationExpressionSyntax creation => creation.Type.ToString(),
+            ImplicitObjectCreationExpressionSyntax => "Exception",
+            _ => "Exception"
+        };
+        return new IrExceptionType(
+            NormalizeExceptionMetadataName(fallbackName),
+            Array.Empty<string>());
+    }
+
+    private static string ExceptionMetadataName(ITypeSymbol symbol) =>
+        symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
+            .Replace("global::", string.Empty, StringComparison.Ordinal);
+
+    private static string NormalizeExceptionMetadataName(string name)
+    {
+        name = name.Replace("global::", string.Empty, StringComparison.Ordinal).Trim();
+        if (name.Contains(".", StringComparison.Ordinal))
+            return name;
+        return name == "DatabaseException" ? "SharpSql.DatabaseException" : $"System.{name}";
+    }
 
     private IrExpression BindIrExpression(ExpressionSyntax expression, VariableScope scope)
     {
@@ -129,6 +201,10 @@ public sealed partial class SharpSqlCompiler
                 facts,
                 CSharpTypeFactory.From(cast.Type),
                 BindIrExpression(cast.Expression, scope)),
+            AwaitExpressionSyntax awaitExpression => new IrAwaitExpression(
+                source,
+                facts,
+                BindIrExpression(awaitExpression.Expression, scope)),
             ConditionalExpressionSyntax conditional => new IrConditionalExpression(
                 source,
                 facts,

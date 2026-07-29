@@ -29,6 +29,7 @@ trap cleanup EXIT
 
 cp -R "$repo_root/tests/fixtures/SdkConsumer/valid" "$work_dir/valid"
 cp -R "$repo_root/tests/fixtures/SdkConsumer/invalid" "$work_dir/invalid"
+cp -R "$repo_root/tests/fixtures/SdkConsumer/async" "$work_dir/async"
 
 dotnet new console --name PackageDefault --output "$work_dir/package-default" --no-restore >/dev/null
 dotnet add "$work_dir/package-default/PackageDefault.csproj" package SharpSql.Sdk \
@@ -85,7 +86,10 @@ if [[ -n "$tool_path" ]]; then
     fi
 fi
 
-for project in "$work_dir/valid/SdkConsumer.csproj" "$work_dir/invalid/SdkConsumer.csproj"; do
+for project in \
+    "$work_dir/valid/SdkConsumer.csproj" \
+    "$work_dir/invalid/SdkConsumer.csproj" \
+    "$work_dir/async/SdkConsumer.csproj"; do
     if [[ -n "$tool_path" ]]; then
         "$tool_path" init "$project" --sdk-version "$version" --no-restore >/dev/null
     else
@@ -100,6 +104,37 @@ done
 dotnet build "$work_dir/valid/SdkConsumer.csproj" \
     --configuration Release \
     --no-restore >/dev/null
+
+dotnet build "$work_dir/async/SdkConsumer.csproj" \
+    --configuration Release \
+    --no-restore >/dev/null
+if [[ ! -s "$work_dir/async/generated.sql" ]] || \
+   ! grep -q 'CREATE OR ALTER PROCEDURE \[SharpSql\]\.\[Program_' "$work_dir/async/generated.sql"; then
+    printf 'The SDK package did not lower the Service Broker async project.\n' >&2
+    exit 1
+fi
+if invalid_storage_output="$(dotnet build "$work_dir/async/SdkConsumer.csproj" \
+    --configuration Release \
+    --no-restore \
+    -p:SharpSqlRuntimeStorage=SomewhereElse 2>&1)"; then
+    printf 'The SDK package accepted an invalid SharpSqlRuntimeStorage value.\n' >&2
+    exit 1
+fi
+if [[ "$invalid_storage_output" != *"SharpSqlRuntimeStorage must be Ephemeral, Durable, or ServiceBroker"* ]]; then
+    printf '%s\n' "$invalid_storage_output" >&2
+    printf 'The SDK package did not explain the invalid SharpSqlRuntimeStorage value.\n' >&2
+    exit 1
+fi
+
+clr_output="$(dotnet run --project "$work_dir/valid/SdkConsumer.csproj" \
+    --configuration Release \
+    --no-build \
+    --no-restore)"
+if [[ "$clr_output" != *"answer=42"* ]]; then
+    printf '%s\n' "$clr_output" >&2
+    printf 'The SDK package did not expose its DatabaseException runtime assembly.\n' >&2
+    exit 1
+fi
 
 generated_sql="$work_dir/valid/generated.sql"
 if [[ ! -s "$generated_sql" ]] || ! grep -q "answer=" "$generated_sql"; then
@@ -118,6 +153,20 @@ if [[ "$run_output" != *"answer=42"* ]] || [[ "$run_output" != *"SharpSql: SQL e
     exit 1
 fi
 
+async_run_output="$(dotnet msbuild "$work_dir/async/SdkConsumer.csproj" \
+    -t:SharpSqlRun \
+    -p:Configuration=Release \
+    -p:SharpSqlKeepContainer=false \
+    -verbosity:minimal)"
+if [[ "$async_run_output" != *"done"* ]] || \
+   [[ "$async_run_output" != *"SharpSql: provisioning Service Broker runtime"* ]] || \
+   [[ "$async_run_output" != *"SharpSql: Service Broker runtime ready"* ]] || \
+   [[ "$async_run_output" != *"SharpSql: SQL execution completed"* ]]; then
+    printf '%s\n' "$async_run_output" >&2
+    printf 'The SharpSqlRun target did not provision and execute the Service Broker async project.\n' >&2
+    exit 1
+fi
+
 if invalid_output="$(dotnet build "$work_dir/invalid/SdkConsumer.csproj" --no-restore 2>&1)"; then
     printf 'The analyzer accepted an unsupported multidimensional array.\n' >&2
     exit 1
@@ -128,4 +177,4 @@ if [[ "$invalid_output" != *"error SS6301"* ]]; then
     exit 1
 fi
 
-printf 'Validated SharpSql.Sdk %s build generation, SQL execution, IDE profile, and analyzer diagnostics.\n' "$version"
+printf 'Validated SharpSql.Sdk %s build generation, Service Broker async lowering, SQL execution, IDE profile, and analyzer diagnostics.\n' "$version"

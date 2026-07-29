@@ -30,6 +30,11 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         [Description("Target framework to select for a multi-targeted project.")]
         public string? TargetFramework { get; init; }
 
+        [CommandOption("--runtime-storage <MODE>")]
+        [Description("Runtime state mode: Ephemeral (default), Durable, or ServiceBroker.")]
+        [DefaultValue(RuntimeStorageKind.Ephemeral)]
+        public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;
+
         public override ValidationResult Validate()
         {
             var isProject = InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
@@ -51,6 +56,7 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         var environment = context.Data as CliExecutionEnvironment ??
                           new CliExecutionEnvironment(AnsiConsole.Console, Console.In);
         var isProject = settings.InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
+        var compilerOptions = new TranspileOptions { RuntimeStorage = settings.RuntimeStorage };
 
         TranspileResult result;
         if (isProject)
@@ -61,7 +67,8 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
                 {
                     EntryPoint = settings.EntryPoint,
                     Configuration = settings.Configuration,
-                    TargetFramework = settings.TargetFramework
+                    TargetFramework = settings.TargetFramework,
+                    CompilerOptions = compilerOptions
                 },
                 cancellationToken);
         }
@@ -70,7 +77,7 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
             var source = settings.InputPath is null
                 ? await environment.Input.ReadToEndAsync(cancellationToken)
                 : await File.ReadAllTextAsync(settings.InputPath, cancellationToken);
-            result = new SharpSqlCompiler().Transpile(source);
+            result = new SharpSqlCompiler().Transpile(source, compilerOptions);
         }
 
         foreach (var diagnostic in result.Diagnostics)

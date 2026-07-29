@@ -11,6 +11,7 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
 {
     public const string EnabledProperty = "build_property.SharpSqlEnableAnalyzer";
     public const string EntryPointProperty = "build_property.SharpSqlEntryPoint";
+    public const string RuntimeStorageProperty = "build_property.SharpSqlRuntimeStorage";
     public const string InternalErrorId = "SSA0001";
 
     private static readonly ImmutableDictionary<string, DiagnosticDescriptor> Descriptors =
@@ -39,11 +40,22 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
         var options = context.Options.AnalyzerConfigOptionsProvider.GlobalOptions;
         options.TryGetValue(EntryPointProperty, out var entryPoint);
         entryPoint = string.IsNullOrWhiteSpace(entryPoint) ? null : entryPoint;
+        if (!TryGetRuntimeStorage(options, out var runtimeStorage))
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                Descriptors[InternalErrorId],
+                Location.None,
+                "SharpSqlRuntimeStorage must be Ephemeral, Durable, or ServiceBroker."));
+            return;
+        }
 
         TranspileResult result;
         try
         {
-            result = new SharpSqlCompiler().Transpile(compilation, entryPoint);
+            result = new SharpSqlCompiler().Transpile(
+                compilation,
+                entryPoint,
+                new TranspileOptions { RuntimeStorage = runtimeStorage });
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -69,6 +81,29 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
         !options.TryGetValue(EnabledProperty, out var configured) ||
         !bool.TryParse(configured, out var enabled) ||
         enabled;
+
+    private static bool TryGetRuntimeStorage(
+        AnalyzerConfigOptions options,
+        out RuntimeStorageKind runtimeStorage)
+    {
+        if (!options.TryGetValue(RuntimeStorageProperty, out var configured) ||
+            string.IsNullOrWhiteSpace(configured))
+        {
+            runtimeStorage = RuntimeStorageKind.Ephemeral;
+            return true;
+        }
+
+        foreach (var name in Enum.GetNames(typeof(RuntimeStorageKind)))
+        {
+            if (!string.Equals(name, configured, StringComparison.OrdinalIgnoreCase))
+                continue;
+            runtimeStorage = (RuntimeStorageKind)Enum.Parse(typeof(RuntimeStorageKind), name);
+            return true;
+        }
+
+        runtimeStorage = default;
+        return false;
+    }
 
     private static Location FindLocation(CSharpCompilation compilation, CompilerDiagnostic diagnostic)
     {
@@ -116,10 +151,12 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
         string[] ids =
         [
             "SS0001", "SS0002", "SS1001", "SS2001", "SS2003", "SS2005",
+            "SS2010", "SS2011", "SS2012", "SS2013",
             "SS3001", "SS3002", "SS3003", "SS3004", "SS4001", "SS4002", "SS4003",
             "SS5001", "SS6001", "SS6003", "SS6004", "SS6005", "SS6006",
             "SS6101", "SS6102", "SS6201", "SS6202", "SS6301", "SS6302",
-            "SS6401", "SS6402", "SS6403", "SS6410", "SS6411", InternalErrorId
+            "SS6401", "SS6402", "SS6403", "SS6410", "SS6411",
+            "SS7001", "SS7002", "SS7003", "SS7004", "SS7005", InternalErrorId
         ];
 
         return ids.ToImmutableDictionary(

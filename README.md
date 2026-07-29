@@ -6,7 +6,7 @@
 
 **Compile a useful subset of C# into one self-contained T-SQL batch.**
 
-SharpSql uses Roslyn syntax and semantic analysis to lower C# control flow, methods, objects, and collections into SQL Server. Small methods are inlined. Recursive or over-budget methods run on an ephemeral stack machine built from local temporary tables and static `GOTO` labels. The generated batch creates no persistent functions or procedures and cleans up its runtime state when it finishes.
+SharpSql uses Roslyn syntax and semantic analysis to lower C# control flow, methods, objects, and collections into SQL Server. Small methods are inlined. Recursive or over-budget methods run on an ephemeral stack machine built from local temporary tables and static `GOTO` labels. In the default mode, the generated batch creates no persistent functions or procedures and cleans up its runtime state when it finishes.
 
 > [!WARNING]
 > SharpSql is an experimental compiler, not a production-safe way to run arbitrary C#. The supported language surface is intentionally explicit, and C# and SQL Server still differ in numeric, null, collation, evaluation-order, and exception semantics.
@@ -109,6 +109,33 @@ The equivalent manual project configuration is:
   <SharpSqlContainerDatabase>SharpSql</SharpSqlContainerDatabase>
 </PropertyGroup>
 ```
+
+Async Service Broker projects opt in with
+`<SharpSqlRuntimeStorage>ServiceBroker</SharpSqlRuntimeStorage>`. The allowed
+values are `Ephemeral` (the default), `Durable`, and `ServiceBroker`; the same
+setting drives both live analyzer diagnostics and build-time SQL generation.
+The SDK's `SharpSqlRun` target provisions the Service Broker runtime before it
+executes a `ServiceBroker` program.
+
+The SDK also supplies `SharpSql.DatabaseException` for native SQL Server
+failures inside transpiled code. Its `Number`, `Severity`, `State`, `Procedure`,
+`LineNumber`, and inherited `Message` properties map to SQL Server's `ERROR_*`
+metadata:
+
+```csharp
+try
+{
+    RunDatabaseWork();
+}
+catch (SharpSql.DatabaseException exception)
+{
+    Console.WriteLine($"SQL {exception.Number}: {exception.Message}");
+}
+```
+
+SharpSql's reserved errors (`51000`-`51999`) retain their existing .NET
+exception mappings. `throw new ApplicationException(message)` uses a reserved
+error and can be filtered or rethrown by an ordinary `catch` block.
 
 The package reports SharpSql compatibility errors through Roslyn while editing
 and emits SQL during a normal build:
@@ -362,6 +389,14 @@ class Person
 
 The heap is allocation-only for the life of the script. Dropping its temporary tables reclaims the whole heap at once.
 
+Experimental durable modes are also available through the compiler API. `Durable`
+partitions shared heap and VM tables by execution ID. `ServiceBroker` additionally
+lowers the supported `Task.Delay`/`Task.WhenAll` fork-join shape into durable
+continuations executed by an activated SQL Server worker pool, with task results,
+faults, and `Console.WriteLine` output routed back to the entry connection. See the
+[Service Broker async runtime guide](docs/service-broker-async.md) for provisioning,
+isolation rules, the currently supported shape, and remaining state-machine work.
+
 ## Roadmap
 
 The long-term experiment is to discover how much idiomatic C# can execute faithfully inside a SQL Server batch.
@@ -414,8 +449,8 @@ The first typed-IR and data-flow phase is complete:
 ### Broader missing layers
 
 - Struct instance semantics, boxing, and unboxing
-- General-purpose delegate invocation outside LINQ, iterators, and async-state-machine diagnostics
-- Exceptions and structured unwinding across VM frames
+- General-purpose delegate invocation outside LINQ, iterators, and general multi-await async-state-machine lowering
+- `finally` and structured exception unwinding across recursive VM calls
 - More of the base class library through explicit compiler intrinsics
 - Exact overflow, culture-sensitive formatting, and exception parity across the two runtimes
 

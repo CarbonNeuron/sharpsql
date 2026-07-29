@@ -155,6 +155,28 @@ public sealed partial class SharpSqlCompiler
                     _effects |= MethodEffects.ReadsMutableState | MethodEffects.MayThrow;
                     AnalyzeStatement(forEach.Body);
                     break;
+                case ProceduralTry @try:
+                    var beforeTry = SnapshotAliases();
+                    AnalyzeStatement(@try.Body);
+                    var mergedTryBranches = SnapshotAliases();
+                    foreach (var @catch in @try.Catches)
+                    {
+                        RestoreAliases(beforeTry);
+                        if (@catch.Filter is not null)
+                            AnalyzeExpression(@catch.Filter);
+                        AnalyzeStatement(@catch.Body);
+                        var catchAliases = SnapshotAliases();
+                        RestoreAliases(mergedTryBranches);
+                        MergeAliases(catchAliases);
+                        mergedTryBranches = SnapshotAliases();
+                    }
+                    RestoreAliases(mergedTryBranches);
+                    break;
+                case ProceduralThrow @throw:
+                    if (@throw.Expression is not null)
+                        AnalyzeExpression(@throw.Expression);
+                    _effects |= MethodEffects.MayThrow;
+                    break;
                 case ProceduralReturn @return:
                     if (@return.Expression is not null)
                         RecordReturn(AnalyzeExpression(@return.Expression), method.ReturnType);
@@ -197,6 +219,10 @@ public sealed partial class SharpSqlCompiler
                 case IrConversionExpression conversion:
                     var operand = AnalyzeExpression(conversion.Operand);
                     return conversion.TargetType.IsReference ? operand : AliasValue.None;
+                case IrAwaitExpression awaitExpression:
+                    AnalyzeExpression(awaitExpression.Operand);
+                    _effects |= MethodEffects.InvokesUnknown | MethodEffects.MayThrow;
+                    return awaitExpression.Type.IsReference ? AliasValue.Unknown : AliasValue.None;
                 case IrConditionalExpression conditional:
                     AnalyzeExpression(conditional.Condition);
                     return AnalyzeExpression(conditional.WhenTrue)
