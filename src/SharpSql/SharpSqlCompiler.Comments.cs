@@ -10,10 +10,17 @@ public sealed partial class SharpSqlCompiler
 
     private void EmitLeadingComments(SyntaxNode node) => EmitCommentTrivia(node.GetLeadingTrivia());
 
+    private void EmitLeadingComments(IrSource source) => EmitIrComments(source.LeadingComments);
+
     private void EmitTrailingComments(SyntaxNode node) => EmitCommentTrivia(node.GetTrailingTrivia());
+
+    private void EmitTrailingComments(IrSource source) => EmitIrComments(source.TrailingComments);
 
     private void EmitExpressionComments(ExpressionSyntax expression) =>
         EmitCommentTrivia(expression.DescendantTrivia(descendIntoTrivia: true));
+
+    private void EmitExpressionComments(IrExpression expression) =>
+        EmitIrComments(expression.Source.DescendantComments);
 
     private void EmitFileHeaderComments(CompilationUnitSyntax root)
     {
@@ -33,6 +40,36 @@ public sealed partial class SharpSqlCompiler
                 continue;
             EmitSqlComment(trivia);
         }
+    }
+
+    private void EmitIrComments(IEnumerable<IrComment> comments)
+    {
+        foreach (var comment in comments)
+        {
+            if (!_emittedCommentPositions.Add(comment.Start))
+                continue;
+            EmitSqlComment(comment);
+        }
+    }
+
+    private void EmitSqlComment(IrComment comment)
+    {
+        if (comment.Kind == IrCommentKind.Line)
+        {
+            _sql.Line("--" + comment.Text[2..]);
+            return;
+        }
+        if (comment.Kind == IrCommentKind.Documentation)
+        {
+            foreach (var line in SplitLines(comment.Text))
+            {
+                var trimmed = line.TrimStart();
+                _sql.Line("-- " + (trimmed.StartsWith("///", StringComparison.Ordinal) ? trimmed[3..].TrimStart() : trimmed));
+            }
+            return;
+        }
+        foreach (var line in SplitLines(comment.Text))
+            _sql.Line(line.TrimEnd());
     }
 
     private void EmitSqlComment(SyntaxTrivia trivia)

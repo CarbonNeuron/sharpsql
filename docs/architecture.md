@@ -1,20 +1,24 @@
 # Compiler architecture
 
-The compiler pipeline is becoming:
+The compiler pipeline is:
 
 ```text
 C# source
   -> Roslyn syntax + semantic model
-  -> supported-subset validation
-  -> typed scalar, procedural, and relational query IR
+  -> C# frontend binding + supported-subset validation
+  -> immutable SharpSql.Ir program
   -> call graph, purity, cost, and inlining passes
-  -> SQL Server lowering
+  -> SQL Server backend plans and lowering
   -> one or more executable batches
 ```
 
-Scalar expressions lower through `SqlScalarExpression`, which carries SQL text, C# type, SQL precedence, and null-flow state. Relational LINQ has a separate typed query plan. Blocks bind to a `ProceduralStatement` hierarchy before SQL emission, with typed declarations and expressions plus explicit branch, loop, foreach, break, continue, and return nodes. Both direct/inlined lowering and the stack-machine backend consume this hierarchy; heap, LINQ, allocation, and call behavior remain specialized leaf lowerings.
+`SharpSql.Ir` is a separate assembly with no Roslyn or SQL Server dependency. Its immutable `IrProgram` owns typed methods, symbols, expressions, query clauses, source spans/comments, and a `ProceduralStatement` hierarchy with explicit declarations, assignments, branches, loops, jumps, and returns. Source identity uses `IrSymbolId`; diagnostics and comments use neutral source records rather than retaining Roslyn nodes. The C# frontend finishes binding the entry point and every method before SQL emission begins.
 
-Roslyn expression analysis supplies semantic types, nullable flow state, and compile-time constants at the scalar boundary. Inlining substitutions and captured LINQ values retain the complete typed scalar node instead of carrying disconnected SQL and type fields. A semantic preflight imports definite-assignment, use-before-declaration, out-parameter, and missing-return failures while leaving intentional SharpSql extensions—such as mutable positional-record fields—to the supported-subset validator. Constant boolean facts simplify generated predicates without changing branch structure. Each method also carries a reusable flow summary containing endpoint reachability, returns, statement cost, reads, writes, and captured variables; inlining budgets and missing-return validation consume that summary.
+`IrType` carries only language/runtime type identity. `CSharpTypeFactory` is the frontend mapping from Roslyn, while `SqlTypeMapper` belongs to the SQL Server backend. Likewise, `SqlScalarExpression` and the `SqlLinq*` plans are explicitly backend models: SQL text and precedence never appear in compiler IR. LINQ lambda bodies are bound IR expressions, and query syntax is represented by neutral query clauses before the backend chooses relational SQL.
+
+Roslyn supplies semantic types, nullable flow state, constants, and data-flow facts while binding. A semantic preflight imports definite-assignment, use-before-declaration, out-parameter, and missing-return failures while leaving intentional SharpSql extensions—such as mutable positional-record fields—to the supported-subset validator. Each method carries a reusable flow summary containing endpoint reachability, returns, statement cost, reads, writes, and captured variables.
+
+The SQL backend can be invoked with a manually constructed `IrProgram`, independently of the C# frontend. Boundary tests compile C# to IR, compile hand-built IR to SQL, and reflect over the IR contract to reject Roslyn types and SQL payload properties.
 
 ## Inlining policy
 
@@ -37,7 +41,7 @@ The budget needs both per-method size and total expanded-size limits; a small me
 
 ## Control-flow lowering
 
-Roslyn statements first bind to procedural IR. The SQL lowerer therefore switches on the supported compiler model rather than maintaining separate Roslyn-syntax dispatchers for ordinary and VM-backed methods. Source syntax remains attached to every node for diagnostics and comment placement.
+Roslyn statements first bind to procedural IR. Both ordinary lowering and the stack-machine fallback switch on the same IR nodes. Neutral source spans and captured comments provide diagnostics and comment placement without making the backend depend on Roslyn syntax objects.
 
 Each inlined method receives a unique end label. A source `return value;` assigns the result and jumps directly to that label. Loops similarly receive condition/body, continue, and break labels. This is a compact target for arbitrary control-flow graphs while keeping source-level `if` statements structured:
 
@@ -55,7 +59,7 @@ Labels are batch-scoped rather than block-scoped, so every generated label goes 
 
 ## Expression rendering
 
-Typed scalar expressions carry their C# type, null-flow state, and SQL operator precedence. Parent expressions request an operand at a minimum precedence, so parentheses are added only when removing them would change the syntax tree. This produces `5 * 5` for `Square(5)`, while retaining both required pairs in `Square(a + b)` as `(@a + @b) * (@a + @b)`. Casts are also represented at this boundary rather than reconstructed by substitution consumers. A text-level regular expression is deliberately avoided because it cannot safely distinguish expressions from strings or preserve associativity such as `a - (b - c)`.
+IR expressions carry language type, null-flow state, constant facts, and explicit operators. The SQL backend converts them to `SqlScalarExpression`, where SQL precedence and rendered text belong. Parent expressions request an operand at a minimum precedence, producing `5 * 5` for `Square(5)` while retaining both required pairs in `Square(a + b)`. A text-level regular expression is deliberately avoided because it cannot safely distinguish expressions from strings or preserve associativity such as `a - (b - c)`.
 
 ## Stack-machine fallback
 
@@ -114,9 +118,11 @@ Comments are read from Roslyn trivia rather than by scanning source text, so com
 
 ## Differential integration tests
 
-Every source file under `examples/` is executable specification. The integration suite compiles each file with Roslyn and captures its real .NET console output, then transpiles the same source, executes the batch against a SQL Server 2022 container, and captures `PRINT` messages through `SqlConnection.InfoMessage`. Output is compared ordinally after normalizing line endings.
+Every source file under `examples/` is an executable specification and an independently reported theory case. The integration suite compiles each file with Roslyn and captures a structured .NET outcome, then transpiles the same source, executes the batch against SQL Server 2022, and captures `PRINT` messages and SQL failures. Successful cases compare normalized standard output and entry-point return values ordinally.
 
-Testcontainers owns container startup, readiness, random host-port allocation, and cleanup. The suite shares one SQL Server instance for the example corpus but opens a fresh connection for every batch, preserving local-temporary-table isolation. Adding an example automatically adds it to the parity suite.
+Two focused corpora live under `tests/SharpSql.IntegrationTests/cases`. Runtime-failure cases declare their expected .NET exception type in a `sharpsql-expect-exception` source directive; the suite compares output produced before the failure and maps SharpSql's reserved SQL error numbers back to that type. Diagnostic cases must first be valid C#, then declare the exact expected SharpSql code set with `sharpsql-expect-diagnostics`. This separates unsupported-language contracts from runtime semantic parity.
+
+Testcontainers owns container startup, readiness, random host-port allocation, and cleanup. The collection fixture shares one SQL Server instance for the full corpus but opens a fresh connection for every batch, preserving local-temporary-table isolation. Discovery is path-sorted, and failures include the case path, both structured outcomes, generated SQL, and original source for deterministic reproduction. Adding an example or corpus file automatically adds one test.
 
 The corpus spans arithmetic and numeric widths, null/boolean behavior, Unicode and escaping, nested control flow, arrays, mutable collections, dictionary key collation, heap aliasing, instance methods, inlining, recursion, short-circuit evaluation, relational LINQ pipelines, managed `IQueryable<T>`, advanced ordering/paging/join/group stages, guarded terminals, delegate/query-plan flow, query syntax, stateful `Enumerable.Repeat` materialization, and character-array string construction. Narrow compiler unit tests accompany any lowering defect first discovered by a differential example.
 

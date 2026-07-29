@@ -37,7 +37,7 @@ public sealed partial class SharpSqlCompiler
         member.Name.Identifier.ValueText is "Next" or "NextDouble";
 
     private bool MethodUsesRandom(MethodDefinition method) =>
-        method.Syntax.DescendantNodesAndSelf()
+        CSharpSyntax<Microsoft.CodeAnalysis.SyntaxNode>(method.Source).DescendantNodesAndSelf()
             .OfType<InvocationExpressionSyntax>()
             .Any(IsRandomInvocation);
 
@@ -168,7 +168,7 @@ public sealed partial class SharpSqlCompiler
 
             EmitVmExpression(arguments[argumentIndex].Expression, scope, context, value =>
             {
-                var storage = AllocateVmTemporary(CSharpType.Int, context);
+                var storage = AllocateVmTemporary(IrType.Int, context);
                 StoreVmTemporary(storage, value);
                 captured.Add(storage);
                 EvaluateArgument(argumentIndex + 1);

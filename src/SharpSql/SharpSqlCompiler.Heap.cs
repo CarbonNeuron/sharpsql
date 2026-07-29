@@ -75,7 +75,7 @@ public sealed partial class SharpSqlCompiler
             foreach (var parameter in record.ParameterList.Parameters)
             {
                 var fieldName = parameter.Identifier.ValueText;
-                var fieldType = parameter.Type is null ? CSharpType.Unknown : CSharpType.From(parameter.Type);
+                var fieldType = parameter.Type is null ? IrType.Unknown : CSharpTypeFactory.From(parameter.Type);
                 AddHeapField(heapType, fieldName, fieldType, parameter);
                 targets.Add(fieldName);
             }
@@ -83,11 +83,11 @@ public sealed partial class SharpSqlCompiler
         }
 
         foreach (var property in declaration.Members.OfType<PropertyDeclarationSyntax>())
-            AddHeapField(heapType, property.Identifier.ValueText, CSharpType.From(property.Type), property);
+            AddHeapField(heapType, property.Identifier.ValueText, CSharpTypeFactory.From(property.Type), property);
 
         foreach (var field in declaration.Members.OfType<FieldDeclarationSyntax>())
             foreach (var variable in field.Declaration.Variables)
-                AddHeapField(heapType, variable.Identifier.ValueText, CSharpType.From(field.Declaration.Type), variable);
+                AddHeapField(heapType, variable.Identifier.ValueText, CSharpTypeFactory.From(field.Declaration.Type), variable);
 
         foreach (var constructor in declaration.Members.OfType<ConstructorDeclarationSyntax>())
         {
@@ -118,7 +118,7 @@ public sealed partial class SharpSqlCompiler
         _heapTypes.Add(name, heapType);
     }
 
-    private void AddHeapField(HeapType type, string name, CSharpType fieldType, SyntaxNode node)
+    private void AddHeapField(HeapType type, string name, IrType fieldType, SyntaxNode node)
     {
         if (type.Fields.ContainsKey(name))
             return; // Positional record properties also appear as declared members in some syntax forms.
@@ -161,7 +161,7 @@ public sealed partial class SharpSqlCompiler
                 for (var index = 0; index < fields.Length; index++)
                 {
                     EmitLeadingComments(fields[index].Syntax);
-                    _sql.Line($"{fields[index].SqlName} {fields[index].Type.Sql} NULL{(index + 1 == fields.Length ? string.Empty : ",")}");
+                    _sql.Line($"{fields[index].SqlName} {fields[index].Type.SqlType()} NULL{(index + 1 == fields.Length ? string.Empty : ",")}");
                 }
             }
             _sql.Line(");");
@@ -230,6 +230,7 @@ public sealed partial class SharpSqlCompiler
         expression.DescendantNodesAndSelf().OfType<ObjectCreationExpressionSyntax>().Any(IsHeapCreation) ||
         expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsRandomInvocation) ||
         expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsLinqMaterialization) ||
+        expression.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>().Any() ||
         expression.DescendantNodesAndSelf().OfType<ArrayCreationExpressionSyntax>()
             .Any(creation => creation.Type.ElementType.ToString() != "byte");
 
@@ -290,7 +291,7 @@ public sealed partial class SharpSqlCompiler
             return;
         }
 
-        var elementType = CSharpType.From(creation.Type.ElementType);
+        var elementType = CSharpTypeFactory.From(creation.Type.ElementType);
         if (creation.Initializer is not null)
         {
             var captured = new List<VmTemporary>();
@@ -606,7 +607,7 @@ public sealed partial class SharpSqlCompiler
 
     private static string HeapAssignmentValue(
         AssignmentExpressionSyntax assignment,
-        CSharpType targetType,
+        IrType targetType,
         string currentValue,
         string value)
     {
@@ -635,7 +636,7 @@ public sealed partial class SharpSqlCompiler
     private void EmitListAdd(
         ExpressionSyntax receiver,
         SeparatedSyntaxList<ArgumentSyntax> arguments,
-        CSharpType listType,
+        IrType listType,
         VariableScope scope,
         VmMethod? context)
     {
@@ -657,7 +658,7 @@ public sealed partial class SharpSqlCompiler
     private void EmitListSet(
         ElementAccessExpressionSyntax element,
         ExpressionSyntax valueExpression,
-        CSharpType listType,
+        IrType listType,
         VariableScope scope,
         VmMethod? context)
     {
@@ -667,14 +668,15 @@ public sealed partial class SharpSqlCompiler
             EmitVmExpression(valueExpression, scope, context, value =>
             {
                 var list = EmitScalar(element.Expression, scope);
+                EmitSequenceIndexGuard(listType, list, index);
                 _sql.Line($"UPDATE {HeapIndexedItems} SET {CollectionValueColumn(elementType, false)} = {CollectionStoredValue(elementType, value)} WHERE __owner_id = {list} AND __index = {index};");
             }));
     }
 
-    private void InsertListItem(string list, string index, CSharpType type, string value) =>
+    private void InsertListItem(string list, string index, IrType type, string value) =>
         _sql.Line($"INSERT INTO {HeapIndexedItems} (__owner_id, __index, {CollectionValueColumn(type, false)}) VALUES ({list}, {index}, {CollectionStoredValue(type, value)});");
 
-    private void InsertListItems(string list, CSharpType type, IReadOnlyList<string> values)
+    private void InsertListItems(string list, IrType type, IReadOnlyList<string> values)
     {
         const int maximumRowsPerValuesClause = 1000;
         var column = CollectionValueColumn(type, key: false);
@@ -697,7 +699,7 @@ public sealed partial class SharpSqlCompiler
     private void EmitDictionaryAdd(
         ExpressionSyntax receiver,
         SeparatedSyntaxList<ArgumentSyntax> arguments,
-        CSharpType dictionaryType,
+        IrType dictionaryType,
         VariableScope scope,
         VmMethod? context)
     {
@@ -725,7 +727,7 @@ public sealed partial class SharpSqlCompiler
     private void EmitDictionarySet(
         ElementAccessExpressionSyntax element,
         ExpressionSyntax valueExpression,
-        CSharpType dictionaryType,
+        IrType dictionaryType,
         VariableScope scope,
         VmMethod? context)
     {
@@ -754,16 +756,17 @@ public sealed partial class SharpSqlCompiler
         });
     }
 
-    private void InsertDictionaryEntry(string dictionary, CSharpType keyType, string key, CSharpType valueType, string value) =>
+    private void InsertDictionaryEntry(string dictionary, IrType keyType, string key, IrType valueType, string value) =>
         _sql.Line($"INSERT INTO {HeapDictionaryEntries} (__dictionary_id, {CollectionValueColumn(keyType, true)}, {CollectionValueColumn(valueType, false)}) VALUES ({dictionary}, {CollectionStoredValue(keyType, key)}, {CollectionStoredValue(valueType, value)});");
 
     private SqlScalarExpression EmitHeapMemberScalar(
         MemberAccessExpressionSyntax member,
         VariableScope scope,
-        IReadOnlyDictionary<string, Substitution>? substitutions = null)
+        IReadOnlyDictionary<string, Substitution>? substitutions = null,
+        string? receiverOverride = null)
     {
         var receiverType = InferType(member.Expression, scope, substitutions);
-        var receiver = EmitScalar(member.Expression, scope, substitutions);
+        var receiver = receiverOverride ?? EmitScalar(member.Expression, scope, substitutions);
         if (IsGroupingType(receiverType.Name) && member.Name.Identifier.ValueText == "Key")
             return SqlScalarExpression.Primary(receiver);
         if (receiverType.IsString && member.Name.Identifier.ValueText == "Length")
@@ -815,6 +818,16 @@ public sealed partial class SharpSqlCompiler
         EmitVmExpression(element.Expression, scope, context, receiver =>
             EmitVmExpression(element.ArgumentList.Arguments[0].Expression, scope, context, key =>
             {
+                if (receiverType.IsString)
+                    _sql.Line($"IF {key} < 0 OR {key} >= CONVERT(INT, DATALENGTH({receiver}) / 2) THROW 51003, 'String index was out of range.', 1;");
+                else if (IsSequenceType(receiverType.Name))
+                    EmitSequenceIndexGuard(receiverType, receiver, key);
+                else if (IsDictionaryType(receiverType.Name))
+                {
+                    var keyType = GenericArguments(receiverType.Name)[0];
+                    _sql.Line($"IF NOT EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver} AND {DictionaryKeyPredicate(keyType, key)}) THROW 51010, 'The given key was not present in the dictionary.', 1;");
+                }
+
                 if (TryGetHeapElementSql(receiverType, receiver, key, out var value))
                     continuation(value);
                 else
@@ -823,8 +836,16 @@ public sealed partial class SharpSqlCompiler
         return true;
     }
 
+    private void EmitSequenceIndexGuard(IrType receiverType, string receiver, string index)
+    {
+        var (code, message) = IsListType(receiverType.Name)
+            ? (51002, "List index was out of range.")
+            : (51003, "Array index was out of range.");
+        _sql.Line($"IF {index} < 0 OR {index} >= {SequenceCountSql(receiver)} THROW {code}, '{message}', 1;");
+    }
+
     private static bool TryGetHeapElementSql(
-        CSharpType receiverType,
+        IrType receiverType,
         string receiver,
         string key,
         out string value)
@@ -890,27 +911,27 @@ public sealed partial class SharpSqlCompiler
         return false;
     }
 
-    private CSharpType InferHeapMemberType(MemberAccessExpressionSyntax member, VariableScope scope)
+    private IrType InferHeapMemberType(MemberAccessExpressionSyntax member, VariableScope scope)
     {
         var receiver = InferType(member.Expression, scope);
         if ((IsListType(receiver.Name) || IsDictionaryType(receiver.Name)) && member.Name.Identifier.ValueText == "Count")
-            return CSharpType.Int;
+            return IrType.Int;
         if (IsArrayType(receiver.Name) && member.Name.Identifier.ValueText == "Length")
-            return CSharpType.Int;
+            return IrType.Int;
         if (_heapTypes.TryGetValue(receiver.Name, out var heapType) &&
             heapType.Fields.TryGetValue(member.Name.Identifier.ValueText, out var field))
             return field.Type;
-        return CSharpType.Unknown;
+        return IrType.Unknown;
     }
 
-    private CSharpType InferHeapElementType(ElementAccessExpressionSyntax element, VariableScope scope)
+    private IrType InferHeapElementType(ElementAccessExpressionSyntax element, VariableScope scope)
     {
         var receiver = InferType(element.Expression, scope);
         if (IsSequenceType(receiver.Name))
             return SequenceElementType(receiver.Name);
         if (IsDictionaryType(receiver.Name))
             return GenericArguments(receiver.Name)[1];
-        return CSharpType.Unknown;
+        return IrType.Unknown;
     }
 
     private bool TryResolveHeapField(
@@ -966,7 +987,7 @@ public sealed partial class SharpSqlCompiler
         out HeapField field,
         out string receiver)
     {
-        CSharpType? receiverType = null;
+        IrType? receiverType = null;
         receiver = string.Empty;
         if (substitutions is not null && substitutions.TryGetValue("this", out var replacement))
         {
@@ -1007,7 +1028,7 @@ public sealed partial class SharpSqlCompiler
         _ => null
     };
 
-    private static string CollectionValueColumn(CSharpType type, bool key)
+    private static string CollectionValueColumn(IrType type, bool key)
     {
         var prefix = key ? "__key" : "__";
         if (type.IsString)
@@ -1019,22 +1040,22 @@ public sealed partial class SharpSqlCompiler
         return key ? "__key" : "__value";
     }
 
-    private static string CollectionStoredValue(CSharpType type, string value) =>
+    private static string CollectionStoredValue(IrType type, string value) =>
         type.IsString || type.Name == "byte[]" || type.IsReference
             ? value
             : type.Name == "char"
                 ? $"CONVERT(SQL_VARIANT, CONVERT(NCHAR(1), {value}))"
                 : $"CONVERT(SQL_VARIANT, {value})";
 
-    private static string CollectionReadValue(CSharpType type, bool key, string? qualifier = null)
+    private static string CollectionReadValue(IrType type, bool key, string? qualifier = null)
     {
         var column = (qualifier is null ? string.Empty : qualifier + ".") + CollectionValueColumn(type, key);
         if (type.IsString || type.Name == "byte[]" || type.IsReference)
             return column;
-        return $"CONVERT({type.Sql}, {column})";
+        return $"CONVERT({type.SqlType()}, {column})";
     }
 
-    private static string DictionaryKeyPredicate(CSharpType type, string value)
+    private static string DictionaryKeyPredicate(IrType type, string value)
     {
         var column = CollectionReadValue(type, true);
         if (type.IsString)
@@ -1042,7 +1063,7 @@ public sealed partial class SharpSqlCompiler
         return $"{column} = {value}";
     }
 
-    private static string CollectionValuePredicate(CSharpType type, string value, bool key)
+    private static string CollectionValuePredicate(IrType type, string value, bool key)
     {
         var column = CollectionReadValue(type, key);
         if (type.IsString)
@@ -1050,9 +1071,9 @@ public sealed partial class SharpSqlCompiler
         return $"{column} = {value}";
     }
 
-    private static string DefaultSql(CSharpType type)
+    private static string DefaultSql(IrType type)
     {
-        if (type.IsString || type.IsReference || type.Name == "byte[]" || type == CSharpType.Unknown)
+        if (type.IsString || type.IsReference || type.Name == "byte[]" || type == IrType.Unknown)
             return "NULL";
         if (type.IsBoolean)
             return "CAST(0 AS BIT)";
@@ -1075,21 +1096,21 @@ public sealed partial class SharpSqlCompiler
 
     private static bool IsSequenceType(string name) => IsListType(name) || IsArrayType(name);
 
-    private static CSharpType SequenceElementType(string name) => IsArrayType(name)
-        ? CSharpType.From(SyntaxFactory.ParseTypeName(name[..^2]))
+    private static IrType SequenceElementType(string name) => IsArrayType(name)
+        ? CSharpTypeFactory.From(SyntaxFactory.ParseTypeName(name[..^2]))
         : GenericArguments(name)[0];
 
     private static string SequenceCountSql(string collection) =>
         $"(SELECT __count FROM {HeapObjects} WHERE __id = {collection})";
 
-    private static string SequenceElementSql(string collection, string index, CSharpType itemType) =>
+    private static string SequenceElementSql(string collection, string index, IrType itemType) =>
         $"(SELECT {CollectionReadValue(itemType, false)} FROM {HeapIndexedItems} WHERE __owner_id = {collection} AND __index = {index})";
 
     private static bool IsDictionaryType(string name) =>
         name.StartsWith("Dictionary<", StringComparison.Ordinal) ||
         name.StartsWith("System.Collections.Generic.Dictionary<", StringComparison.Ordinal);
 
-    private static CSharpType[] GenericArguments(string name)
+    private static IrType[] GenericArguments(string name)
     {
         var open = name.IndexOf('<');
         var close = name.LastIndexOf('>');
@@ -1110,7 +1131,7 @@ public sealed partial class SharpSqlCompiler
             }
         }
         arguments.Add(content[start..].Trim());
-        return arguments.Select(argument => CSharpType.From(SyntaxFactory.ParseTypeName(argument))).ToArray();
+        return arguments.Select(argument => CSharpTypeFactory.From(SyntaxFactory.ParseTypeName(argument))).ToArray();
     }
 
     private static string NormalizeTypeName(string name) =>
@@ -1135,7 +1156,7 @@ public sealed partial class SharpSqlCompiler
         public List<HeapConstructor> Constructors { get; } = [];
     }
 
-    private sealed record HeapField(string Name, CSharpType Type, string SqlName, SyntaxNode Syntax);
+    private sealed record HeapField(string Name, IrType Type, string SqlName, SyntaxNode Syntax);
     private sealed record HeapConstructor(IReadOnlyList<string> TargetFields);
     private sealed record HeapValueAssignment(HeapField Field, VmTemporary Value);
 }

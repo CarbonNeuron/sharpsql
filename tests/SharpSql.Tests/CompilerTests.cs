@@ -1115,6 +1115,31 @@ public sealed class CompilerTests
         Assert.Equal(1, Count(result.Sql, "/*literal*/"));
     }
 
+    [Fact]
+    public void EmitsRuntimeGuardsForManagedIndexerFailures()
+    {
+        const string source = """
+            var list = new List<int> { 1 };
+            int[] array = new int[] { 1 };
+            var dictionary = new Dictionary<string, int>();
+            dictionary.Add("present", 1);
+            string text = "x";
+
+            Console.WriteLine(list[1]);
+            Console.WriteLine(array[1]);
+            Console.WriteLine(dictionary["missing"]);
+            Console.WriteLine(text[1]);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("THROW 51002, 'List index was out of range.'", result.Sql);
+        Assert.Contains("THROW 51003, 'Array index was out of range.'", result.Sql);
+        Assert.Contains("THROW 51010, 'The given key was not present in the dictionary.'", result.Sql);
+        Assert.Contains("THROW 51003, 'String index was out of range.'", result.Sql);
+    }
+
     private static TranspileResult Compile(string source) => new SharpSqlCompiler().Transpile(source);
 
     private static int Count(string value, string needle) =>

@@ -22,8 +22,11 @@ public sealed partial class SharpSqlCompiler
     private readonly SqlWriter _sql = new();
     private SemanticModel? _semanticModel;
     private TranspileOptions _options = new();
+    private IrProgram? _boundProgram;
     private int _inlineId;
     private bool _used;
+
+    internal IrProgram? BoundProgram => _boundProgram;
 
     public TranspileResult Transpile(string source, TranspileOptions? options = null)
     {
@@ -44,6 +47,40 @@ public sealed partial class SharpSqlCompiler
         PrepareVmMethods();
         PrepareHeapRuntime(root);
 
+        var scope = new VariableScope();
+        var topLevelStatements = root.Members
+            .OfType<GlobalStatementSyntax>()
+            .Select(member => member.Statement)
+            .Where(statement => statement is not LocalFunctionStatementSyntax)
+            .ToArray();
+        ProceduralBlock entryPoint;
+        if (topLevelStatements.Length > 0)
+        {
+            entryPoint = new ProceduralBlock(
+                ToIrSource(root),
+                topLevelStatements.Select(statement => BindProceduralStatement(statement, scope)).ToArray());
+        }
+        else
+        {
+            var main = root.DescendantNodes().OfType<MethodDeclarationSyntax>()
+                .FirstOrDefault(method => method.Identifier.ValueText == "Main");
+            entryPoint = main?.Body is not null
+                ? (ProceduralBlock)BindProceduralStatement(main.Body, scope)
+                : main?.ExpressionBody is not null
+                    ? new ProceduralBlock(
+                        ToIrSource(main),
+                        [new ProceduralExpressionStatement(
+                            ToIrSource(main.ExpressionBody.Expression),
+                            BindIrExpression(main.ExpressionBody.Expression, scope))])
+                    : new ProceduralBlock(ToIrSource(root), []);
+            if (entryPoint.Statements.Count == 0 && _diagnostics.Count == 0)
+                AddDiagnostic("SS0001", "No top-level statements or Main method were found.", root);
+        }
+        _boundProgram = new IrProgram(
+            _methods.Values.ToArray(),
+            entryPoint,
+            ToIrSource(root).DescendantComments);
+
         EmitFileHeaderComments(root);
 
         if (_options.EmitNoCount)
@@ -55,35 +92,36 @@ public sealed partial class SharpSqlCompiler
         EmitVmPreamble();
         EmitHeapPreamble();
 
-        var scope = new VariableScope();
         foreach (var vmMethod in _vmMethods.Values)
             vmMethod.Scope.SetParent(scope);
-        var topLevelStatements = root.Members
-            .OfType<GlobalStatementSyntax>()
-            .Select(member => member.Statement)
-            .Where(statement => statement is not LocalFunctionStatementSyntax)
-            .ToArray();
-
-        if (topLevelStatements.Length > 0)
-        {
-            EmitStatementSequence(topLevelStatements, scope, null, null, null);
-        }
-        else
-        {
-            var main = root.DescendantNodes().OfType<MethodDeclarationSyntax>()
-                .FirstOrDefault(method => method.Identifier.ValueText == "Main");
-            if (main?.Body is not null)
-                EmitStatementSequence(main.Body.Statements, scope, null, null, null);
-            else if (main?.ExpressionBody is not null)
-                EmitExpressionStatement(main.ExpressionBody.Expression, scope, null, null);
-            else if (_diagnostics.Count == 0)
-                AddDiagnostic("SS0001", "No top-level statements or Main method were found.", root);
-        }
+        EmitProceduralStatementSequence(_boundProgram.EntryPoint.Statements, scope, null, null, null);
 
         EmitVmEpilogue();
         EmitAllRemainingComments(root);
         EmitHeapEpilogue();
 
+        return new TranspileResult(_sql.ToString(), _diagnostics.AsReadOnly());
+    }
+
+    internal TranspileResult Transpile(IrProgram program, TranspileOptions? options = null)
+    {
+        if (_used)
+            return new SharpSqlCompiler().Transpile(program, options);
+        _used = true;
+        _options = options ?? new TranspileOptions();
+        _boundProgram = program;
+        foreach (var method in program.Methods)
+            _methods.TryAdd(method.Name, method);
+
+        EmitIrComments(program.FileComments);
+        if (_options.EmitNoCount)
+        {
+            _sql.Line("SET NOCOUNT ON;");
+            _sql.Line();
+        }
+
+        var scope = new VariableScope();
+        EmitProceduralStatementSequence(program.EntryPoint.Statements, scope, null, null, null);
         return new TranspileResult(_sql.ToString(), _diagnostics.AsReadOnly());
     }
 
@@ -145,13 +183,14 @@ public sealed partial class SharpSqlCompiler
     {
         foreach (var local in root.DescendantNodes().OfType<LocalFunctionStatementSyntax>())
         {
+            var scope = new VariableScope();
             AddMethod(new MethodDefinition(
                 local.Identifier.ValueText,
-                CSharpType.From(local.ReturnType),
+                CSharpTypeFactory.From(local.ReturnType),
                 local.ParameterList.Parameters.Select(ToParameter).ToArray(),
-                local.Body,
-                local.ExpressionBody?.Expression,
-                local));
+                local.Body is null ? null : (ProceduralBlock)BindProceduralStatement(local.Body, scope),
+                local.ExpressionBody is null ? null : BindIrExpression(local.ExpressionBody.Expression, scope),
+                ToIrSource(local)));
         }
 
         foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
@@ -161,17 +200,21 @@ public sealed partial class SharpSqlCompiler
 
             var containingType = method.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
             var isInstance = containingType is not null && !method.Modifiers.Any(SyntaxKind.StaticKeyword);
+            var scope = new VariableScope();
             var parameters = method.ParameterList.Parameters.Select(ToParameter).ToList();
             if (isInstance)
-                parameters.Insert(0, new ParameterDefinition("this", new CSharpType(containingType!.Identifier.ValueText, "BIGINT", IsReference: true)));
+                parameters.Insert(0, new ParameterDefinition(GetOrCreateIrSymbol(
+                    null,
+                    "this",
+                    new IrType(containingType!.Identifier.ValueText, IsReference: true))));
 
             AddMethod(new MethodDefinition(
                 method.Identifier.ValueText,
-                CSharpType.From(method.ReturnType),
+                CSharpTypeFactory.From(method.ReturnType),
                 parameters,
-                method.Body,
-                method.ExpressionBody?.Expression,
-                method,
+                method.Body is null ? null : (ProceduralBlock)BindProceduralStatement(method.Body, scope),
+                method.ExpressionBody is null ? null : BindIrExpression(method.ExpressionBody.Expression, scope),
+                ToIrSource(method),
                 containingType?.Identifier.ValueText,
                 isInstance));
         }
@@ -181,7 +224,7 @@ public sealed partial class SharpSqlCompiler
     {
         method = method with { Flow = AnalyzeMethodFlow(method) };
         if (!_methods.TryAdd(method.Name, method))
-            AddDiagnostic("SS1001", $"Method overloads are not supported yet: '{method.Name}'.", method.Syntax);
+            AddDiagnostic("SS1001", $"Method overloads are not supported yet: '{method.Name}'.", method.Source);
     }
 
     private MethodFlowSummary AnalyzeMethodFlow(MethodDefinition method)
@@ -197,12 +240,13 @@ public sealed partial class SharpSqlCompiler
                 CapturedVariables: new HashSet<string>(StringComparer.Ordinal));
         }
 
-        var controlFlow = _semanticModel.AnalyzeControlFlow(method.Body);
-        var dataFlow = _semanticModel.AnalyzeDataFlow(method.Body);
+        var body = CSharpSyntax<BlockSyntax>(method.Body.Source);
+        var controlFlow = _semanticModel.AnalyzeControlFlow(body);
+        var dataFlow = _semanticModel.AnalyzeDataFlow(body);
         return new MethodFlowSummary(
             controlFlow is { Succeeded: true, EndPointIsReachable: true },
-            method.Body.DescendantNodes().OfType<ReturnStatementSyntax>().Any(),
-            method.Body.DescendantNodes().OfType<StatementSyntax>().Count(),
+            body.DescendantNodes().OfType<ReturnStatementSyntax>().Any(),
+            body.DescendantNodes().OfType<StatementSyntax>().Count(),
             SymbolNames(dataFlow?.ReadInside ?? []),
             SymbolNames(dataFlow?.WrittenInside ?? []),
             SymbolNames(dataFlow?.Captured ?? []));
@@ -211,9 +255,11 @@ public sealed partial class SharpSqlCompiler
             symbols.Select(symbol => symbol.Name).ToHashSet(StringComparer.Ordinal);
     }
 
-    private static ParameterDefinition ToParameter(ParameterSyntax parameter) =>
-        new(parameter.Identifier.ValueText,
-            parameter.Type is null ? CSharpType.Unknown : CSharpType.From(parameter.Type));
+    private ParameterDefinition ToParameter(ParameterSyntax parameter) =>
+        new(GetOrCreateIrSymbol(
+            _semanticModel?.GetDeclaredSymbol(parameter),
+            parameter.Identifier.ValueText,
+            parameter.Type is null ? IrType.Unknown : CSharpTypeFactory.From(parameter.Type)));
 
     private void CountCalls(CompilationUnitSyntax root)
     {
@@ -229,7 +275,7 @@ public sealed partial class SharpSqlCompiler
     {
         var graph = _methods.Values.ToDictionary(
             method => method.Name,
-            method => method.Syntax.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            method => CSharpSyntax<SyntaxNode>(method.Source).DescendantNodes().OfType<InvocationExpressionSyntax>()
                 .Select(call => InvocationName(call.Expression))
                 .Where(name => name is not null && _methods.ContainsKey(name))
                 .Cast<string>()
@@ -252,93 +298,6 @@ public sealed partial class SharpSqlCompiler
             foreach (var next in graph[current])
                 Visit(origin, next, new HashSet<string>(path, StringComparer.Ordinal));
         }
-    }
-
-    private ProceduralExpression BindProceduralExpression(
-        ExpressionSyntax expression,
-        VariableScope scope) =>
-        new(expression, AnalyzeExpression(expression, scope));
-
-    private ProceduralDeclaration BindProceduralDeclaration(
-        VariableDeclarationSyntax declaration,
-        VariableScope scope)
-    {
-        var declaredType = CSharpType.From(declaration.Type);
-        return new ProceduralDeclaration(
-            declaration,
-            declaration.Variables.Select(variable =>
-            {
-                var initializer = variable.Initializer is null
-                    ? null
-                    : BindProceduralExpression(variable.Initializer.Value, scope);
-                return new ProceduralVariable(
-                    variable,
-                    variable.Identifier.ValueText,
-                    declaredType == CSharpType.Unknown && initializer is not null
-                        ? initializer.Facts.Type
-                        : declaredType,
-                    initializer);
-            }).ToArray());
-    }
-
-    private ProceduralStatement BindProceduralStatement(
-        StatementSyntax statement,
-        VariableScope scope) => statement switch
-        {
-            BlockSyntax block => new ProceduralBlock(
-                block,
-                block.Statements.Select(item => BindProceduralStatement(item, scope)).ToArray()),
-            LocalFunctionStatementSyntax localFunction => new ProceduralLocalFunction(localFunction),
-            LocalDeclarationStatementSyntax declaration => new ProceduralDeclarationStatement(
-                declaration,
-                BindProceduralDeclaration(declaration.Declaration, scope)),
-            ExpressionStatementSyntax expression => new ProceduralExpressionStatement(
-                expression,
-                BindProceduralExpression(expression.Expression, scope)),
-            IfStatementSyntax @if => new ProceduralIf(
-                @if,
-                BindProceduralExpression(@if.Condition, scope),
-                BindProceduralStatement(@if.Statement, scope),
-                @if.Else is null ? null : BindProceduralStatement(@if.Else.Statement, scope)),
-            WhileStatementSyntax @while => new ProceduralWhile(
-                @while,
-                BindProceduralExpression(@while.Condition, scope),
-                BindProceduralStatement(@while.Statement, scope)),
-            DoStatementSyntax @do => new ProceduralDo(
-                @do,
-                BindProceduralExpression(@do.Condition, scope),
-                BindProceduralStatement(@do.Statement, scope)),
-            ForStatementSyntax @for => new ProceduralFor(
-                @for,
-                @for.Declaration is null ? null : BindProceduralDeclaration(@for.Declaration, scope),
-                @for.Initializers.Select(item => BindProceduralExpression(item, scope)).ToArray(),
-                @for.Condition is null ? null : BindProceduralExpression(@for.Condition, scope),
-                @for.Incrementors.Select(item => BindProceduralExpression(item, scope)).ToArray(),
-                BindProceduralStatement(@for.Statement, scope)),
-            ForEachStatementSyntax forEach => new ProceduralForEach(
-                forEach,
-                BindProceduralExpression(forEach.Expression, scope),
-                InferProceduralForEachElementType(forEach, scope),
-                BindProceduralStatement(forEach.Statement, scope)),
-            BreakStatementSyntax @break => new ProceduralBreak(@break),
-            ContinueStatementSyntax @continue => new ProceduralContinue(@continue),
-            ReturnStatementSyntax @return => new ProceduralReturn(
-                @return,
-                @return.Expression is null ? null : BindProceduralExpression(@return.Expression, scope)),
-            EmptyStatementSyntax empty => new ProceduralEmpty(empty),
-            _ => new ProceduralUnsupported(statement)
-        };
-
-    private CSharpType InferProceduralForEachElementType(
-        ForEachStatementSyntax statement,
-        VariableScope scope)
-    {
-        if (!statement.Type.IsVar)
-            return CSharpType.From(statement.Type);
-        var sourceType = InferType(statement.Expression, scope);
-        return IsSequenceType(sourceType.Name) || IsLinqSequenceType(sourceType.Name)
-            ? SequenceElementType(sourceType.Name)
-            : CSharpType.Unknown;
     }
 
     private void EmitStatementSequence(
@@ -371,7 +330,7 @@ public sealed partial class SharpSqlCompiler
                 EmitDeclaration(declaration.Declaration, scope, inlineReturn, loop, namePrefix);
                 break;
             case ProceduralExpressionStatement expression:
-                EmitExpressionStatement(expression.Expression.Syntax, scope, inlineReturn, namePrefix);
+                EmitExpressionStatement(expression.Expression, scope, inlineReturn, namePrefix);
                 break;
             case ProceduralIf @if:
                 EmitIf(@if, scope, inlineReturn, loop, namePrefix);
@@ -402,7 +361,7 @@ public sealed partial class SharpSqlCompiler
                 break;
             case ProceduralReturn @return when inlineReturn is not null:
                 if (@return.Expression is not null && inlineReturn.TargetSql is not null)
-                    _sql.Line($"SET {inlineReturn.TargetSql} = {EmitScalar(@return.Expression.Syntax, scope)};");
+                    _sql.Line($"SET {inlineReturn.TargetSql} = {EmitScalar(@return.Expression, scope)};");
                 _sql.Line($"GOTO {inlineReturn.EndLabel};");
                 break;
             case ProceduralReturn @return:
@@ -444,39 +403,40 @@ public sealed partial class SharpSqlCompiler
             var type = variable.DeclaredType;
             var sqlName = _names.Allocate(namePrefix is null ? sourceName : $"{namePrefix}_{sourceName}");
 
-            if (variable.Initializer is not null &&
-                TryEmitLinqDelegateDeclaration(variable.Initializer.Syntax, sourceName, sqlName, type, scope))
+            if (variable.Initializer is not null && HasCSharpSource(variable.Initializer.Source) &&
+                TryEmitLinqDelegateDeclaration(CSharpExpression(variable.Initializer), sourceName, sqlName, type, scope))
                 continue;
 
-            if (variable.Initializer is not null &&
-                TryEmitLinqQueryDeclaration(variable.Initializer.Syntax, sourceName, sqlName, type, scope))
+            if (variable.Initializer is not null && HasCSharpSource(variable.Initializer.Source) &&
+                TryEmitLinqQueryDeclaration(CSharpExpression(variable.Initializer), sourceName, sqlName, type, scope))
                 continue;
 
-            if (variable.Initializer is not null && ContainsRuntimeExpression(variable.Initializer.Syntax))
+            if (variable.Initializer is not null && ContainsRuntimeExpression(variable.Initializer))
             {
-                _sql.Line($"DECLARE {sqlName} {type.Sql};");
+                _sql.Line($"DECLARE {sqlName} {type.SqlType()};");
                 EmitVmExpression(
-                    variable.Initializer.Syntax,
+                    variable.Initializer,
                     scope,
                     null,
                     value => _sql.Line($"SET {sqlName} = {value};"));
-                scope.Add(sourceName, new VariableBinding(sqlName, type));
+                scope.Add(variable.Symbol, new VariableBinding(sqlName, type));
                 continue;
             }
 
-            if (variable.Initializer?.Syntax is InvocationExpressionSyntax invocation &&
+            if (variable.Initializer is not null && HasCSharpSource(variable.Initializer.Source) &&
+                CSharpExpression(variable.Initializer) is InvocationExpressionSyntax invocation &&
                 TryGetComplexMethod(invocation, out var method))
             {
                 EmitComplexInline(method, InvocationArgumentExpressions(invocation, method), scope, sqlName, type, declareTarget: true);
-                scope.Add(sourceName, new VariableBinding(sqlName, type));
+                scope.Add(variable.Symbol, new VariableBinding(sqlName, type));
                 continue;
             }
 
             var initializer = variable.Initializer is null
                 ? string.Empty
-                : $" = {EmitScalar(variable.Initializer.Syntax, scope)}";
-            _sql.Line($"DECLARE {sqlName} {type.Sql}{initializer};");
-            scope.Add(sourceName, new VariableBinding(sqlName, type));
+                : $" = {EmitScalar(variable.Initializer, scope)}";
+            _sql.Line($"DECLARE {sqlName} {type.SqlType()}{initializer};");
+            scope.Add(variable.Symbol, new VariableBinding(sqlName, type));
         }
     }
 
@@ -559,14 +519,14 @@ public sealed partial class SharpSqlCompiler
         LoopContext? loop,
         string? namePrefix)
     {
-        if (ContainsRuntimeExpression(statement.Condition.Syntax))
+        if (ContainsRuntimeExpression(statement.Condition))
             EmitVmExpression(
-                statement.Condition.Syntax,
+                statement.Condition,
                 scope,
                 null,
-                condition => EmitBody(VmPredicate(condition, statement.Condition.Syntax, scope)));
+                condition => EmitBody(VmPredicate(condition, statement.Condition)));
         else
-            EmitBody(EmitPredicate(statement.Condition.Syntax, scope));
+            EmitBody(EmitPredicate(statement.Condition, scope));
 
         void EmitBody(string condition)
         {
@@ -590,14 +550,14 @@ public sealed partial class SharpSqlCompiler
         var continueLabel = _names.AllocateLabel("while_continue");
         var breakLabel = _names.AllocateLabel("while_break");
         EmitLabel(conditionLabel);
-        if (ContainsRuntimeExpression(statement.Condition.Syntax))
+        if (ContainsRuntimeExpression(statement.Condition))
             EmitVmExpression(
-                statement.Condition.Syntax,
+                statement.Condition,
                 scope,
                 null,
-                condition => EmitBody(VmPredicate(condition, statement.Condition.Syntax, scope)));
+                condition => EmitBody(VmPredicate(condition, statement.Condition)));
         else
-            EmitBody(EmitPredicate(statement.Condition.Syntax, scope));
+            EmitBody(EmitPredicate(statement.Condition, scope));
 
         void EmitBody(string condition)
         {
@@ -631,14 +591,14 @@ public sealed partial class SharpSqlCompiler
             new LoopContext(breakLabel, continueLabel),
             namePrefix);
         EmitLabel(continueLabel);
-        if (ContainsRuntimeExpression(statement.Condition.Syntax))
+        if (ContainsRuntimeExpression(statement.Condition))
             EmitVmExpression(
-                statement.Condition.Syntax,
+                statement.Condition,
                 scope,
                 null,
-                condition => EmitCondition(VmPredicate(condition, statement.Condition.Syntax, scope)));
+                condition => EmitCondition(VmPredicate(condition, statement.Condition)));
         else
-            EmitCondition(EmitPredicate(statement.Condition.Syntax, scope));
+            EmitCondition(EmitPredicate(statement.Condition, scope));
 
         void EmitCondition(string condition)
         {
@@ -657,20 +617,20 @@ public sealed partial class SharpSqlCompiler
         if (statement.Declaration is not null)
             EmitDeclaration(statement.Declaration, scope, inlineReturn, null, namePrefix);
         foreach (var initializer in statement.Initializers)
-            EmitExpressionStatement(initializer.Syntax, scope, inlineReturn, namePrefix);
+            EmitExpressionStatement(initializer, scope, inlineReturn, namePrefix);
 
         var conditionLabel = _names.AllocateLabel("for_condition");
         var continueLabel = _names.AllocateLabel("for_continue");
         var breakLabel = _names.AllocateLabel("for_break");
         EmitLabel(conditionLabel);
-        if (statement.Condition is not null && ContainsRuntimeExpression(statement.Condition.Syntax))
+        if (statement.Condition is not null && ContainsRuntimeExpression(statement.Condition))
             EmitVmExpression(
-                statement.Condition.Syntax,
+                statement.Condition,
                 scope,
                 null,
-                condition => EmitBody(VmPredicate(condition, statement.Condition.Syntax, scope)));
+                condition => EmitBody(VmPredicate(condition, statement.Condition)));
         else
-            EmitBody(statement.Condition is null ? "1 = 1" : EmitPredicate(statement.Condition.Syntax, scope));
+            EmitBody(statement.Condition is null ? "1 = 1" : EmitPredicate(statement.Condition, scope));
 
         void EmitBody(string condition)
         {
@@ -683,7 +643,7 @@ public sealed partial class SharpSqlCompiler
                 namePrefix);
             EmitLabel(continueLabel);
             foreach (var incrementor in statement.Incrementors)
-                EmitExpressionStatement(incrementor.Syntax, scope, inlineReturn, namePrefix);
+                EmitExpressionStatement(incrementor, scope, inlineReturn, namePrefix);
             _sql.Line($"GOTO {conditionLabel};");
             EmitLabel(breakLabel);
         }
@@ -708,8 +668,8 @@ public sealed partial class SharpSqlCompiler
         InlineReturn? inlineReturn,
         string? namePrefix)
     {
-        if (IsLinqQueryExpression(statement.SourceExpression.Syntax, parentScope) &&
-            TryBuildLinqQuery(statement.SourceExpression.Syntax, parentScope, substitutions: null, out var query))
+        if (IsLinqQueryExpression(CSharpExpression(statement.SourceExpression), parentScope) &&
+            TryBuildLinqQuery(CSharpExpression(statement.SourceExpression), parentScope, substitutions: null, out var query))
         {
             EmitLinqForEach(statement, query, parentScope, inlineReturn, namePrefix);
             return;
@@ -718,25 +678,25 @@ public sealed partial class SharpSqlCompiler
         var collectionType = statement.SourceExpression.Facts.Type;
         if (!IsSequenceType(collectionType.Name))
         {
-            AddDiagnostic("SS6302", "foreach currently supports arrays and List<T>.", statement.SourceExpression.Syntax);
+            AddDiagnostic("SS6302", "foreach currently supports arrays and List<T>.", statement.SourceExpression.Source);
             return;
         }
 
-        EmitVmExpression(statement.SourceExpression.Syntax, parentScope, null, collectionValue =>
+        EmitVmExpression(statement.SourceExpression, parentScope, null, collectionValue =>
         {
             var scope = parentScope.Child();
             var collectionSql = _names.Allocate("_foreach_collection");
             var indexSql = _names.Allocate("_foreach_index");
             var itemType = statement.ElementType;
-            var itemSql = _names.Allocate(statement.Syntax.Identifier.ValueText);
+            var itemSql = _names.Allocate(statement.Element.Name);
             var conditionLabel = _names.AllocateLabel("foreach_condition");
             var continueLabel = _names.AllocateLabel("foreach_continue");
             var breakLabel = _names.AllocateLabel("foreach_break");
 
             _sql.Line($"DECLARE {collectionSql} BIGINT = {collectionValue};");
             _sql.Line($"DECLARE {indexSql} INT = 0;");
-            _sql.Line($"DECLARE {itemSql} {itemType.Sql};");
-            scope.Add(statement.Syntax.Identifier.ValueText, new VariableBinding(itemSql, itemType));
+            _sql.Line($"DECLARE {itemSql} {itemType.SqlType()};");
+            scope.Add(statement.Element, new VariableBinding(itemSql, itemType));
             EmitLabel(conditionLabel);
             _sql.Line($"IF {indexSql} >= {SequenceCountSql(collectionSql)} GOTO {breakLabel};");
             _sql.Line($"SET {itemSql} = {SequenceElementSql(collectionSql, indexSql, itemType)};");
@@ -847,13 +807,13 @@ public sealed partial class SharpSqlCompiler
         IReadOnlyList<ExpressionSyntax> arguments,
         VariableScope callerScope,
         string? targetSql,
-        CSharpType targetType,
+        IrType targetType,
         bool declareTarget)
     {
         if (!CanInline(method, arguments.Count))
             return;
 
-        EmitLeadingComments(method.Syntax);
+        EmitLeadingComments(method.Source);
 
         var id = ++_inlineId;
         var prefix = $"_{method.Name.ToLowerInvariant()}_{id}";
@@ -864,18 +824,18 @@ public sealed partial class SharpSqlCompiler
             var parameter = method.Parameters[index];
             var parameterSql = _names.Allocate($"{prefix}_{parameter.Name}");
             var argumentSql = EmitScalar(arguments[index], callerScope);
-            _sql.Line($"DECLARE {parameterSql} {parameter.Type.Sql} = {argumentSql};");
-            methodScope.Add(parameter.Name, new VariableBinding(parameterSql, parameter.Type));
+            _sql.Line($"DECLARE {parameterSql} {parameter.Type.SqlType()} = {argumentSql};");
+            methodScope.Add(parameter.Symbol, new VariableBinding(parameterSql, parameter.Type));
         }
 
         if (targetSql is not null && declareTarget)
-            _sql.Line($"DECLARE {targetSql} {targetType.Sql};");
+            _sql.Line($"DECLARE {targetSql} {targetType.SqlType()};");
 
         var endLabel = _names.AllocateLabel($"{prefix}_end");
         var inlineReturn = new InlineReturn(targetSql, endLabel);
 
         if (method.Body is not null)
-            EmitStatementSequence(method.Body.Statements, methodScope, inlineReturn, null, prefix);
+            EmitProceduralStatementSequence(method.Body.Statements, methodScope, inlineReturn, null, prefix);
         else if (method.ExpressionBody is not null)
         {
             if (targetSql is not null)
@@ -889,7 +849,7 @@ public sealed partial class SharpSqlCompiler
     {
         if (argumentCount != method.Parameters.Count)
         {
-            AddDiagnostic("SS3001", $"Method '{method.Name}' expects {method.Parameters.Count} arguments, but received {argumentCount}.", method.Syntax);
+            AddDiagnostic("SS3001", $"Method '{method.Name}' expects {method.Parameters.Count} arguments, but received {argumentCount}.", method.Source);
             return false;
         }
 
@@ -900,20 +860,20 @@ public sealed partial class SharpSqlCompiler
             AddDiagnostic(
                 "SS3004",
                 $"Method '{method.Name}' can reach its endpoint without returning a value.",
-                method.Syntax);
+                method.Source);
             return false;
         }
 
         if (_recursiveMethods.Contains(method.Name))
         {
-            AddDiagnostic("SS3002", $"Recursive method '{method.Name}' needs the planned temporary-procedure fallback.", method.Syntax);
+            AddDiagnostic("SS3002", $"Recursive method '{method.Name}' needs the planned temporary-procedure fallback.", method.Source);
             return false;
         }
 
         if (method.StatementCount > _options.MaxInlineStatements ||
             _callCounts.GetValueOrDefault(method.Name) > _options.MaxInlineCallSites)
         {
-            AddDiagnostic("SS3003", $"Method '{method.Name}' exceeds the configured inlining budget.", method.Syntax);
+            AddDiagnostic("SS3003", $"Method '{method.Name}' exceeds the configured inlining budget.", method.Source);
             return false;
         }
 
@@ -946,7 +906,7 @@ public sealed partial class SharpSqlCompiler
         if (analysis.Type.IsBoolean && IsPredicateShape(expression))
             return SqlScalarExpression.Primary(
                 $"CASE WHEN {EmitPredicate(expression, scope, substitutions)} THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END",
-                CSharpType.Bool,
+                IrType.Bool,
                 ScalarNullability.NonNull);
 
         var result = expression switch
@@ -959,7 +919,7 @@ public sealed partial class SharpSqlCompiler
             CastExpressionSyntax cast => EmitScalarExpression(
                 cast.Expression,
                 scope,
-                substitutions).CastTo(CSharpType.From(cast.Type)),
+                substitutions).CastTo(CSharpTypeFactory.From(cast.Type)),
             ConditionalExpressionSyntax conditional => SqlScalarExpression.Primary(
                 $"CASE WHEN {EmitPredicate(conditional.Condition, scope, substitutions)} THEN {EmitScalar(conditional.WhenTrue, scope, substitutions)} ELSE {EmitScalar(conditional.WhenFalse, scope, substitutions)} END"),
             InvocationExpressionSyntax invocation => EmitInvocation(invocation, scope, substitutions),
@@ -1033,7 +993,7 @@ public sealed partial class SharpSqlCompiler
         var precedence = BinaryPrecedence(binary.Kind());
         var left = EmitScalarExpression(binary.Left, scope, substitutions).Render(precedence);
         var right = EmitScalarExpression(binary.Right, scope, substitutions).Render(precedence + 1);
-        return new SqlScalarExpression($"{left} {op} {right}", CSharpType.Unknown, precedence);
+        return new SqlScalarExpression($"{left} {op} {right}", IrType.Unknown, precedence);
     }
 
     private SqlScalarExpression EmitPrefixScalar(
@@ -1043,15 +1003,15 @@ public sealed partial class SharpSqlCompiler
         {
             SyntaxKind.UnaryMinusExpression => new SqlScalarExpression(
                 $"-{EmitScalarExpression(prefix.Operand, scope, substitutions).Render(PrecedenceUnary + 1)}",
-                CSharpType.Unknown,
+                IrType.Unknown,
                 PrecedenceUnary),
             SyntaxKind.UnaryPlusExpression => new SqlScalarExpression(
                 $"+{EmitScalarExpression(prefix.Operand, scope, substitutions).Render(PrecedenceUnary + 1)}",
-                CSharpType.Unknown,
+                IrType.Unknown,
                 PrecedenceUnary),
             SyntaxKind.BitwiseNotExpression => new SqlScalarExpression(
                 $"~{EmitScalarExpression(prefix.Operand, scope, substitutions).Render(PrecedenceUnary + 1)}",
-                CSharpType.Unknown,
+                IrType.Unknown,
                 PrecedenceUnary),
             SyntaxKind.LogicalNotExpression => SqlScalarExpression.Primary(
                 $"CASE WHEN {EmitPredicate(prefix.Operand, scope, substitutions)} THEN CAST(0 AS BIT) ELSE CAST(1 AS BIT) END"),
@@ -1076,16 +1036,16 @@ public sealed partial class SharpSqlCompiler
         if (method.PureExpression is null)
             return SqlScalarExpression.Primary(
                 UnsupportedExpression(invocation, "A branching method call must be the complete variable initializer."));
-        EmitLeadingComments(method.Syntax);
-        if (method.Body?.Statements.OfType<ReturnStatementSyntax>().FirstOrDefault() is { } returnStatement)
-            EmitLeadingComments(returnStatement);
+        EmitLeadingComments(method.Source);
+        if (method.Body?.Statements.OfType<ProceduralReturn>().FirstOrDefault() is { } returnStatement)
+            EmitLeadingComments(returnStatement.Source);
         var arguments = InvocationArgumentExpressions(invocation, method);
         if (!CanInline(method, arguments.Count))
             return SqlScalarExpression.Primary("NULL");
 
         var replacements = new Dictionary<string, Substitution>(StringComparer.Ordinal);
-        var planReplacements = new Dictionary<string, LinqQueryPlan>(StringComparer.Ordinal);
-        var lambdaReplacements = new Dictionary<string, LinqLambdaPlan>(StringComparer.Ordinal);
+        var planReplacements = new Dictionary<string, SqlLinqQueryPlan>(StringComparer.Ordinal);
+        var lambdaReplacements = new Dictionary<string, SqlLinqLambdaPlan>(StringComparer.Ordinal);
         for (var index = 0; index < method.Parameters.Count; index++)
         {
             var parameter = method.Parameters[index];
@@ -1174,7 +1134,7 @@ public sealed partial class SharpSqlCompiler
         ObjectCreationExpressionSyntax creation,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions = null) =>
-        CSharpType.From(creation.Type).IsString &&
+        CSharpTypeFactory.From(creation.Type).IsString &&
         creation.ArgumentList?.Arguments is { Count: 1 } arguments &&
         InferType(arguments[0].Expression, scope, substitutions).Name == "char[]";
 
@@ -1235,7 +1195,7 @@ public sealed partial class SharpSqlCompiler
             : SqlScalarExpression.Primary("NULL");
     }
 
-    private CSharpType InferType(
+    private IrType InferType(
         ExpressionSyntax expression,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions = null) =>
@@ -1265,7 +1225,7 @@ public sealed partial class SharpSqlCompiler
             {
                 var constant = _semanticModel.GetConstantValue(expression);
                 return new ExpressionFacts(
-                    CSharpType.From(semanticType),
+                    CSharpTypeFactory.From(semanticType),
                     ToScalarNullability(typeInfo.Nullability.FlowState, expression),
                     constant.HasValue,
                     constant.HasValue ? constant.Value : null);
@@ -1298,7 +1258,7 @@ public sealed partial class SharpSqlCompiler
         };
     }
 
-    private CSharpType InferTypeFallback(
+    private IrType InferTypeFallback(
         ExpressionSyntax expression,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions = null)
@@ -1306,37 +1266,37 @@ public sealed partial class SharpSqlCompiler
         expression = StripParentheses(expression);
         return expression switch
         {
-            LiteralExpressionSyntax literal when literal.IsKind(SyntaxKind.StringLiteralExpression) => CSharpType.String,
-            LiteralExpressionSyntax literal when literal.IsKind(SyntaxKind.CharacterLiteralExpression) => new("char", "NCHAR(1)"),
-            LiteralExpressionSyntax literal when literal.IsKind(SyntaxKind.TrueLiteralExpression) || literal.IsKind(SyntaxKind.FalseLiteralExpression) => CSharpType.Bool,
-            LiteralExpressionSyntax literal when literal.Token.Value is decimal => new("decimal", "DECIMAL(38,18)"),
-            LiteralExpressionSyntax literal when literal.Token.Value is double => new("double", "FLOAT"),
-            LiteralExpressionSyntax literal when literal.Token.Value is float => new("float", "REAL"),
-            LiteralExpressionSyntax literal when literal.Token.Value is long => new("long", "BIGINT"),
-            LiteralExpressionSyntax => CSharpType.Int,
+            LiteralExpressionSyntax literal when literal.IsKind(SyntaxKind.StringLiteralExpression) => IrType.String,
+            LiteralExpressionSyntax literal when literal.IsKind(SyntaxKind.CharacterLiteralExpression) => new("char"),
+            LiteralExpressionSyntax literal when literal.IsKind(SyntaxKind.TrueLiteralExpression) || literal.IsKind(SyntaxKind.FalseLiteralExpression) => IrType.Bool,
+            LiteralExpressionSyntax literal when literal.Token.Value is decimal => new("decimal"),
+            LiteralExpressionSyntax literal when literal.Token.Value is double => new("double"),
+            LiteralExpressionSyntax literal when literal.Token.Value is float => new("float"),
+            LiteralExpressionSyntax literal when literal.Token.Value is long => new("long"),
+            LiteralExpressionSyntax => IrType.Int,
             IdentifierNameSyntax identifier when substitutions is not null && substitutions.TryGetValue(identifier.Identifier.ValueText, out var value) => value.Type,
-            IdentifierNameSyntax identifier => scope.Find(identifier.Identifier.ValueText)?.Type ?? CSharpType.Unknown,
-            ThisExpressionSyntax => scope.Find("this")?.Type ?? CSharpType.Unknown,
-            BinaryExpressionSyntax binary when IsPredicateShape(binary) => CSharpType.Bool,
+            IdentifierNameSyntax identifier => scope.Find(identifier.Identifier.ValueText)?.Type ?? IrType.Unknown,
+            ThisExpressionSyntax => scope.Find("this")?.Type ?? IrType.Unknown,
+            BinaryExpressionSyntax binary when IsPredicateShape(binary) => IrType.Bool,
             BinaryExpressionSyntax binary when binary.IsKind(SyntaxKind.AddExpression) &&
-                (InferType(binary.Left, scope, substitutions).IsString || InferType(binary.Right, scope, substitutions).IsString) => CSharpType.String,
+                (InferType(binary.Left, scope, substitutions).IsString || InferType(binary.Right, scope, substitutions).IsString) => IrType.String,
             BinaryExpressionSyntax binary => InferType(binary.Left, scope, substitutions),
-            PrefixUnaryExpressionSyntax prefix when prefix.IsKind(SyntaxKind.LogicalNotExpression) => CSharpType.Bool,
+            PrefixUnaryExpressionSyntax prefix when prefix.IsKind(SyntaxKind.LogicalNotExpression) => IrType.Bool,
             PrefixUnaryExpressionSyntax prefix => InferType(prefix.Operand, scope, substitutions),
-            CastExpressionSyntax cast => CSharpType.From(cast.Type),
+            CastExpressionSyntax cast => CSharpTypeFactory.From(cast.Type),
             ConditionalExpressionSyntax conditional => InferType(conditional.WhenTrue, scope, substitutions),
-            InterpolatedStringExpressionSyntax => CSharpType.String,
-            ObjectCreationExpressionSyntax creation => CSharpType.From(creation.Type),
-            ArrayCreationExpressionSyntax creation => CSharpType.From(creation.Type),
+            InterpolatedStringExpressionSyntax => IrType.String,
+            ObjectCreationExpressionSyntax creation => CSharpTypeFactory.From(creation.Type),
+            ArrayCreationExpressionSyntax creation => CSharpTypeFactory.From(creation.Type),
             MemberAccessExpressionSyntax member => InferHeapMemberType(member, scope),
             ElementAccessExpressionSyntax element => InferHeapElementType(element, scope),
             InvocationExpressionSyntax invocation when invocation.Expression is MemberAccessExpressionSyntax member &&
                 ((IsDictionaryType(InferType(member.Expression, scope, substitutions).Name) &&
                   member.Name.Identifier.ValueText is "ContainsKey" or "ContainsValue") ||
                  (IsListType(InferType(member.Expression, scope, substitutions).Name) &&
-                  member.Name.Identifier.ValueText == "Contains")) => CSharpType.Bool,
+                  member.Name.Identifier.ValueText == "Contains")) => IrType.Bool,
             InvocationExpressionSyntax invocation when _methods.TryGetValue(InvocationName(invocation.Expression) ?? string.Empty, out var method) => method.ReturnType,
-            _ => CSharpType.Unknown
+            _ => IrType.Unknown
         };
     }
 
@@ -1346,13 +1306,29 @@ public sealed partial class SharpSqlCompiler
         return "NULL";
     }
 
+    private string UnsupportedExpression(IrSource source, string? detail = null)
+    {
+        AddDiagnostic("SS4002", detail ?? "Unsupported IR expression.", source);
+        return "NULL";
+    }
+
     private void Unsupported(SyntaxNode node, string category) =>
         AddDiagnostic("SS4003", $"Unsupported {category}: {node.Kind()}.", node);
+
+    private void Unsupported(IrSource source, string category) =>
+        AddDiagnostic("SS4003", $"Unsupported {category}.", source);
 
     private void AddDiagnostic(string code, string message, SyntaxNode node)
     {
         var location = node.GetLocation().GetLineSpan().StartLinePosition;
         var diagnostic = new CompilerDiagnostic(code, message, location.Line + 1, location.Character + 1);
+        if (!_diagnostics.Contains(diagnostic))
+            _diagnostics.Add(diagnostic);
+    }
+
+    private void AddDiagnostic(string code, string message, IrSource source)
+    {
+        var diagnostic = new CompilerDiagnostic(code, message, source.Span.Line, source.Span.Column);
         if (!_diagnostics.Contains(diagnostic))
             _diagnostics.Add(diagnostic);
     }
@@ -1448,6 +1424,6 @@ public sealed partial class SharpSqlCompiler
     private sealed record LoopContext(string BreakLabel, string ContinueLabel);
     private sealed record Substitution(SqlScalarExpression Expression)
     {
-        public CSharpType Type => Expression.Type;
+        public IrType Type => Expression.Type;
     }
 }

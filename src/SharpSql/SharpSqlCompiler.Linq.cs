@@ -11,68 +11,68 @@ internal enum LinqQueryStepKind
     ThenBy
 }
 
-internal abstract record LinqQueryStep;
+internal abstract record SqlLinqQueryStep;
 
-internal sealed record LinqScalarCapture(SqlScalarExpression Expression);
+internal sealed record SqlLinqScalarCapture(SqlScalarExpression Expression);
 
-internal sealed record LinqLambdaPlan(
-    ExpressionSyntax Expression,
-    IReadOnlyDictionary<string, LinqScalarCapture>? Captures = null);
+internal sealed record SqlLinqLambdaPlan(
+    IrExpression Expression,
+    IReadOnlyDictionary<string, SqlLinqScalarCapture>? Captures = null);
 
-internal sealed record LinqLambdaQueryStep(
+internal sealed record SqlLinqLambdaQueryStep(
     LinqQueryStepKind Kind,
     string ParameterName,
-    ExpressionSyntax Body,
-    CSharpType ResultType,
+    IrExpression Body,
+    IrType ResultType,
     bool Negated = false,
     bool Descending = false,
-    IReadOnlyDictionary<string, LinqScalarCapture>? Captures = null) : LinqQueryStep;
+    IReadOnlyDictionary<string, SqlLinqScalarCapture>? Captures = null) : SqlLinqQueryStep;
 
-internal sealed record LinqPagingQueryStep(
+internal sealed record SqlLinqPagingQueryStep(
     bool IsSkip,
-    string CountSql) : LinqQueryStep;
+    string CountSql) : SqlLinqQueryStep;
 
-internal sealed record LinqDistinctQueryStep : LinqQueryStep;
+internal sealed record SqlLinqDistinctQueryStep : SqlLinqQueryStep;
 
-internal sealed record LinqGroupQueryStep(
+internal sealed record SqlLinqGroupQueryStep(
     string ParameterName,
-    ExpressionSyntax KeyBody,
-    CSharpType KeyType,
-    CSharpType ElementType,
-    IReadOnlyDictionary<string, LinqScalarCapture>? Captures = null) : LinqQueryStep;
+    IrExpression KeyBody,
+    IrType KeyType,
+    IrType ElementType,
+    IReadOnlyDictionary<string, SqlLinqScalarCapture>? Captures = null) : SqlLinqQueryStep;
 
-internal sealed record LinqJoinQueryStep(
-    LinqQueryPlan InnerQuery,
+internal sealed record SqlLinqJoinQueryStep(
+    SqlLinqQueryPlan InnerQuery,
     string OuterParameterName,
-    ExpressionSyntax OuterKeyBody,
+    IrExpression OuterKeyBody,
     string InnerParameterName,
-    ExpressionSyntax InnerKeyBody,
-    CSharpType KeyType,
+    IrExpression InnerKeyBody,
+    IrType KeyType,
     string ResultOuterParameterName,
     string ResultInnerParameterName,
-    ExpressionSyntax ResultBody,
-    CSharpType ResultType,
-    IReadOnlyDictionary<string, LinqScalarCapture>? OuterCaptures = null,
-    IReadOnlyDictionary<string, LinqScalarCapture>? InnerCaptures = null,
-    IReadOnlyDictionary<string, LinqScalarCapture>? ResultCaptures = null) : LinqQueryStep;
+    IrExpression ResultBody,
+    IrType ResultType,
+    IReadOnlyDictionary<string, SqlLinqScalarCapture>? OuterCaptures = null,
+    IReadOnlyDictionary<string, SqlLinqScalarCapture>? InnerCaptures = null,
+    IReadOnlyDictionary<string, SqlLinqScalarCapture>? ResultCaptures = null) : SqlLinqQueryStep;
 
-internal sealed record LinqQueryPlan(
+internal sealed record SqlLinqQueryPlan(
     string SourceSql,
-    CSharpType SourceElementType,
-    CSharpType ElementType,
-    IReadOnlyList<LinqQueryStep> Steps);
+    IrType SourceElementType,
+    IrType ElementType,
+    IReadOnlyList<SqlLinqQueryStep> Steps);
 
 public sealed partial class SharpSqlCompiler
 {
     private int _linqId;
-    private readonly Stack<IReadOnlyDictionary<string, LinqQueryPlan>> _linqPlanSubstitutions = [];
-    private readonly Stack<IReadOnlyDictionary<string, LinqLambdaPlan>> _linqLambdaSubstitutions = [];
+    private readonly Stack<IReadOnlyDictionary<string, SqlLinqQueryPlan>> _linqPlanSubstitutions = [];
+    private readonly Stack<IReadOnlyDictionary<string, SqlLinqLambdaPlan>> _linqLambdaSubstitutions = [];
 
     private bool TryEmitLinqDelegateDeclaration(
         ExpressionSyntax initializer,
         string sourceName,
         string sqlName,
-        CSharpType type,
+        IrType type,
         VariableScope scope)
     {
         if (!TryBuildLinqLambda(initializer, scope, substitutions: null, out var lambda))
@@ -86,7 +86,7 @@ public sealed partial class SharpSqlCompiler
         ExpressionSyntax initializer,
         string sourceName,
         string sqlName,
-        CSharpType type,
+        IrType type,
         VariableScope scope)
     {
         if (!IsLinqQueryExpression(initializer, scope))
@@ -135,7 +135,7 @@ public sealed partial class SharpSqlCompiler
         ExpressionSyntax expression,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions,
-        out LinqQueryPlan query)
+        out SqlLinqQueryPlan query)
     {
         expression = StripParentheses(expression);
         if (expression is IdentifierNameSyntax substitutedIdentifier &&
@@ -170,8 +170,8 @@ public sealed partial class SharpSqlCompiler
             var scalarReplacements = substitutions is null
                 ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
                 : new Dictionary<string, Substitution>(substitutions, StringComparer.Ordinal);
-            var planReplacements = new Dictionary<string, LinqQueryPlan>(StringComparer.Ordinal);
-            var lambdaReplacements = new Dictionary<string, LinqLambdaPlan>(StringComparer.Ordinal);
+            var planReplacements = new Dictionary<string, SqlLinqQueryPlan>(StringComparer.Ordinal);
+            var lambdaReplacements = new Dictionary<string, SqlLinqLambdaPlan>(StringComparer.Ordinal);
             for (var index = 0; index < arguments.Count; index++)
             {
                 var parameter = userMethod.Parameters[index];
@@ -197,7 +197,7 @@ public sealed partial class SharpSqlCompiler
             _linqLambdaSubstitutions.Push(lambdaReplacements);
             try
             {
-                return TryBuildLinqQuery(userMethod.PureExpression, scope, scalarReplacements, out query);
+                return TryBuildLinqQuery(CSharpExpression(userMethod.PureExpression), scope, scalarReplacements, out query);
             }
             finally
             {
@@ -262,7 +262,7 @@ public sealed partial class SharpSqlCompiler
                     return false;
                 }
                 var steps = query.Steps.ToList();
-                steps.Add(new LinqDistinctQueryStep());
+                steps.Add(new SqlLinqDistinctQueryStep());
                 query = query with { Steps = steps };
                 return true;
             }
@@ -277,7 +277,7 @@ public sealed partial class SharpSqlCompiler
                     return false;
                 }
                 var steps = query.Steps.ToList();
-                steps.Add(new LinqPagingQueryStep(
+                steps.Add(new SqlLinqPagingQueryStep(
                     method == "Skip",
                     EmitScalar(invocation.ArgumentList.Arguments[0].Expression, scope, substitutions)));
                 query = query with { Steps = steps };
@@ -299,11 +299,11 @@ public sealed partial class SharpSqlCompiler
                     AddDiagnostic("SS6401", "Enumerable.GroupBy currently expects one key selector.", invocation);
                     return false;
                 }
-                var keyType = InferType(keyBody, scope, substitutions);
+                var keyType = keyBody.Type;
                 var elementType = query.ElementType;
                 var groupingType = GroupingType(keyType, elementType);
                 var steps = query.Steps.ToList();
-                steps.Add(new LinqGroupQueryStep(
+                steps.Add(new SqlLinqGroupQueryStep(
                     parameterName,
                     keyBody,
                     keyType,
@@ -327,10 +327,10 @@ public sealed partial class SharpSqlCompiler
                     AddDiagnostic("SS6401", "Enumerable.Join expects an inner sequence, two key selectors, and a two-parameter result selector.", invocation);
                     return false;
                 }
-                var keyType = InferType(outerKey, scope, substitutions);
-                var resultType = InferType(resultBody, scope, substitutions);
+                var keyType = outerKey.Type;
+                var resultType = resultBody.Type;
                 var steps = query.Steps.ToList();
-                steps.Add(new LinqJoinQueryStep(
+                steps.Add(new SqlLinqJoinQueryStep(
                     innerQuery,
                     outerParameter,
                     outerKey,
@@ -353,7 +353,7 @@ public sealed partial class SharpSqlCompiler
         if (IsSequenceType(sequenceType.Name))
         {
             var itemType = SequenceElementType(sequenceType.Name);
-            query = new LinqQueryPlan(
+            query = new SqlLinqQueryPlan(
                 EmitScalar(expression, scope, substitutions),
                 itemType,
                 itemType,
@@ -369,7 +369,7 @@ public sealed partial class SharpSqlCompiler
         QueryExpressionSyntax expression,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions,
-        out LinqQueryPlan query)
+        out SqlLinqQueryPlan query)
     {
         if (!TryBuildLinqQuery(expression.FromClause.Expression, scope, substitutions, out query))
             return false;
@@ -383,8 +383,8 @@ public sealed partial class SharpSqlCompiler
                     query,
                     LinqQueryStepKind.Where,
                     rangeVariable,
-                    where.Condition,
-                    CSharpType.Bool,
+                    BindIrExpression(where.Condition, scope),
+                    IrType.Bool,
                     negated: false,
                     captures: substitutions);
                 continue;
@@ -399,7 +399,7 @@ public sealed partial class SharpSqlCompiler
                         query,
                         index == 0 ? LinqQueryStepKind.OrderBy : LinqQueryStepKind.ThenBy,
                         rangeVariable,
-                        ordering.Expression,
+                        BindIrExpression(ordering.Expression, scope),
                         InferType(ordering.Expression, scope, substitutions),
                         negated: false,
                         descending: ordering.AscendingOrDescendingKeyword.ValueText == "descending",
@@ -419,7 +419,7 @@ public sealed partial class SharpSqlCompiler
                 query,
                 LinqQueryStepKind.Select,
                 rangeVariable,
-                select.Expression,
+                BindIrExpression(select.Expression, scope),
                 InferType(select.Expression, scope, substitutions),
                 negated: false,
                 captures: substitutions);
@@ -431,7 +431,12 @@ public sealed partial class SharpSqlCompiler
             var keyType = InferType(group.ByExpression, scope, substitutions);
             var elementType = query.ElementType;
             var steps = query.Steps.ToList();
-            steps.Add(new LinqGroupQueryStep(rangeVariable, group.ByExpression, keyType, elementType, CaptureLinqSubstitutions(substitutions)));
+            steps.Add(new SqlLinqGroupQueryStep(
+                rangeVariable,
+                BindIrExpression(group.ByExpression, scope),
+                keyType,
+                elementType,
+                CaptureLinqSubstitutions(substitutions)));
             query = query with
             {
                 ElementType = GroupingType(keyType, elementType),
@@ -455,14 +460,14 @@ public sealed partial class SharpSqlCompiler
     }
 
     private bool TryAppendLinqLambda(
-        LinqQueryPlan query,
+        SqlLinqQueryPlan query,
         ExpressionSyntax lambda,
         LinqQueryStepKind kind,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions,
         bool negated,
         bool descending,
-        out LinqQueryPlan result)
+        out SqlLinqQueryPlan result)
     {
         if (!TryGetSingleParameterLambda(lambda, scope, out var parameterName, out var body, out var lambdaCaptures))
         {
@@ -471,9 +476,7 @@ public sealed partial class SharpSqlCompiler
             return false;
         }
 
-        var resultType = kind == LinqQueryStepKind.Where
-            ? query.ElementType
-            : InferType(body, scope, substitutions);
+        var resultType = kind == LinqQueryStepKind.Where ? query.ElementType : body.Type;
         result = AppendLinqStep(
             query,
             kind,
@@ -486,18 +489,18 @@ public sealed partial class SharpSqlCompiler
         return true;
     }
 
-    private static LinqQueryPlan AppendLinqStep(
-        LinqQueryPlan query,
+    private static SqlLinqQueryPlan AppendLinqStep(
+        SqlLinqQueryPlan query,
         LinqQueryStepKind kind,
         string parameterName,
-        ExpressionSyntax body,
-        CSharpType resultType,
+        IrExpression body,
+        IrType resultType,
         bool negated,
         bool descending = false,
         IReadOnlyDictionary<string, Substitution>? captures = null)
     {
         var steps = query.Steps.ToList();
-        steps.Add(new LinqLambdaQueryStep(
+        steps.Add(new SqlLinqLambdaQueryStep(
             kind,
             parameterName,
             body,
@@ -513,7 +516,7 @@ public sealed partial class SharpSqlCompiler
     }
 
     private string RenderLinqQuery(
-        LinqQueryPlan query,
+        SqlLinqQueryPlan query,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
@@ -526,7 +529,7 @@ public sealed partial class SharpSqlCompiler
         for (var stepIndex = 0; stepIndex < query.Steps.Count; stepIndex++)
         {
             var step = query.Steps[stepIndex];
-            if (step is LinqLambdaQueryStep lambda && lambda.Kind is LinqQueryStepKind.Where or LinqQueryStepKind.Select)
+            if (step is SqlLinqLambdaQueryStep lambda && lambda.Kind is LinqQueryStepKind.Where or LinqQueryStepKind.Select)
             {
                 var sourceAlias = NextLinqAlias("source");
                 var replacements = LinqReplacements(
@@ -550,15 +553,15 @@ public sealed partial class SharpSqlCompiler
                 continue;
             }
 
-            if (step is LinqLambdaQueryStep { Kind: LinqQueryStepKind.OrderBy or LinqQueryStepKind.ThenBy })
+            if (step is SqlLinqLambdaQueryStep { Kind: LinqQueryStepKind.OrderBy or LinqQueryStepKind.ThenBy })
             {
-                var orders = new List<LinqLambdaQueryStep>
+                var orders = new List<SqlLinqLambdaQueryStep>
                 {
-                    (LinqLambdaQueryStep)step
+                    (SqlLinqLambdaQueryStep)step
                 };
                 stepIndex++;
                 while (stepIndex < query.Steps.Count &&
-                       query.Steps[stepIndex] is LinqLambdaQueryStep
+                       query.Steps[stepIndex] is SqlLinqLambdaQueryStep
                        {
                            Kind: LinqQueryStepKind.ThenBy
                        } thenBy)
@@ -569,7 +572,7 @@ public sealed partial class SharpSqlCompiler
                 stepIndex--;
 
                 var sourceAlias = NextLinqAlias("order_source");
-                var keySql = new List<(string Name, CSharpType Type, bool Descending)>();
+                var keySql = new List<(string Name, IrType Type, bool Descending)>();
                 var projections = new List<string>();
                 for (var orderIndex = 0; orderIndex < orders.Count; orderIndex++)
                 {
@@ -592,7 +595,7 @@ public sealed partial class SharpSqlCompiler
                 continue;
             }
 
-            if (step is LinqDistinctQueryStep)
+            if (step is SqlLinqDistinctQueryStep)
             {
                 var sourceAlias = NextLinqAlias("distinct_source");
                 var groupedAlias = NextLinqAlias("distinct_group");
@@ -602,7 +605,7 @@ public sealed partial class SharpSqlCompiler
                 continue;
             }
 
-            if (step is LinqPagingQueryStep paging)
+            if (step is SqlLinqPagingQueryStep paging)
             {
                 var sourceAlias = NextLinqAlias("page_source");
                 var numberedAlias = NextLinqAlias("page_numbered");
@@ -615,7 +618,7 @@ public sealed partial class SharpSqlCompiler
                 continue;
             }
 
-            if (step is LinqGroupQueryStep group)
+            if (step is SqlLinqGroupQueryStep group)
             {
                 var sourceAlias = NextLinqAlias("group_source");
                 var replacements = LinqReplacements(
@@ -634,7 +637,7 @@ public sealed partial class SharpSqlCompiler
                 continue;
             }
 
-            if (step is LinqJoinQueryStep join)
+            if (step is SqlLinqJoinQueryStep join)
             {
                 var outerAlias = NextLinqAlias("join_outer");
                 var innerAlias = NextLinqAlias("join_inner");
@@ -815,10 +818,10 @@ public sealed partial class SharpSqlCompiler
                 return true;
             case "Sum":
                 var resultType = InferType(invocation, scope, substitutions);
-                if (resultType == CSharpType.Unknown)
+                if (resultType == IrType.Unknown)
                     resultType = query.ElementType;
                 expression = SqlScalarExpression.Primary(
-                    $"COALESCE((SELECT SUM({terminalAlias}.__value) FROM ({querySql}) AS {terminalAlias}), CAST(0 AS {resultType.Sql}))");
+                    $"COALESCE((SELECT SUM({terminalAlias}.__value) FROM ({querySql}) AS {terminalAlias}), CAST(0 AS {resultType.SqlType()}))");
                 return true;
             case "Contains":
                 var value = EmitScalar(arguments[0].Expression, scope, substitutions);
@@ -951,7 +954,7 @@ public sealed partial class SharpSqlCompiler
         {
             EmitVmExpression(arguments[0].Expression, scope, context, index =>
             {
-                var indexStorage = AllocateVmTemporary(CSharpType.Int, context);
+                var indexStorage = AllocateVmTemporary(IrType.Int, context);
                 StoreVmTemporary(indexStorage, index);
                 var savedIndex = ReadVmTemporary(indexStorage);
                 if (method == "ElementAt")
@@ -985,7 +988,7 @@ public sealed partial class SharpSqlCompiler
                 $"COALESCE((SELECT TOP (1) {terminalAlias}.__value FROM ({querySql}) AS {terminalAlias}), {DefaultSql(query.ElementType)})",
             "Min" => $"(SELECT MIN({terminalAlias}.__value) FROM ({querySql}) AS {terminalAlias})",
             "Max" => $"(SELECT MAX({terminalAlias}.__value) FROM ({querySql}) AS {terminalAlias})",
-            "Average" => $"(SELECT AVG(CONVERT({resultType.Sql}, {terminalAlias}.__value)) FROM ({querySql}) AS {terminalAlias})",
+            "Average" => $"(SELECT AVG(CONVERT({resultType.SqlType()}, {terminalAlias}.__value)) FROM ({querySql}) AS {terminalAlias})",
             "MinBy" or "MaxBy" =>
                 $"(SELECT TOP (1) {terminalAlias}.__value FROM ({querySql}) AS {terminalAlias} ORDER BY {terminalAlias}.__index)",
             _ => "NULL"
@@ -1014,7 +1017,7 @@ public sealed partial class SharpSqlCompiler
 
     private void EmitLinqForEach(
         ProceduralForEach statement,
-        LinqQueryPlan query,
+        SqlLinqQueryPlan query,
         VariableScope parentScope,
         InlineReturn? inlineReturn,
         string? namePrefix)
@@ -1024,15 +1027,15 @@ public sealed partial class SharpSqlCompiler
             AddDiagnostic(
                 "SS6411",
                 "Iterating full IGrouping values is not supported; project group.Key before foreach.",
-                statement.SourceExpression.Syntax);
+                statement.SourceExpression.Source);
             return;
         }
 
         var scope = parentScope.Child();
         var lastIndex = _names.Allocate("_linq_last_index");
         var nextIndex = _names.Allocate("_linq_next_index");
-        var itemSql = _names.Allocate(statement.Syntax.Identifier.ValueText);
-        var itemType = statement.Syntax.Type.IsVar ? query.ElementType : statement.ElementType;
+        var itemSql = _names.Allocate(statement.Element.Name);
+        var itemType = statement.ElementType == IrType.Unknown ? query.ElementType : statement.ElementType;
         var conditionLabel = _names.AllocateLabel("linq_foreach_condition");
         var continueLabel = _names.AllocateLabel("linq_foreach_continue");
         var breakLabel = _names.AllocateLabel("linq_foreach_break");
@@ -1041,8 +1044,8 @@ public sealed partial class SharpSqlCompiler
 
         _sql.Line($"DECLARE {lastIndex} INT = -1;");
         _sql.Line($"DECLARE {nextIndex} INT;");
-        _sql.Line($"DECLARE {itemSql} {itemType.Sql};");
-        scope.Add(statement.Syntax.Identifier.ValueText, new VariableBinding(itemSql, itemType));
+        _sql.Line($"DECLARE {itemSql} {itemType.SqlType()};");
+        scope.Add(statement.Element, new VariableBinding(itemSql, itemType));
         EmitLabel(conditionLabel);
         _sql.Line($"SET {nextIndex} = NULL;");
         _sql.Line($"SELECT TOP (1) {nextIndex} = {sourceAlias}.__index, {itemSql} = {sourceAlias}.__value FROM ({querySql}) AS {sourceAlias} WHERE {sourceAlias}.__index > {lastIndex} ORDER BY {sourceAlias}.__index;");
@@ -1139,7 +1142,7 @@ public sealed partial class SharpSqlCompiler
         var repeatedExpression = repeat.ArgumentList.Arguments[0].Expression;
         var countExpression = repeat.ArgumentList.Arguments[1].Expression;
         var repeatedType = InferType(repeatedExpression, scope);
-        var resultType = InferType(selectorBody, scope);
+        var resultType = selectorBody.Type;
 
         EmitVmExpression(repeatedExpression, scope, context, repeatedValue =>
         {
@@ -1147,7 +1150,7 @@ public sealed partial class SharpSqlCompiler
             StoreVmTemporary(repeatedStorage, repeatedValue);
             EmitVmExpression(countExpression, scope, context, count =>
             {
-                var countStorage = AllocateVmTemporary(CSharpType.Int, context);
+                var countStorage = AllocateVmTemporary(IrType.Int, context);
                 StoreVmTemporary(countStorage, count);
                 var savedCount = ReadVmTemporary(countStorage);
                 _sql.Line($"IF {savedCount} < 0 THROW 51006, 'Enumerable.Repeat count must be non-negative.', 1;");
@@ -1188,7 +1191,7 @@ public sealed partial class SharpSqlCompiler
         var receiverType = _semanticModel?.GetTypeInfo(member.Expression).Type;
         if (receiverType is null)
             return false;
-        var type = CSharpType.From(receiverType);
+        var type = CSharpTypeFactory.From(receiverType);
         return IsSequenceType(type.Name) || IsLinqSequenceType(type.Name);
     }
 
@@ -1198,7 +1201,7 @@ public sealed partial class SharpSqlCompiler
         IReadOnlyDictionary<string, Substitution>? substitutions,
         string parameterName,
         string value,
-        CSharpType type)
+        IrType type)
     {
         var replacements = substitutions is null
             ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
@@ -1207,7 +1210,7 @@ public sealed partial class SharpSqlCompiler
         return replacements;
     }
 
-    private static IReadOnlyDictionary<string, LinqScalarCapture>? CaptureLinqSubstitutions(
+    private static IReadOnlyDictionary<string, SqlLinqScalarCapture>? CaptureLinqSubstitutions(
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
         if (substitutions is null || substitutions.Count == 0)
@@ -1215,7 +1218,7 @@ public sealed partial class SharpSqlCompiler
 
         return substitutions.ToDictionary(
             item => item.Key,
-            item => new LinqScalarCapture(item.Value.Expression),
+            item => new SqlLinqScalarCapture(item.Value.Expression),
             StringComparer.Ordinal);
     }
 
@@ -1227,12 +1230,12 @@ public sealed partial class SharpSqlCompiler
         var type = InferType(argument, scope, substitutions);
         var value = EmitScalarExpression(argument, scope, substitutions);
         var sqlName = _names.Allocate("_linq_capture");
-        _sql.Line($"DECLARE {sqlName} {type.Sql} = {value.Sql};");
+        _sql.Line($"DECLARE {sqlName} {type.SqlType()} = {value.Sql};");
         return new Substitution(SqlScalarExpression.Primary(sqlName, type));
     }
 
     private static IReadOnlyDictionary<string, Substitution>? RestoreLinqSubstitutions(
-        IReadOnlyDictionary<string, LinqScalarCapture>? captures)
+        IReadOnlyDictionary<string, SqlLinqScalarCapture>? captures)
     {
         if (captures is null || captures.Count == 0)
             return null;
@@ -1257,13 +1260,13 @@ public sealed partial class SharpSqlCompiler
         return merged;
     }
 
-    private static string LinqEqualityValue(string value, CSharpType type) =>
+    private static string LinqEqualityValue(string value, IrType type) =>
         type.IsString ? $"{value} COLLATE Latin1_General_100_BIN2" : value;
 
-    private static string LinqOrderValue(string value, CSharpType type) =>
+    private static string LinqOrderValue(string value, IrType type) =>
         type.IsString ? $"{value} COLLATE Latin1_General_100_BIN2" : value;
 
-    private static string LinqValueEquality(string left, string right, CSharpType type)
+    private static string LinqValueEquality(string left, string right, IrType type)
     {
         var equality = type.IsString
             ? $"{left} COLLATE Latin1_General_100_BIN2 = {right} COLLATE Latin1_General_100_BIN2"
@@ -1271,12 +1274,12 @@ public sealed partial class SharpSqlCompiler
         return $"(({left} IS NULL AND {right} IS NULL) OR {equality})";
     }
 
-    private static string LinqJoinEquality(string left, string right, CSharpType type) =>
+    private static string LinqJoinEquality(string left, string right, IrType type) =>
         type.IsString
             ? $"{left} COLLATE Latin1_General_100_BIN2 = {right} COLLATE Latin1_General_100_BIN2"
             : $"{left} = {right}";
 
-    private bool TryGetLinqPlanSubstitution(string name, out LinqQueryPlan query)
+    private bool TryGetLinqPlanSubstitution(string name, out SqlLinqQueryPlan query)
     {
         foreach (var substitutions in _linqPlanSubstitutions)
         {
@@ -1291,13 +1294,13 @@ public sealed partial class SharpSqlCompiler
         ExpressionSyntax expression,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions,
-        out LinqLambdaPlan lambda)
+        out SqlLinqLambdaPlan lambda)
     {
         expression = StripParentheses(expression);
         if (expression is LambdaExpressionSyntax lambdaExpression)
         {
-            lambda = new LinqLambdaPlan(
-                expression,
+            lambda = new SqlLinqLambdaPlan(
+                BindIrExpression(expression, scope),
                 CaptureLinqLambdaBindings(lambdaExpression, scope, substitutions));
             return true;
         }
@@ -1327,8 +1330,8 @@ public sealed partial class SharpSqlCompiler
                 var scalarReplacements = substitutions is null
                     ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
                     : new Dictionary<string, Substitution>(substitutions, StringComparer.Ordinal);
-                var planReplacements = new Dictionary<string, LinqQueryPlan>(StringComparer.Ordinal);
-                var lambdaReplacements = new Dictionary<string, LinqLambdaPlan>(StringComparer.Ordinal);
+                var planReplacements = new Dictionary<string, SqlLinqQueryPlan>(StringComparer.Ordinal);
+                var lambdaReplacements = new Dictionary<string, SqlLinqLambdaPlan>(StringComparer.Ordinal);
                 for (var index = 0; index < arguments.Count; index++)
                 {
                     var parameter = method.Parameters[index];
@@ -1354,7 +1357,7 @@ public sealed partial class SharpSqlCompiler
                 _linqLambdaSubstitutions.Push(lambdaReplacements);
                 try
                 {
-                    return TryBuildLinqLambda(method.PureExpression, scope, scalarReplacements, out lambda);
+                    return TryBuildLinqLambda(CSharpExpression(method.PureExpression), scope, scalarReplacements, out lambda);
                 }
                 finally
                 {
@@ -1368,14 +1371,14 @@ public sealed partial class SharpSqlCompiler
         return false;
     }
 
-    private static IReadOnlyDictionary<string, LinqScalarCapture>? CaptureLinqLambdaBindings(
+    private static IReadOnlyDictionary<string, SqlLinqScalarCapture>? CaptureLinqLambdaBindings(
         LambdaExpressionSyntax lambda,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
         var captures = CaptureLinqSubstitutions(substitutions) is { } scalarCaptures
-            ? new Dictionary<string, LinqScalarCapture>(scalarCaptures, StringComparer.Ordinal)
-            : new Dictionary<string, LinqScalarCapture>(StringComparer.Ordinal);
+            ? new Dictionary<string, SqlLinqScalarCapture>(scalarCaptures, StringComparer.Ordinal)
+            : new Dictionary<string, SqlLinqScalarCapture>(StringComparer.Ordinal);
         var parameters = lambda switch
         {
             SimpleLambdaExpressionSyntax simple => [simple.Parameter.Identifier.ValueText],
@@ -1391,7 +1394,7 @@ public sealed partial class SharpSqlCompiler
             if (parameters.Contains(name) || captures.ContainsKey(name))
                 continue;
             if (scope.Find(name) is { } binding)
-                captures[name] = new LinqScalarCapture(binding.Scalar);
+                captures[name] = new SqlLinqScalarCapture(binding.Scalar);
         }
         return captures.Count == 0 ? null : captures;
     }
@@ -1400,7 +1403,7 @@ public sealed partial class SharpSqlCompiler
         ExpressionSyntax expression,
         VariableScope scope,
         out string parameterName,
-        out ExpressionSyntax body,
+        out IrExpression body,
         out IReadOnlyDictionary<string, Substitution>? captures)
     {
         if (!TryBuildLinqLambda(expression, scope, substitutions: null, out var lambda))
@@ -1410,23 +1413,15 @@ public sealed partial class SharpSqlCompiler
             captures = null;
             return false;
         }
-        expression = lambda.Expression;
         captures = RestoreLinqSubstitutions(lambda.Captures);
-        if (expression is SimpleLambdaExpressionSyntax { Body: ExpressionSyntax simpleBody } simple)
-        {
-            parameterName = simple.Parameter.Identifier.ValueText;
-            body = simpleBody;
-            return true;
-        }
-
-        if (expression is ParenthesizedLambdaExpressionSyntax
+        if (lambda.Expression is IrLambdaExpression
             {
-                ParameterList.Parameters.Count: 1,
-                Body: ExpressionSyntax parenthesizedBody
-            } parenthesized)
+                Parameters.Count: 1,
+                ExpressionBody: not null
+            } single)
         {
-            parameterName = parenthesized.ParameterList.Parameters[0].Identifier.ValueText;
-            body = parenthesizedBody;
+            parameterName = single.Parameters[0].Name;
+            body = single.ExpressionBody;
             return true;
         }
 
@@ -1441,7 +1436,7 @@ public sealed partial class SharpSqlCompiler
         VariableScope scope,
         out string firstParameterName,
         out string secondParameterName,
-        out ExpressionSyntax body,
+        out IrExpression body,
         out IReadOnlyDictionary<string, Substitution>? captures)
     {
         if (!TryBuildLinqLambda(expression, scope, substitutions: null, out var lambda))
@@ -1452,17 +1447,16 @@ public sealed partial class SharpSqlCompiler
             captures = null;
             return false;
         }
-        expression = lambda.Expression;
         captures = RestoreLinqSubstitutions(lambda.Captures);
-        if (expression is ParenthesizedLambdaExpressionSyntax
+        if (lambda.Expression is IrLambdaExpression
             {
-                ParameterList.Parameters.Count: 2,
-                Body: ExpressionSyntax expressionBody
-            } lambdaSyntax)
+                Parameters.Count: 2,
+                ExpressionBody: not null
+            } lambdaIr)
         {
-            firstParameterName = lambdaSyntax.ParameterList.Parameters[0].Identifier.ValueText;
-            secondParameterName = lambdaSyntax.ParameterList.Parameters[1].Identifier.ValueText;
-            body = expressionBody;
+            firstParameterName = lambdaIr.Parameters[0].Name;
+            secondParameterName = lambdaIr.Parameters[1].Name;
+            body = lambdaIr.ExpressionBody;
             return true;
         }
 
@@ -1478,12 +1472,12 @@ public sealed partial class SharpSqlCompiler
         name.StartsWith("Action<", StringComparison.Ordinal) ||
         name.StartsWith("Predicate<", StringComparison.Ordinal);
 
-    private static CSharpType GroupingType(CSharpType keyType, CSharpType elementType) => new(
+    private static IrType GroupingType(IrType keyType, IrType elementType) => new(
         $"IGrouping<{keyType.Name},{elementType.Name}>",
-        keyType.Sql,
         keyType.IsBoolean,
         keyType.IsString,
-        keyType.IsReference);
+        keyType.IsReference,
+        keyType);
 
     private static bool IsGroupingType(string name) =>
         name.StartsWith("IGrouping<", StringComparison.Ordinal);
@@ -1494,6 +1488,6 @@ public sealed partial class SharpSqlCompiler
         name.StartsWith("IOrderedEnumerable<", StringComparison.Ordinal) ||
         name.StartsWith("IOrderedQueryable<", StringComparison.Ordinal);
 
-    private static bool IsSumType(CSharpType type) => type.Name is
+    private static bool IsSumType(IrType type) => type.Name is
         "int" or "long" or "float" or "double" or "decimal";
 }

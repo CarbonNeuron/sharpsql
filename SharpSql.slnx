@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="src/SharpSql/SharpSql.csproj" />
+  <Project Path="src/SharpSql.Ir/SharpSql.Ir.csproj" />
   <Project Path="src/SharpSql.Cli/SharpSql.Cli.csproj" />
   <Project Path="tests/SharpSql.IntegrationTests/SharpSql.IntegrationTests.csproj" />
   <Project Path="tests/SharpSql.Tests/SharpSql.Tests.csproj" />

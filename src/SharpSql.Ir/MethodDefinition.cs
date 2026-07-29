@@ -1,9 +1,10 @@
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
-
 namespace SharpSql;
 
-internal sealed record ParameterDefinition(string Name, CSharpType Type);
+internal sealed record ParameterDefinition(IrSymbol Symbol)
+{
+    public string Name => Symbol.Name;
+    public IrType Type => Symbol.Type;
+}
 
 internal sealed record MethodFlowSummary(
     bool EndPointIsReachable,
@@ -24,18 +25,18 @@ internal sealed record MethodFlowSummary(
 
 internal sealed record MethodDefinition(
     string Name,
-    CSharpType ReturnType,
+    IrType ReturnType,
     IReadOnlyList<ParameterDefinition> Parameters,
-    BlockSyntax? Body,
-    ExpressionSyntax? ExpressionBody,
-    SyntaxNode Syntax,
+    ProceduralBlock? Body,
+    IrExpression? ExpressionBody,
+    IrSource Source,
     string? ContainingType = null,
     bool IsInstance = false)
 {
     public MethodFlowSummary Flow { get; init; } = MethodFlowSummary.Empty;
 
-    public ExpressionSyntax? PureExpression => ExpressionBody ??
-        (Body?.Statements is [ReturnStatementSyntax { Expression: not null } statement]
+    public IrExpression? PureExpression => ExpressionBody ??
+        (Body?.Statements is [ProceduralReturn { Expression: not null } statement]
             ? statement.Expression
             : null);
 

@@ -202,7 +202,9 @@ The remaining LINQ milestone is:
 The first typed-IR and data-flow phase is complete:
 
 - A typed scalar SQL IR carrying C# type, SQL precedence, and nullable flow state
-- A typed procedural IR for declarations, blocks, branches, every supported loop, jumps, and returns
+- A backend-neutral `SharpSql.Ir` assembly with typed programs, symbols, expressions, query clauses, source spans, and procedural control flow
+- Separate C# type binding and SQL Server type mapping
+- Independent C#-to-IR and hand-built-IR-to-SQL test seams
 - Centralized scalar casts and rendering
 - Typed substitutions shared by method inlining, closures, and LINQ captures
 - One procedural lowering boundary shared by direct/inlined code and the stack-machine backend
@@ -227,11 +229,13 @@ dotnet build SharpSql.slnx --configuration Release --no-restore
 dotnet test SharpSql.slnx --configuration Release --no-build
 ```
 
-The full test command starts SQL Server 2022 through Testcontainers and runs every file in `examples/` both as C# and as transpiled SQL. Their normalized outputs must match. To run only the compiler unit tests without Docker:
+The full test command starts one shared SQL Server 2022 container. Every file in `examples/` is reported as an independent C#/SQL parity test, and the integration corpus also checks expected runtime exceptions and exact compiler diagnostic codes under [`tests/SharpSql.IntegrationTests/cases`](tests/SharpSql.IntegrationTests/cases). To run only the compiler unit tests without Docker:
 
 ```bash
 dotnet test tests/SharpSql.Tests --configuration Release
 ```
+
+Add a runtime-failure case under `cases/runtime-exceptions` with a directive such as `// sharpsql-expect-exception: KeyNotFoundException`. Add an intentionally unsupported but valid C# case under `cases/diagnostics` with `// sharpsql-expect-diagnostics: SS6301` (comma-separate multiple expected codes). Case paths are sorted deterministically and included in test names and failure reports; parity failures also print both structured outcomes, generated SQL, and source.
 
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing new language behavior, and include tests that make any C#/T-SQL semantic difference explicit.
 
