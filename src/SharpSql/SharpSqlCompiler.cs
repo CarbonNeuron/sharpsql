@@ -744,6 +744,11 @@ public sealed partial class SharpSqlCompiler
         _sql.Line($"DECLARE {state} INT = ERROR_STATE();");
         _sql.Line($"DECLARE {procedure} NVARCHAR(128) = ERROR_PROCEDURE();");
         _sql.Line($"DECLARE {lineNumber} INT = ERROR_LINE();");
+        if (UsesServiceBrokerRuntime)
+        {
+            _sql.Line(
+                $"IF {number} IN (1205, {ServiceBrokerWorkerDispatcherSqlEmitter.RetryableWorkerDeadlockErrorNumber}) THROW;");
+        }
 
         var hasConditionalCatch = false;
         var hasCatchAll = false;

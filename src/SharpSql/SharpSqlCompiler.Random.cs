@@ -423,7 +423,8 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"DECLARE {lockResource} NVARCHAR(255) = CONCAT(N'SharpSql.Random.', CONVERT(NVARCHAR(36), {RuntimeExecutionId}), N'.', CONVERT(NVARCHAR(20), {random}));");
             _sql.Line($"DECLARE {lockResult} INT;");
             _sql.Line($"EXEC {lockResult} = sys.sp_getapplock @Resource = {lockResource}, @LockMode = 'Exclusive', @LockOwner = '{lockOwner}', @LockTimeout = 60000;");
-            _sql.Line($"IF {lockResult} < 0 THROW 51910, 'Unable to lock the SharpSql Random state.', 1;");
+            _sql.Line($"IF {lockResult} = -3 THROW {ServiceBrokerWorkerDispatcherSqlEmitter.RetryableWorkerDeadlockErrorNumber}, 'The SharpSql Random state lock was deadlocked.', 1;");
+            _sql.Line($"IF {lockResult} < 0 THROW 51930, 'Unable to lock the SharpSql Random state.', 1;");
             releaseSessionLock = !UsesServiceBrokerRuntime;
             if (releaseSessionLock)
                 _sql.Line("BEGIN TRY");

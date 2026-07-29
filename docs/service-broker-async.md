@@ -55,8 +55,7 @@ OutputEvents(execution_id, sequence_number, output_text, created_at_utc)
 Sequence allocation and insertion are atomic. When the execution has a response
 conversation, the append operation also sends an output notification. The launcher
 drains committed events and emits them on its connection. Writes within one task stay
-ordered. Timer continuations are currently serialized within one execution; output
-ordering between different executions remains scheduler-dependent.
+ordered. Output from concurrent tasks is ordered by whichever worker appends first.
 
 The CLI receives ordinary output lines with `NOWAIT`, so they are visible while the
 execution is still running. Lines above 2,000 UTF-16 code units retain the larger
@@ -149,8 +148,13 @@ cancellation, and abandoned-execution leases remain future work.
 Sub-second `Task.Delay` uses the durable timer table because Broker conversation timers
 use whole seconds. The generated launcher calls `SharpSql.ClaimDueContinuations` while
 it waits. Async prefixes run in source enumeration order, matching C# execution through
-the first incomplete await. At most one timer continuation runs at a time per execution,
-in due-time and task order, so separate Broker readers cannot reorder access to shared
-captured state. Different executions can still use the worker pool concurrently. This
-per-execution serialization, including for `Task.Delay(0)`, does not yet reproduce all
-.NET scheduler interleavings for genuinely overlapping post-await CPU work.
+the first incomplete await. All due continuations are enqueued in due-time/task order,
+but separate Broker readers may execute them concurrently and completion/output order is
+intentionally unspecified, like .NET task scheduling. The worker queue currently allows
+up to eight active readers across all executions.
+
+Shared `Random` instances use an execution-and-object-scoped transaction lock so their
+multi-row PRNG state transitions cannot overlap or lose updates. Concurrent callers
+therefore consume one valid sequence, but the task receiving each sample is intentionally
+nondeterministic. SQL deadlock victims are rolled back and transparently redelivered by
+the worker dispatcher rather than being exposed as failed tasks.

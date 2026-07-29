@@ -1667,30 +1667,6 @@ internal static class ExecutionInfrastructureSqlEmitter
                         procedure.Line("AND [task].[SuspensionGeneration] = [timer].[SuspensionGeneration]");
                     }
                     procedure.Line("WHERE [timer].[State] = 0 AND [timer].[DueAtUtc] <= CONVERT(DATETIME2(3), @NowUtc) AND [task].[State] = 0");
-                    procedure.Line("AND NOT EXISTS (");
-                    using (procedure.Indent())
-                    {
-                        procedure.Line("SELECT 1");
-                        procedure.Line($"FROM [{SchemaName}].[{TaskTimersTableName}] AS [earlier_timer]");
-                        procedure.Line($"INNER JOIN [{SchemaName}].[{TasksTableName}] AS [earlier_task]");
-                        using (procedure.Indent())
-                        {
-                            procedure.Line("ON [earlier_task].[ExecutionId] = [earlier_timer].[ExecutionId]");
-                            procedure.Line("AND [earlier_task].[TaskId] = [earlier_timer].[TaskId]");
-                            procedure.Line("AND [earlier_task].[SuspensionGeneration] = [earlier_timer].[SuspensionGeneration]");
-                        }
-                        procedure.Line("WHERE [earlier_timer].[ExecutionId] = [timer].[ExecutionId]");
-                        procedure.Line("AND [earlier_timer].[State] IN (0, 1, 2)");
-                        procedure.Line("AND [earlier_task].[State] NOT BETWEEN 4 AND 6");
-                        procedure.Line("AND (");
-                        using (procedure.Indent())
-                        {
-                            procedure.Line("[earlier_timer].[DueAtUtc] < [timer].[DueAtUtc]");
-                            procedure.Line("OR ([earlier_timer].[DueAtUtc] = [timer].[DueAtUtc] AND [earlier_timer].[TaskId] < [timer].[TaskId])");
-                        }
-                        procedure.Line(")");
-                    }
-                    procedure.Line(")");
                     procedure.Line("ORDER BY [timer].[DueAtUtc], [timer].[ExecutionId], [timer].[TaskId]");
                 }
                 procedure.Line(")");

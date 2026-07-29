@@ -240,7 +240,7 @@ public sealed class ExecutionInfrastructureSqlEmitterTests
     }
 
     [Fact]
-    public void DueClaimsPreserveCandidateOrderAndSerializeTimersPerExecution()
+    public void DueClaimsPreserveEnqueueOrderWithoutSerializingAnExecution()
     {
         var sql = ExecutionInfrastructureSqlEmitter.Emit();
 
@@ -250,13 +250,7 @@ public sealed class ExecutionInfrastructureSqlEmitterTests
             "INTO @Candidates ([ExecutionId], [TaskId], [SuspensionGeneration], [Source], [OrderAtUtc])",
             sql);
         Assert.Contains("CAST(0 AS TINYINT), COALESCE([task].[ReadyAtUtc], @NowUtc)", sql);
-        Assert.Contains("FROM [SharpSql].[TaskTimers] AS [earlier_timer]", sql);
-        Assert.Contains("AND [earlier_timer].[State] IN (0, 1, 2)", sql);
-        Assert.Contains("AND [earlier_task].[State] NOT BETWEEN 4 AND 6", sql);
-        Assert.Contains("[earlier_timer].[DueAtUtc] < [timer].[DueAtUtc]", sql);
-        Assert.Contains(
-            "OR ([earlier_timer].[DueAtUtc] = [timer].[DueAtUtc] AND [earlier_timer].[TaskId] < [timer].[TaskId])",
-            sql);
+        Assert.DoesNotContain("FROM [SharpSql].[TaskTimers] AS [earlier_timer]", sql);
         Assert.Contains(
             "FROM @Candidates ORDER BY [Source] DESC, [OrderAtUtc], [ExecutionId], [TaskId];",
             sql);

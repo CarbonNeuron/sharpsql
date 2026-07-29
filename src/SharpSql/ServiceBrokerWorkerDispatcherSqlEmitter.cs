@@ -10,6 +10,7 @@ internal static class ServiceBrokerWorkerDispatcherSqlEmitter
     internal const int InvalidMessageErrorNumber = 51925;
     internal const int ProgramNotInstalledErrorNumber = 51926;
     internal const int BrokerDeliveryErrorNumber = 51928;
+    internal const int RetryableWorkerDeadlockErrorNumber = 51929;
 
     internal static string Emit()
     {
@@ -221,6 +222,16 @@ internal static class ServiceBrokerWorkerDispatcherSqlEmitter
                     procedure.Line("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;");
                     procedure.Line("DECLARE @RouterErrorNumber INT = ERROR_NUMBER();");
                     procedure.Line("DECLARE @RouterErrorMessage NVARCHAR(2048) = LEFT(ERROR_MESSAGE(), 2048);");
+                    procedure.Line($"IF @RouterErrorNumber IN (1205, {RetryableWorkerDeadlockErrorNumber})");
+                    procedure.Line("BEGIN");
+                    using (procedure.Indent())
+                    {
+                        procedure.Line("-- RECEIVE rolled back with the worker transaction, so the request is back on the queue.");
+                        procedure.Line("-- Yield briefly to the winning transaction before transparently redelivering it.");
+                        procedure.Line("WAITFOR DELAY '00:00:00.100';");
+                        procedure.Line("CONTINUE;");
+                    }
+                    procedure.Line("END;");
                     procedure.Line();
                     procedure.Line("BEGIN TRY");
                     using (procedure.Indent())

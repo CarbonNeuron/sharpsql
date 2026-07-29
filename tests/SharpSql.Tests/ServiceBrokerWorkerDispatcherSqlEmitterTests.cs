@@ -53,6 +53,19 @@ public sealed class ServiceBrokerWorkerDispatcherSqlEmitterTests
     }
 
     [Fact]
+    public void DispatcherRetriesDeadlockedWorkerMessagesInsteadOfFaultingTasks()
+    {
+        var sql = ServiceBrokerWorkerDispatcherSqlEmitter.Emit();
+
+        var retry = sql.IndexOf("IF @RouterErrorNumber IN (1205, 51929)", StringComparison.Ordinal);
+        var fault = sql.IndexOf("EXEC [SharpSql].[CompleteTask]", retry, StringComparison.Ordinal);
+        Assert.True(retry >= 0);
+        Assert.Contains("WAITFOR DELAY ''00:00:00.100'';", sql[retry..]);
+        Assert.Contains("CONTINUE;", sql[retry..]);
+        Assert.True(fault > retry);
+    }
+
+    [Fact]
     public void DispatcherClearsPerMessageStateBeforeEveryReceive()
     {
         var sql = ServiceBrokerWorkerDispatcherSqlEmitter.Emit();

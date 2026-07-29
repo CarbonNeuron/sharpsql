@@ -349,7 +349,7 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
     }
 
     [Fact]
-    public async Task CapturedRandomRecordExampleMatchesCSharpExactlyAcrossWorkers()
+    public async Task ConcurrentRandomRecordExamplePreservesSchedulingIndependentInvariants()
     {
         await using var connection = await OpenBrokerDatabaseAsync();
         await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
@@ -399,23 +399,13 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
 
             record Person(string Name, int Age);
             """;
-        var csharp = await ParityHarness.ExecuteCSharpAsync(
-            new ParityCase("service-broker/random-record.cs", source));
-        Assert.Null(csharp.Failure);
-        var expectedOutput = """
+        var expectedInitialOutput = """
             Person { Name = Epstein, Age = 50 }
             Person { Name = Jeffery, Age = 40 }
             Person { Name = Jane, Age = 30 }
             Person { Name = John, Age = 20 }
             Person { Name = Bob, Age = 12 }
-            Don't worry, Jane
-            Person { Name = Epstein, Age = 84 }
-            Person { Name = Jeffery, Age = 63 }
-            Person { Name = John, Age = 59 }
-            Person { Name = Jane, Age = 41 }
-            Person { Name = Bob, Age = 31 }
             """.Split('\n');
-        Assert.Equal(expectedOutput, csharp.StandardOutput.Split('\n'));
 
         var compilation = new SharpSqlCompiler().Transpile(
             source,
@@ -424,8 +414,53 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
 
         var messages = await ExecuteCapturingMessagesAsync(connection, compilation.Sql);
 
-        Assert.Equal(csharp.StandardOutput.Split('\n'), messages);
+        Assert.Equal(expectedInitialOutput, messages.Take(5));
+        var catches = messages
+            .Skip(5)
+            .Where(message => message.StartsWith("Don't worry, ", StringComparison.Ordinal))
+            .ToArray();
+        var finalPeople = messages
+            .Skip(5)
+            .Where(message => message.StartsWith("Person { ", StringComparison.Ordinal))
+            .Select(ParsePerson)
+            .ToArray();
+        Assert.Equal(5, finalPeople.Length);
+        Assert.Equal(5 + catches.Length + finalPeople.Length, messages.Count);
+
+        var initialAges = new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["Bob"] = 12,
+            ["John"] = 20,
+            ["Jane"] = 30,
+            ["Jeffery"] = 40,
+            ["Epstein"] = 50
+        };
+        Assert.Equal(initialAges.Keys.Order(), finalPeople.Select(person => person.Name).Order());
+        Assert.All(finalPeople, person =>
+            Assert.InRange(person.Age, initialAges[person.Name], initialAges[person.Name] + 49));
+        Assert.Equal(
+            finalPeople.Select(person => person.Age).OrderDescending(),
+            finalPeople.Select(person => person.Age));
+        Assert.All(catches, message =>
+            Assert.Contains(message["Don't worry, ".Length..], initialAges.Keys));
+        Assert.Equal(catches.Length, catches.Distinct(StringComparer.Ordinal).Count());
         await AssertExecutionsCleanedUpAsync(connection);
+
+        static (string Name, int Age) ParsePerson(string message)
+        {
+            const string prefix = "Person { Name = ";
+            const string separator = ", Age = ";
+            const string suffix = " }";
+            Assert.StartsWith(prefix, message, StringComparison.Ordinal);
+            Assert.EndsWith(suffix, message, StringComparison.Ordinal);
+            var separatorIndex = message.IndexOf(separator, prefix.Length, StringComparison.Ordinal);
+            Assert.True(separatorIndex > prefix.Length);
+            var name = message[prefix.Length..separatorIndex];
+            var age = int.Parse(
+                message[(separatorIndex + separator.Length)..^suffix.Length],
+                System.Globalization.CultureInfo.InvariantCulture);
+            return (name, age);
+        }
     }
 
     [Fact]
@@ -476,7 +511,7 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
     }
 
     [Fact]
-    public async Task CurrentProcessorIdReportsTheActivatedWorkerSession()
+    public async Task EqualDelayContinuationsUseMultipleWorkersAndShareRandomSafely()
     {
         await using var connection = await OpenBrokerDatabaseAsync();
         await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
@@ -484,15 +519,32 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
         const string source = """
             using System.Threading;
 
-            var values = new List<int> { 1, 2, 3, 4, 5 };
+            var values = new List<int> { 1, 2, 3, 4, 5, 6, 7, 8 };
+            var random = new Random(4);
             var tasks = values.Select(Work).ToList();
             await Task.WhenAll(tasks);
+            var results = tasks.Select(task => task.Result);
+            foreach (int result in results.OrderBy(value => value))
+                Console.WriteLine($"result:{result}");
 
             async Task<int> Work(int value)
             {
-                await Task.Delay(value * 10);
-                Console.WriteLine($"worker:{Thread.GetCurrentProcessorId()}:{value}");
-                return value;
+                await Task.Delay(100);
+                int sample;
+                if (value % 2 == 0)
+                {
+                    Console.WriteLine($"worker:{Thread.GetCurrentProcessorId()}:{value}");
+                    sample = random.Next(0, 1000000);
+                }
+                else
+                {
+                    sample = random.Next(0, 1000000);
+                    Console.WriteLine($"worker:{Thread.GetCurrentProcessorId()}:{value}");
+                }
+                int checksum = 0;
+                for (int iteration = 0; iteration < 250000; iteration++)
+                    checksum ^= iteration + value;
+                return sample;
             }
             """;
         var compilation = new SharpSqlCompiler().Transpile(
@@ -505,18 +557,34 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
         var workerMessages = messages
             .Where(message => message.StartsWith("worker:", StringComparison.Ordinal))
             .ToArray();
-        Assert.Equal(5, workerMessages.Length);
+        Assert.True(
+            workerMessages.Length == 8,
+            $"Expected eight worker messages, but received: {string.Join(" | ", messages)}");
         Assert.Equal(
-            Enumerable.Range(1, 5),
+            Enumerable.Range(1, 8),
             workerMessages
                 .Select(message => int.Parse(message.Split(':')[2], System.Globalization.CultureInfo.InvariantCulture))
                 .Order());
-        Assert.All(workerMessages, message =>
+        var workerIds = workerMessages
+            .Select(message => int.Parse(message.Split(':')[1], System.Globalization.CultureInfo.InvariantCulture))
+            .ToArray();
+        Assert.All(workerIds, workerId =>
         {
-            var workerId = int.Parse(message.Split(':')[1], System.Globalization.CultureInfo.InvariantCulture);
             Assert.True(workerId > 0);
             Assert.NotEqual(connection.ServerProcessId, workerId);
         });
+        Assert.True(
+            workerIds.Distinct().Count() > 1,
+            $"Expected multiple activated workers, but all continuations used SPID {workerIds[0]}.");
+        var expectedRandom = new Random(4);
+        var expectedSamples = Enumerable.Range(0, 8)
+            .Select(_ => expectedRandom.Next(0, 1000000))
+            .Order();
+        Assert.Equal(
+            expectedSamples,
+            messages
+                .Where(message => message.StartsWith("result:", StringComparison.Ordinal))
+                .Select(message => int.Parse(message.Split(':')[1], System.Globalization.CultureInfo.InvariantCulture)));
         await AssertExecutionsCleanedUpAsync(connection);
     }
 

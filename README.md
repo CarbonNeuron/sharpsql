@@ -372,7 +372,14 @@ int die = random.Next(1, 7);
 double fraction = random.NextDouble();
 ```
 
-For `new Random(seed)`, SharpSql implements the same compatibility PRNG used by .NET 10, producing the same sequence in C# and SQL. Parameterless construction uses a SQL-generated seed; it has the same range and state behavior, but—as with parameterless `Random` in C#—its exact sequence is intentionally nondeterministic. `NextInt64`, `NextSingle`, and `NextBytes` are not implemented yet.
+For `new Random(seed)`, SharpSql implements the same compatibility PRNG used by .NET 10,
+producing the same sequence in C# and SQL. Parameterless construction uses a
+SQL-generated seed; it has the same range and state behavior, but—as with parameterless
+`Random` in C#—its exact sequence is intentionally nondeterministic. In Service Broker
+executions, calls sharing one `Random` instance are protected by an instance-scoped
+lock; every state transition is atomic, while which concurrent task receives each
+sample remains scheduler-dependent. `NextInt64`, `NextSingle`, and `NextBytes` are not
+implemented yet.
 
 ## How method calls stay ephemeral
 

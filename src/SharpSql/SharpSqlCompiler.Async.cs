@@ -237,6 +237,7 @@ public sealed partial class SharpSqlCompiler
             {
                 _sql.Line("DECLARE @__sharpsql_error_number INT = ERROR_NUMBER();");
                 _sql.Line("DECLARE @__sharpsql_error_message NVARCHAR(MAX) = ERROR_MESSAGE();");
+                _sql.Line($"IF @__sharpsql_error_number IN (1205, {ServiceBrokerWorkerDispatcherSqlEmitter.RetryableWorkerDeadlockErrorNumber}) THROW;");
                 // CompleteTask writes durable fault state. If the activation transaction
                 // was doomed or rolled back by the original error, let the dispatcher
                 // unwind it and persist that original error from a fresh transaction.
@@ -406,6 +407,7 @@ public sealed partial class SharpSqlCompiler
                 _sql.Line("BEGIN CATCH");
                 using (_sql.Indent())
                 {
+                    _sql.Line($"IF ERROR_NUMBER() IN (1205, {ServiceBrokerWorkerDispatcherSqlEmitter.RetryableWorkerDeadlockErrorNumber}) THROW;");
                     _sql.Line("IF XACT_STATE() <> 1 THROW;");
                     _sql.Line($"SET {childErrorNumber} = ERROR_NUMBER();");
                     _sql.Line($"SET {childErrorMessage} = LEFT(ERROR_MESSAGE(), 2048);");

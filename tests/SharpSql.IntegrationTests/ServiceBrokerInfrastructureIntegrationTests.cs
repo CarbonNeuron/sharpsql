@@ -338,7 +338,7 @@ public sealed class ServiceBrokerInfrastructureIntegrationTests(SqlServerFixture
     }
 
     [Fact]
-    public async Task DueTimerClaimsWaitForEarlierTimerTaskToComplete()
+    public async Task DueTimerClaimsEnqueueAllDueTasksWithoutWaitingForCompletion()
     {
         await using var connection = await OpenBrokerDatabaseAsync("SharpSqlBrokerTimerOrderTests");
         await ExecuteAsync(connection, ExecutionInfrastructureSqlEmitter.Emit());
@@ -370,7 +370,7 @@ public sealed class ServiceBrokerInfrastructureIntegrationTests(SqlServerFixture
                 await setup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
             }
 
-            Assert.Equal(1, await ClaimDueContinuationsAsync(connection));
+            Assert.Equal(2, await ClaimDueContinuationsAsync(connection));
             Assert.Equal(0, await ClaimDueContinuationsAsync(connection));
 
             await AssertTimerAndTaskStatesAsync(
@@ -379,22 +379,6 @@ public sealed class ServiceBrokerInfrastructureIntegrationTests(SqlServerFixture
                 earlierTaskId,
                 expectedTimerState: 2,
                 expectedTaskState: 2);
-            await AssertTimerAndTaskStatesAsync(
-                connection,
-                executionId,
-                laterTaskId,
-                expectedTimerState: 0,
-                expectedTaskState: 0);
-
-            await CompleteTaskAsync(connection, executionId, earlierTaskId);
-            await AssertTimerAndTaskStatesAsync(
-                connection,
-                executionId,
-                earlierTaskId,
-                expectedTimerState: 2,
-                expectedTaskState: 4);
-
-            Assert.Equal(1, await ClaimDueContinuationsAsync(connection));
             await AssertTimerAndTaskStatesAsync(
                 connection,
                 executionId,

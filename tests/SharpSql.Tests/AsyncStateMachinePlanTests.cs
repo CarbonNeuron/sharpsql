@@ -267,6 +267,9 @@ public sealed class AsyncStateMachinePlanTests
         Assert.Contains("RAISERROR(N'%s', 0, 1, @__sharpsql_output_text) WITH NOWAIT;", result.Sql);
         Assert.Contains("PRINT @__sharpsql_output_text;", result.Sql);
         Assert.Contains("ERROR_NUMBER()", result.Sql);
+        Assert.Contains("IN (1205, 51929) THROW;", result.Sql);
+        Assert.Contains("= -3 THROW 51929", result.Sql);
+        Assert.Contains("< 0 THROW 51930", result.Sql);
         Assert.Contains("= 51012", result.Sql);
         Assert.Contains("IF XACT_STATE() <> 1 THROW;", result.Sql);
         Assert.Contains("@LockOwner = ''Transaction''", result.Sql);
