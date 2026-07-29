@@ -4,15 +4,12 @@ using System.Reflection;
 using System.Runtime.Loader;
 using System.Text;
 using System.Xml.Linq;
-using Docker.DotNet.Models;
-using DotNet.Testcontainers.Configurations;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Emit;
 using Microsoft.CodeAnalysis.Text;
 using Microsoft.Data.SqlClient;
-using Microsoft.Extensions.Logging.Abstractions;
-using Testcontainers.MsSql;
+using SharpSql.SqlServer;
 
 namespace SharpSql.Cli;
 
@@ -90,84 +87,58 @@ public sealed class TestcontainersParityRunner : IParityRunner
         if (csharp.Failure is { Category: ParityFailureCategory.Compilation })
             return new ParityRunResult(csharp, new ParityOutcome(string.Empty, null), transpileResult.Sql);
 
-        var containerBuilder = new MsSqlBuilder(request.SqlServerImage)
-            .WithLogger(NullLogger.Instance)
-            .WithReuse(true)
-            .WithLabel("io.sharpsql.verify.reusable", "true");
-
-        var container = containerBuilder.Build();
-        string? containerId = null;
-        try
-        {
-            reportStage?.Invoke(new ParityStageUpdate(ParityStage.StartingSqlServer));
-            await container.StartAsync(cancellationToken);
-            containerId = container.Id;
-            reportStage?.Invoke(new ParityStageUpdate(ParityStage.EvaluatingSqlServer));
-            await using var connection = new SqlConnection(container.GetConnectionString())
-            {
-                FireInfoMessageEventOnUserErrors = true
-            };
-            await connection.OpenAsync(cancellationToken);
-
-            var sqlSamples = new List<TimeSpan>();
-            SqlExecutionResult sqlExecution;
-            ParityDebugInfo? debugInfo = null;
-            if (request.Profile)
-            {
-                sqlExecution = await ExecuteSqlProfileAsync(
-                    connection,
-                    transpileResult.Sql,
-                    request.CommandTimeoutSeconds,
-                    sqlSamples,
-                    cancellationToken);
-                if (request.Debug && sqlExecution.Outcome.Failure is null)
-                {
-                    var debugExecution = await ExecuteSqlAsync(
-                        connection,
-                        transpileResult.Sql,
-                        request.CommandTimeoutSeconds,
-                        collectDebug: true,
-                        cancellationToken);
-                    debugInfo = debugExecution.DebugInfo;
-                }
-            }
-            else
-            {
-                sqlExecution = await ExecuteSqlAsync(
-                    connection,
-                    transpileResult.Sql,
-                    request.CommandTimeoutSeconds,
-                    request.Debug,
-                    cancellationToken);
-                debugInfo = sqlExecution.DebugInfo;
-            }
-
-            var profile = request.Profile
-                ? new ParityProfile(ProfileWarmupRuns, csharpSamples, sqlSamples)
-                : null;
-            return new ParityRunResult(
-                csharp,
-                sqlExecution.Outcome,
-                transpileResult.Sql,
-                debugInfo,
-                profile);
-        }
-        finally
-        {
-            if (!request.KeepContainer && containerId is not null)
-                await RemoveContainerAsync(containerId, CancellationToken.None);
-        }
-    }
-
-    private static async Task RemoveContainerAsync(string containerId, CancellationToken cancellationToken)
-    {
-        using var dockerClient = TestcontainersSettings.OS.DockerEndpointAuthConfig
-            .GetDockerClientBuilder(Guid.Empty)
-            .Build();
-        await dockerClient.Containers.RemoveContainerAsync(
-            containerId,
-            new ContainerRemoveParameters { Force = true, RemoveVolumes = true },
+        reportStage?.Invoke(new ParityStageUpdate(ParityStage.StartingSqlServer));
+        await using var session = await SqlServerSessionFactory.OpenAsync(
+            new SqlServerSessionOptions(
+                request.InputPath,
+                Image: request.SqlServerImage,
+                KeepContainer: request.KeepContainer),
             cancellationToken);
+        reportStage?.Invoke(new ParityStageUpdate(ParityStage.EvaluatingSqlServer));
+        var connection = session.Connection;
+
+        var sqlSamples = new List<TimeSpan>();
+        SqlExecutionResult sqlExecution;
+        ParityDebugInfo? debugInfo = null;
+        if (request.Profile)
+        {
+            sqlExecution = await ExecuteSqlProfileAsync(
+                connection,
+                transpileResult.Sql,
+                request.CommandTimeoutSeconds,
+                sqlSamples,
+                cancellationToken);
+            if (request.Debug && sqlExecution.Outcome.Failure is null)
+            {
+                var debugExecution = await ExecuteSqlAsync(
+                    connection,
+                    transpileResult.Sql,
+                    request.CommandTimeoutSeconds,
+                    collectDebug: true,
+                    cancellationToken);
+                debugInfo = debugExecution.DebugInfo;
+            }
+        }
+        else
+        {
+            sqlExecution = await ExecuteSqlAsync(
+                connection,
+                transpileResult.Sql,
+                request.CommandTimeoutSeconds,
+                request.Debug,
+                cancellationToken);
+            debugInfo = sqlExecution.DebugInfo;
+        }
+
+        var profile = request.Profile
+            ? new ParityProfile(ProfileWarmupRuns, csharpSamples, sqlSamples)
+            : null;
+        return new ParityRunResult(
+            csharp,
+            sqlExecution.Outcome,
+            transpileResult.Sql,
+            debugInfo,
+            profile);
     }
 
     private static async Task<ProjectCompilationResult> LoadCompilationAsync(

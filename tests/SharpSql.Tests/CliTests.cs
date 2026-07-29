@@ -2,6 +2,7 @@ using SharpSql.Cli;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Spectre.Console.Cli.Testing;
+using System.Text.Json.Nodes;
 using System.Xml.Linq;
 using Xunit;
 
@@ -126,6 +127,7 @@ public sealed class CliTests
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("USAGE:", result.Output);
         Assert.Contains("init", result.Output);
+        Assert.Contains("run", result.Output);
         Assert.Contains("transpile", result.Output);
         Assert.Contains("verify", result.Output);
     }
@@ -284,6 +286,7 @@ public sealed class CliTests
             CliArgumentRouter.Route(["Program.cs", "--output", "Program.sql"]));
         Assert.Equal(["verify", "Program.cs"], CliArgumentRouter.Route(["verify", "Program.cs"]));
         Assert.Equal(["init", "App.csproj"], CliArgumentRouter.Route(["init", "App.csproj"]));
+        Assert.Equal(["run", "App.csproj"], CliArgumentRouter.Route(["run", "App.csproj"]));
     }
 
     [Fact]
@@ -306,6 +309,14 @@ public sealed class CliTests
         Assert.Equal("BuildOutput", Element(document, "SharpSqlOutputLocation"));
         Assert.Equal("true", Element(document, "SharpSqlGenerateOnBuild"));
         Assert.Equal("true", Element(document, "SharpSqlEnableAnalyzer"));
+        Assert.Equal("false", Element(document, "SharpSqlKeepContainer"));
+        Assert.Equal("SharpSql", Element(document, "SharpSqlContainerDatabase"));
+        var launchSettings = JsonNode.Parse(await File.ReadAllTextAsync(
+            Path.Combine(project.DirectoryPath, "Properties", "launchSettings.json"),
+            TestContext.Current.CancellationToken));
+        Assert.Equal(
+            "dotnet",
+            launchSettings?["profiles"]?["SharpSql (SQL Server)"]?["executablePath"]?.GetValue<string>());
         Assert.Equal("keep me", Element(document, "ExistingProperty"));
         Assert.Contains("existing comment", await File.ReadAllTextAsync(
             project.ProjectPath,
@@ -431,6 +442,155 @@ public sealed class CliTests
         Assert.Equal("4.5.6", Attribute(packageReference, "VersionOverride"));
     }
 
+    [Fact]
+    public async Task InitPreservesLaunchProfilesAndConfiguresSqlServerDefaults()
+    {
+        using var project = TemporaryProject.Create();
+        var propertiesDirectory = Path.Combine(project.DirectoryPath, "Properties");
+        Directory.CreateDirectory(propertiesDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(propertiesDirectory, "launchSettings.json"),
+            """
+            {
+              "profiles": {
+                "Demo": {
+                  "commandName": "Project"
+                }
+              }
+            }
+            """,
+            TestContext.Current.CancellationToken);
+        var tester = CreateRoutedTester();
+
+        var result = await tester.RunAsync(
+            CliArgumentRouter.Route([
+                "init", project.ProjectPath,
+                "--connection", "Development",
+                "--keep-container",
+                "--database", "DemoDev",
+                "--timeout", "90",
+                "--no-restore"
+            ]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        var document = XDocument.Load(project.ProjectPath);
+        Assert.Equal("Development", Element(document, "SharpSqlConnectionName"));
+        Assert.Equal("true", Element(document, "SharpSqlKeepContainer"));
+        Assert.Equal("DemoDev", Element(document, "SharpSqlContainerDatabase"));
+        Assert.Equal("90", Element(document, "SharpSqlCommandTimeoutSeconds"));
+        var launchSettings = JsonNode.Parse(await File.ReadAllTextAsync(
+            Path.Combine(propertiesDirectory, "launchSettings.json"),
+            TestContext.Current.CancellationToken));
+        Assert.Equal("Project", launchSettings?["profiles"]?["Demo"]?["commandName"]?.GetValue<string>());
+        Assert.Contains(
+            "-t:SharpSqlRun",
+            launchSettings?["profiles"]?["SharpSql (SQL Server)"]?["commandLineArgs"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task InitCanSkipTheIdeLaunchProfileAndSelectContainerMode()
+    {
+        using var project = TemporaryProject.Create("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <OutputType>Exe</OutputType>
+                <TargetFramework>net10.0</TargetFramework>
+                <SharpSqlConnectionName>OldConnection</SharpSqlConnectionName>
+              </PropertyGroup>
+            </Project>
+            """);
+        var tester = CreateRoutedTester();
+
+        var result = await tester.RunAsync(
+            CliArgumentRouter.Route([
+                "init", project.ProjectPath,
+                "--container",
+                "--no-launch-profile",
+                "--no-restore"
+            ]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Null(Element(XDocument.Load(project.ProjectPath), "SharpSqlConnectionName"));
+        Assert.False(File.Exists(Path.Combine(project.DirectoryPath, "Properties", "launchSettings.json")));
+    }
+
+    [Fact]
+    public async Task RunUsesProjectConnectionAndContainerSettings()
+    {
+        using var project = TemporaryProject.Create("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <OutputType>Exe</OutputType>
+                <TargetFramework>net10.0</TargetFramework>
+                <SharpSqlConnectionName>Development</SharpSqlConnectionName>
+                <SharpSqlKeepContainer>true</SharpSqlKeepContainer>
+                <SharpSqlContainerDatabase>DemoDev</SharpSqlContainerDatabase>
+                <SharpSqlCommandTimeoutSeconds>75</SharpSqlCommandTimeoutSeconds>
+              </PropertyGroup>
+            </Project>
+            """);
+        var service = new StubSqlRunService(new SqlRunResult(
+            true,
+            "container abc",
+            ["hello from sql"],
+            [],
+            ContainerKept: true));
+        var tester = CreateRoutedTester(sqlRunService: service);
+
+        var result = await tester.RunAsync(
+            CliArgumentRouter.Route(["run", project.ProjectPath]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("hello from sql", result.Output);
+        Assert.Contains("container kept running", result.Output);
+        var request = Assert.IsType<SqlRunRequest>(service.LastRequest);
+        Assert.Equal("Development", request.ConnectionName);
+        Assert.True(request.KeepContainer);
+        Assert.Equal("DemoDev", request.DatabaseName);
+        Assert.Equal(75, request.CommandTimeoutSeconds);
+    }
+
+    [Fact]
+    public async Task RunAcceptsGeneratedSqlAndCommandLineOverrides()
+    {
+        var sqlPath = Path.Combine(Path.GetTempPath(), $"sharpsql-run-{Guid.NewGuid():N}.sql");
+        await File.WriteAllTextAsync(sqlPath, "PRINT N'hello';", TestContext.Current.CancellationToken);
+        try
+        {
+            var service = new StubSqlRunService(new SqlRunResult(true, "server/database", [], [], false));
+            var tester = CreateRoutedTester(sqlRunService: service);
+
+            var result = await tester.RunAsync(
+                CliArgumentRouter.Route([
+                    "run", sqlPath,
+                    "--connection", "Staging",
+                    "--connection-string-env", "DEMO_SQL",
+                    "--container",
+                    "--database", "Scratch",
+                    "--remove-container",
+                    "--timeout", "12"
+                ]),
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, result.ExitCode);
+            var request = Assert.IsType<SqlRunRequest>(service.LastRequest);
+            Assert.Equal("PRINT N'hello';", request.Sql);
+            Assert.Equal("Staging", request.ConnectionName);
+            Assert.Equal("DEMO_SQL", request.ConnectionStringEnvironmentVariable);
+            Assert.True(request.ForceContainer);
+            Assert.False(request.KeepContainer);
+            Assert.Equal("Scratch", request.DatabaseName);
+            Assert.Equal(12, request.CommandTimeoutSeconds);
+        }
+        finally
+        {
+            File.Delete(sqlPath);
+        }
+    }
+
     [Theory]
     [InlineData("", 0)]
     [InlineData("one", 1)]
@@ -457,17 +617,20 @@ public sealed class CliTests
 
     private static CommandAppTester CreateRoutedTester(
         IParityRunner? parityRunner = null,
-        IProjectRestorer? projectRestorer = null)
+        IProjectRestorer? projectRestorer = null,
+        ISqlRunService? sqlRunService = null)
     {
         var tester = new CommandAppTester(new CommandAppTesterSettings { TrimConsoleOutput = false });
         var environment = new CliExecutionEnvironment(
             tester.Console,
             new StringReader(string.Empty),
             ParityRunner: parityRunner,
-            ProjectRestorer: projectRestorer);
+            ProjectRestorer: projectRestorer,
+            SqlRunService: sqlRunService);
         tester.Configure(configurator =>
         {
             configurator.AddCommand<InitCommand>("init").WithData(environment);
+            configurator.AddCommand<RunCommand>("run").WithData(environment);
             configurator.AddCommand<TranspileCommand>("transpile").WithData(environment);
             configurator.AddCommand<VerifyCommand>("verify").WithData(environment);
         });
@@ -498,6 +661,17 @@ public sealed class CliTests
         {
             ProjectPath = projectPath;
             return Task.FromResult(exitCode);
+        }
+    }
+
+    private sealed class StubSqlRunService(SqlRunResult result) : ISqlRunService
+    {
+        public SqlRunRequest? LastRequest { get; private set; }
+
+        public Task<SqlRunResult> RunAsync(SqlRunRequest request, CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            return Task.FromResult(result);
         }
     }
 

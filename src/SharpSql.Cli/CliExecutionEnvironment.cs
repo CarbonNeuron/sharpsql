@@ -8,4 +8,5 @@ public sealed record CliExecutionEnvironment(
     TextWriter? Output = null,
     TextWriter? Error = null,
     IParityRunner? ParityRunner = null,
-    IProjectRestorer? ProjectRestorer = null);
+    IProjectRestorer? ProjectRestorer = null,
+    ISqlRunService? SqlRunService = null);

@@ -6,6 +6,7 @@ public static class CliArgumentRouter
     {
         "transpile",
         "init",
+        "run",
         "verify",
         "--help",
         "-h",

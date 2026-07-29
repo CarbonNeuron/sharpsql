@@ -57,6 +57,11 @@ if [[ -n "$tool_path" ]]; then
         printf 'The init command did not generate SQL beside the compiled application.\n' >&2
         exit 1
     fi
+    if [[ ! -s "$work_dir/default/Properties/launchSettings.json" ]] || \
+       ! grep -q 'SharpSqlRun' "$work_dir/default/Properties/launchSettings.json"; then
+        printf 'The init command did not add the SQL Server IDE launch profile.\n' >&2
+        exit 1
+    fi
 fi
 
 for project in "$work_dir/valid/SdkConsumer.csproj" "$work_dir/invalid/SdkConsumer.csproj"; do
@@ -81,6 +86,17 @@ if [[ ! -s "$generated_sql" ]] || ! grep -q "answer=" "$generated_sql"; then
     exit 1
 fi
 
+run_output="$(dotnet msbuild "$work_dir/valid/SdkConsumer.csproj" \
+    -t:SharpSqlRun \
+    -p:Configuration=Release \
+    -p:SharpSqlKeepContainer=false \
+    -verbosity:minimal)"
+if [[ "$run_output" != *"answer=42"* ]] || [[ "$run_output" != *"SharpSql executed SQL"* ]]; then
+    printf '%s\n' "$run_output" >&2
+    printf 'The SharpSqlRun target did not execute generated SQL in Testcontainers.\n' >&2
+    exit 1
+fi
+
 if invalid_output="$(dotnet build "$work_dir/invalid/SdkConsumer.csproj" --no-restore 2>&1)"; then
     printf 'The analyzer accepted an unsupported multidimensional array.\n' >&2
     exit 1
@@ -91,4 +107,4 @@ if [[ "$invalid_output" != *"error SS6301"* ]]; then
     exit 1
 fi
 
-printf 'Validated SharpSql.Sdk %s build generation and analyzer diagnostics.\n' "$version"
+printf 'Validated SharpSql.Sdk %s build generation, SQL execution, IDE profile, and analyzer diagnostics.\n' "$version"

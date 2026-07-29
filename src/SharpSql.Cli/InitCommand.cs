@@ -2,6 +2,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Xml.Linq;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -43,6 +45,41 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
         [Description("Update the project without running dotnet restore.")]
         public bool NoRestore { get; init; }
 
+        [CommandOption("--connection <NAME>")]
+        [Description("Connection string name. Without one, SQL runs use Testcontainers.")]
+        public string? ConnectionName { get; init; }
+
+        [CommandOption("--connection-string-env <VARIABLE>")]
+        [Description("Environment variable containing the connection string.")]
+        public string? ConnectionStringEnvironmentVariable { get; init; }
+
+        [CommandOption("--container")]
+        [Description("Use Testcontainers instead of a configured connection.")]
+        public bool UseContainer { get; init; }
+
+        [CommandOption("--keep-container")]
+        [Description("Keep and reuse the fallback SQL Server Testcontainer.")]
+        public bool KeepContainer { get; init; }
+
+        [CommandOption("--database <DATABASE>")]
+        [Description("Database created inside the fallback Testcontainer.")]
+        [DefaultValue(RunCommand.DefaultDatabase)]
+        public string DatabaseName { get; init; } = RunCommand.DefaultDatabase;
+
+        [CommandOption("--image <IMAGE>")]
+        [Description("Fallback SQL Server Testcontainer image.")]
+        [DefaultValue(RunCommand.DefaultImage)]
+        public string SqlServerImage { get; init; } = RunCommand.DefaultImage;
+
+        [CommandOption("--timeout <SECONDS>")]
+        [Description("SQL command timeout in seconds.")]
+        [DefaultValue(60)]
+        public int CommandTimeoutSeconds { get; init; } = 60;
+
+        [CommandOption("--no-launch-profile")]
+        [Description("Do not add the SharpSql (SQL Server) IDE launch profile.")]
+        public bool NoLaunchProfile { get; init; }
+
         public override ValidationResult Validate()
         {
             if (string.IsNullOrWhiteSpace(OutputPath) && OutputPath is not null)
@@ -51,11 +88,24 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
                 return ValidationResult.Error("--entry cannot be empty.");
             if (string.IsNullOrWhiteSpace(SdkVersion) && SdkVersion is not null)
                 return ValidationResult.Error("--sdk-version cannot be empty.");
+            if (string.IsNullOrWhiteSpace(ConnectionName) && ConnectionName is not null)
+                return ValidationResult.Error("--connection cannot be empty.");
+            if (string.IsNullOrWhiteSpace(ConnectionStringEnvironmentVariable) &&
+                ConnectionStringEnvironmentVariable is not null)
+                return ValidationResult.Error("--connection-string-env cannot be empty.");
+            if (string.IsNullOrWhiteSpace(DatabaseName))
+                return ValidationResult.Error("--database cannot be empty.");
+            if (string.IsNullOrWhiteSpace(SqlServerImage))
+                return ValidationResult.Error("--image cannot be empty.");
             if (SdkVersion is not null && !Regex.IsMatch(
                     SdkVersion,
                     "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$",
                     RegexOptions.CultureInvariant))
                 return ValidationResult.Error("--sdk-version must be a semantic version such as 1.2.3 or 1.2.3-preview.1.");
+            if (CommandTimeoutSeconds <= 0)
+                return ValidationResult.Error("--timeout must be greater than zero.");
+            if (UseContainer && (ConnectionName is not null || ConnectionStringEnvironmentVariable is not null))
+                return ValidationResult.Error("--container cannot be combined with connection options.");
             return ValidationResult.Success();
         }
     }
@@ -89,7 +139,15 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
                 settings.OutputPath,
                 settings.EntryPoint,
                 settings.AnalyzerOnly,
-                settings.NoAnalyzer);
+                settings.NoAnalyzer,
+                settings.ConnectionName,
+                settings.ConnectionStringEnvironmentVariable,
+                settings.UseContainer,
+                settings.KeepContainer,
+                settings.SqlServerImage,
+                settings.DatabaseName,
+                settings.CommandTimeoutSeconds,
+                addLaunchProfile: !settings.NoLaunchProfile);
         }
         catch (ProjectInitializationException exception)
         {
@@ -103,7 +161,9 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
             $"  SDK: SharpSql.Sdk {installation.SdkVersion}{Environment.NewLine}" +
             $"  SQL: {installation.OutputPath}{Environment.NewLine}" +
             $"  Build generation: {(installation.GenerateOnBuild ? "enabled" : "disabled")}{Environment.NewLine}" +
-            $"  Live diagnostics: {(installation.EnableAnalyzer ? "enabled" : "disabled")}{Environment.NewLine}",
+            $"  Live diagnostics: {(installation.EnableAnalyzer ? "enabled" : "disabled")}{Environment.NewLine}" +
+            $"  SQL Server: {installation.SqlServerConfiguration}{Environment.NewLine}" +
+            $"  IDE profile: {(installation.LaunchProfileAdded ? "SharpSql (SQL Server)" : "not changed")}{Environment.NewLine}",
             cancellationToken);
 
         if (settings.NoRestore)
@@ -165,7 +225,9 @@ internal sealed record ProjectSdkInstallation(
     string SdkVersion,
     string OutputPath,
     bool GenerateOnBuild,
-    bool EnableAnalyzer);
+    bool EnableAnalyzer,
+    string SqlServerConfiguration,
+    bool LaunchProfileAdded);
 
 internal sealed class ProjectInitializationException(string message) : Exception(message);
 
@@ -202,7 +264,15 @@ internal static class ProjectSdkInstaller
         string? requestedOutputPath,
         string? entryPoint,
         bool analyzerOnly,
-        bool noAnalyzer)
+        bool noAnalyzer,
+        string? connectionName = null,
+        string? connectionStringEnvironmentVariable = null,
+        bool useContainer = false,
+        bool keepContainer = false,
+        string sqlServerImage = RunCommand.DefaultImage,
+        string databaseName = RunCommand.DefaultDatabase,
+        int commandTimeoutSeconds = 60,
+        bool addLaunchProfile = true)
     {
         XDocument document;
         try
@@ -254,16 +324,38 @@ internal static class ProjectSdkInstaller
             SetProperty(root, "SharpSqlOutputLocation", "BuildOutput");
         SetProperty(root, "SharpSqlGenerateOnBuild", analyzerOnly ? "false" : "true");
         SetProperty(root, "SharpSqlEnableAnalyzer", noAnalyzer ? "false" : "true");
+        SetProperty(root, "SharpSqlKeepContainer", keepContainer ? "true" : "false");
+        SetProperty(root, "SharpSqlContainerImage", sqlServerImage);
+        SetProperty(root, "SharpSqlContainerDatabase", databaseName);
+        SetProperty(root, "SharpSqlCommandTimeoutSeconds", commandTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
         if (entryPoint is not null)
             SetProperty(root, "SharpSqlEntryPoint", entryPoint);
+        var existingConnectionName = Descendants(root, "SharpSqlConnectionName").LastOrDefault()?.Value.Trim();
+        var existingConnectionEnvironment = Descendants(root, "SharpSqlConnectionStringEnvironment").LastOrDefault()?.Value.Trim();
+        if (useContainer)
+        {
+            RemoveProperty(root, "SharpSqlConnectionName");
+            RemoveProperty(root, "SharpSqlConnectionStringEnvironment");
+        }
+        else if (connectionName is not null)
+            SetProperty(root, "SharpSqlConnectionName", connectionName);
+        if (connectionStringEnvironmentVariable is not null)
+            SetProperty(root, "SharpSqlConnectionStringEnvironment", connectionStringEnvironmentVariable);
 
         WriteAtomically(projectPath, document);
+        if (addLaunchProfile)
+            LaunchProfileInstaller.Install(projectPath);
         return new ProjectSdkInstallation(
             projectPath,
             sdkVersion,
             outputPath,
             GenerateOnBuild: !analyzerOnly,
-            EnableAnalyzer: !noAnalyzer);
+            EnableAnalyzer: !noAnalyzer,
+            SqlServerConfiguration: DescribeSqlServerConfiguration(
+                useContainer,
+                connectionName ?? existingConnectionName,
+                connectionStringEnvironmentVariable ?? existingConnectionEnvironment),
+            LaunchProfileAdded: addLaunchProfile);
     }
 
     private static bool IsSdkStyle(XElement root) =>
@@ -362,6 +454,26 @@ internal static class ProjectSdkInstaller
         propertyGroup.Add(new XElement(root.Name.Namespace + name, value));
     }
 
+    private static void RemoveProperty(XElement root, string name)
+    {
+        foreach (var property in Descendants(root, name).ToArray())
+            property.Remove();
+    }
+
+    private static string DescribeSqlServerConfiguration(
+        bool useContainer,
+        string? connectionName,
+        string? connectionStringEnvironmentVariable)
+    {
+        if (useContainer)
+            return "Testcontainers fallback";
+        if (!string.IsNullOrWhiteSpace(connectionStringEnvironmentVariable))
+            return $"environment '{connectionStringEnvironmentVariable}'";
+        return string.IsNullOrWhiteSpace(connectionName)
+            ? "Testcontainers fallback"
+            : $"connection '{connectionName}'";
+    }
+
     private static void WriteAtomically(string projectPath, XDocument document)
     {
         var tempPath = Path.Combine(
@@ -377,6 +489,74 @@ internal static class ProjectSdkInstaller
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             throw new ProjectInitializationException($"Could not update project '{projectPath}': {exception.Message}");
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+        }
+    }
+}
+
+internal static class LaunchProfileInstaller
+{
+    private const string ProfileName = "SharpSql (SQL Server)";
+
+    public static void Install(string projectPath)
+    {
+        var propertiesDirectory = Path.Combine(Path.GetDirectoryName(projectPath)!, "Properties");
+        var launchSettingsPath = Path.Combine(propertiesDirectory, "launchSettings.json");
+        JsonObject root;
+        try
+        {
+            root = File.Exists(launchSettingsPath)
+                ? JsonNode.Parse(
+                      File.ReadAllText(launchSettingsPath),
+                      documentOptions: new JsonDocumentOptions
+                      {
+                          AllowTrailingCommas = true,
+                          CommentHandling = JsonCommentHandling.Skip
+                      }) as JsonObject ?? throw new ProjectInitializationException(
+                          $"Launch settings root must be a JSON object: {launchSettingsPath}")
+                : new JsonObject
+                {
+                    ["$schema"] = "http://json.schemastore.org/launchsettings.json"
+                };
+        }
+        catch (JsonException exception)
+        {
+            throw new ProjectInitializationException(
+                $"Could not read launch settings '{launchSettingsPath}': {exception.Message}");
+        }
+
+        var profiles = root["profiles"] as JsonObject;
+        if (profiles is null)
+        {
+            profiles = new JsonObject();
+            root["profiles"] = profiles;
+        }
+        profiles[ProfileName] = new JsonObject
+        {
+            ["commandName"] = "Executable",
+            ["executablePath"] = "dotnet",
+            ["commandLineArgs"] = $"msbuild \"{Path.GetFileName(projectPath)}\" -t:SharpSqlRun"
+        };
+
+        Directory.CreateDirectory(propertiesDirectory);
+        WriteAtomically(launchSettingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine);
+    }
+
+    private static void WriteAtomically(string path, string contents)
+    {
+        var tempPath = Path.Combine(Path.GetDirectoryName(path)!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllText(tempPath, contents, new System.Text.UTF8Encoding(false));
+            File.Move(tempPath, path, overwrite: true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new ProjectInitializationException($"Could not update launch settings '{path}': {exception.Message}");
         }
         finally
         {

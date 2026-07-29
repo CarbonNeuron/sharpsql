@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../SharpSql.MSBuild/SharpSql.MSBuild.csproj" />
+    <ProjectReference Include="../SharpSql.SqlServer/SharpSql.SqlServer.csproj" />
   </ItemGroup>
 </Project>

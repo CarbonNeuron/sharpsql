@@ -30,4 +30,13 @@
           AfterTargets="CoreCompile"
           DependsOnTargets="SharpSqlTranspile"
           Condition="'$(SharpSqlEnabled)' == 'true' and '$(SharpSqlGenerateOnBuild)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'" />
+
+  <Target Name="SharpSqlRun"
+          DependsOnTargets="SharpSqlTranspile"
+          Condition="'$(SharpSqlEnabled)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --operation run --project &quot;$(MSBuildProjectFullPath)&quot; --sql &quot;$(SharpSqlResolvedOutputPath)&quot; --connection-name &quot;$(SharpSqlConnectionName)&quot; --connection-string-environment &quot;$(SharpSqlConnectionStringEnvironment)&quot; --force-container &quot;$(SharpSqlForceContainer)&quot; --keep-container &quot;$(SharpSqlKeepContainer)&quot; --image &quot;$(SharpSqlContainerImage)&quot; --database &quot;$(SharpSqlContainerDatabase)&quot; --timeout &quot;$(SharpSqlCommandTimeoutSeconds)&quot;"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="High"
+          StandardErrorImportance="High" />
+  </Target>
 </Project>

@@ -47,4 +47,14 @@ public sealed class BuildHostTests
 
         Assert.Equal(2, exitCode);
     }
+
+    [Fact]
+    public async Task RejectsRunOperationWithoutGeneratedSql()
+    {
+        var exitCode = await BuildProgram.RunAsync(
+            ["--operation", "run", "--project", ProjectPath],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, exitCode);
+    }
 }

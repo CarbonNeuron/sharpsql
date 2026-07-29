@@ -1,4 +1,5 @@
 using System.Text;
+using SharpSql.SqlServer;
 
 namespace SharpSql.Build;
 
@@ -16,6 +17,21 @@ public static class Program
             return 2;
         }
 
+        if (!string.Equals(parsed.Operation, "run", StringComparison.OrdinalIgnoreCase))
+            return await GenerateSqlAsync(parsed, cancellationToken);
+        try
+        {
+            return await RunSqlAsync(parsed, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            Console.Error.WriteLine($"error SSB0003: {exception.Message}");
+            return 2;
+        }
+    }
+
+    private static async Task<int> GenerateSqlAsync(BuildArguments parsed, CancellationToken cancellationToken)
+    {
         var result = await new SharpSqlProjectCompiler().TranspileAsync(
             parsed.ProjectPath,
             new ProjectTranspileOptions
@@ -32,7 +48,7 @@ public static class Program
             return 1;
         }
 
-        var outputPath = Path.GetFullPath(parsed.OutputPath);
+        var outputPath = Path.GetFullPath(parsed.OutputPath!);
         var outputDirectory = Path.GetDirectoryName(outputPath);
         if (!string.IsNullOrEmpty(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
@@ -45,6 +61,41 @@ public static class Program
         return 0;
     }
 
+    private static async Task<int> RunSqlAsync(BuildArguments parsed, CancellationToken cancellationToken)
+    {
+        var connectionString = parsed.ForceContainer
+            ? null
+            : SqlServerConnectionResolver.Resolve(
+                parsed.ProjectPath,
+                parsed.ConnectionName,
+                parsed.ConnectionStringEnvironmentVariable);
+        await using var session = await SqlServerSessionFactory.OpenAsync(
+            new SqlServerSessionOptions(
+                parsed.ProjectPath,
+                connectionString,
+                parsed.SqlServerImage,
+                parsed.DatabaseName,
+                parsed.KeepContainer),
+            cancellationToken);
+        var sql = await File.ReadAllTextAsync(parsed.SqlPath!, cancellationToken);
+        var result = await SqlBatchExecutor.ExecuteAsync(
+            session.Connection,
+            sql,
+            parsed.CommandTimeoutSeconds,
+            cancellationToken);
+        foreach (var message in result.Messages)
+            Console.WriteLine(message);
+        if (!result.Success)
+        {
+            Console.Error.WriteLine($"error SSB0002: SQL Server error {result.ErrorNumber}: {result.ErrorMessage}");
+            return 1;
+        }
+        Console.WriteLine($"SharpSql executed SQL on {session.Description}");
+        if (session.KeepContainer)
+            Console.WriteLine("SharpSql SQL Server container kept running for reuse.");
+        return 0;
+    }
+
     private static void WriteDiagnostic(CompilerDiagnostic diagnostic)
     {
         var location = string.IsNullOrWhiteSpace(diagnostic.FilePath)
@@ -54,11 +105,20 @@ public static class Program
     }
 
     private sealed record BuildArguments(
+        string Operation,
         string ProjectPath,
-        string OutputPath,
+        string? OutputPath,
+        string? SqlPath,
         string Configuration,
         string? TargetFramework,
-        string? EntryPoint)
+        string? EntryPoint,
+        string? ConnectionName,
+        string? ConnectionStringEnvironmentVariable,
+        bool ForceContainer,
+        bool KeepContainer,
+        string SqlServerImage,
+        string DatabaseName,
+        int CommandTimeoutSeconds)
     {
         public static bool TryParse(
             IReadOnlyList<string> args,
@@ -77,19 +137,52 @@ public static class Program
                 values[args[index][2..]] = args[index + 1];
             }
 
-            if (!Required("project", values, out var project, out error) ||
-                !Required("output", values, out var output, out error))
+            if (!Required("project", values, out var project, out error))
             {
                 parsed = null!;
                 return false;
             }
 
+            var operation = Value(values, "operation") ?? "generate";
+            if (!string.Equals(operation, "generate", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(operation, "run", StringComparison.OrdinalIgnoreCase))
+            {
+                parsed = null!;
+                error = "--operation must be generate or run.";
+                return false;
+            }
+            var requiredPathName = string.Equals(operation, "run", StringComparison.OrdinalIgnoreCase)
+                ? "sql"
+                : "output";
+            if (!Required(requiredPathName, values, out var requiredPath, out error))
+            {
+                parsed = null!;
+                return false;
+            }
+            var timeout = 60;
+            if (Value(values, "timeout") is { } timeoutValue &&
+                (!int.TryParse(timeoutValue, out timeout) || timeout <= 0))
+            {
+                parsed = null!;
+                error = "--timeout must be greater than zero.";
+                return false;
+            }
+
             parsed = new BuildArguments(
+                operation,
                 project,
-                output,
+                string.Equals(operation, "generate", StringComparison.OrdinalIgnoreCase) ? requiredPath : null,
+                string.Equals(operation, "run", StringComparison.OrdinalIgnoreCase) ? requiredPath : null,
                 Value(values, "configuration") ?? "Release",
                 Value(values, "framework"),
-                Value(values, "entry"));
+                Value(values, "entry"),
+                Value(values, "connection-name"),
+                Value(values, "connection-string-environment"),
+                BoolValue(values, "force-container"),
+                BoolValue(values, "keep-container"),
+                Value(values, "image") ?? "mcr.microsoft.com/mssql/server:2022-latest",
+                Value(values, "database") ?? "SharpSql",
+                timeout);
             return true;
         }
 
@@ -109,5 +202,8 @@ public static class Program
 
         private static string? Value(IReadOnlyDictionary<string, string> values, string name) =>
             values.TryGetValue(name, out var value) && !string.IsNullOrWhiteSpace(value) ? value : null;
+
+        private static bool BoolValue(IReadOnlyDictionary<string, string> values, string name) =>
+            bool.TryParse(Value(values, name), out var value) && value;
     }
 }

@@ -4,6 +4,11 @@
     <SharpSqlEnableAnalyzer Condition="'$(SharpSqlEnableAnalyzer)' == ''">true</SharpSqlEnableAnalyzer>
     <SharpSqlGenerateOnBuild Condition="'$(SharpSqlGenerateOnBuild)' == ''">true</SharpSqlGenerateOnBuild>
     <SharpSqlOutputLocation Condition="'$(SharpSqlOutputLocation)' == ''">Intermediate</SharpSqlOutputLocation>
+    <SharpSqlKeepContainer Condition="'$(SharpSqlKeepContainer)' == ''">false</SharpSqlKeepContainer>
+    <SharpSqlForceContainer Condition="'$(SharpSqlForceContainer)' == ''">false</SharpSqlForceContainer>
+    <SharpSqlContainerImage Condition="'$(SharpSqlContainerImage)' == ''">mcr.microsoft.com/mssql/server:2022-latest</SharpSqlContainerImage>
+    <SharpSqlContainerDatabase Condition="'$(SharpSqlContainerDatabase)' == ''">SharpSql</SharpSqlContainerDatabase>
+    <SharpSqlCommandTimeoutSeconds Condition="'$(SharpSqlCommandTimeoutSeconds)' == ''">60</SharpSqlCommandTimeoutSeconds>
     <SkipCompilerExecution Condition="'$(SharpSqlTranspileOnly)' == 'true'">true</SkipCompilerExecution>
   </PropertyGroup>
   <ItemGroup>

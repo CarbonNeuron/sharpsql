@@ -25,6 +25,14 @@ compiler frontend and diagnostics against the IDE's active `CSharpCompilation`;
 the compiler and IR assemblies therefore multi-target `net10.0` for execution
 and `netstandard2.0` for analyzer-host compatibility.
 
+`SharpSql.SqlServer` is the shared execution boundary for CLI, build-host, and
+verification workflows. It resolves named connections without storing secrets
+in project files, or starts a project-scoped reusable SQL Server Testcontainer
+when no connection is configured. The explicit `SharpSqlRun` target executes
+the output of `SharpSqlTranspile`; it is never attached to an ordinary build.
+The same session abstraction owns database selection, message capture, and
+container cleanup, and is intended to back database-first scaffolding later.
+
 `IrType` carries only language/runtime type identity. `CSharpTypeFactory` is the frontend mapping from Roslyn, while `SqlTypeMapper` belongs to the SQL Server backend. Likewise, `SqlScalarExpression` and the `SqlLinq*` plans are explicitly backend models: SQL text and precedence never appear in compiler IR. LINQ lambda bodies are bound IR expressions, and query syntax is represented by neutral query clauses before the backend chooses relational SQL.
 
 Roslyn supplies semantic types, nullable flow state, constants, and data-flow facts while binding. A semantic preflight imports definite-assignment, use-before-declaration, out-parameter, and missing-return failures while leaving intentional SharpSql extensions—such as mutable positional-record fields—to the supported-subset validator. Each method carries the endpoint-reachability and statement-cost facts consumed by lowering. An overload-aware method catalog and the IR method graph use stable semantic IDs for call-site counts, caller/callee edges, recursion membership, effect propagation, and the connected closure required by VM selection; identical method names in different signatures or declaring types are never conflated. Method definitions retain abstract/virtual/override slots and implemented-interface identities for runtime dispatch. A backend-neutral fixed-point pass propagates effects through resolved calls, including mutable-state reads/writes, allocation, throwing, nondeterminism, I/O, unknown calls, parameter mutation and escape, returned parameter aliases, and fresh references. A shared intrinsic catalog supplies conservative behavior and recognition for collections, LINQ, console output, and stateful `Random` calls.

@@ -12,10 +12,9 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Build.Framework" Version="17.11.31" ExcludeAssets="runtime" PrivateAssets="all" />
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
     <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
-    <PackageReference Include="Testcontainers.MsSql" Version="4.13.0" />
     <ProjectReference Include="../SharpSql.MSBuild/SharpSql.MSBuild.csproj" />
+    <ProjectReference Include="../SharpSql.SqlServer/SharpSql.SqlServer.csproj" />
     <ProjectReference Include="../SharpSql/SharpSql.csproj" />
     <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>

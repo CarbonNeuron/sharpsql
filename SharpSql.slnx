@@ -5,6 +5,7 @@
   <Project Path="src/SharpSql.Build/SharpSql.Build.csproj" />
   <Project Path="src/SharpSql.MSBuild/SharpSql.MSBuild.csproj" />
   <Project Path="src/SharpSql.Sdk/SharpSql.Sdk.csproj" />
+  <Project Path="src/SharpSql.SqlServer/SharpSql.SqlServer.csproj" />
   <Project Path="src/SharpSql.Cli/SharpSql.Cli.csproj" />
   <Project Path="tests/SharpSql.IntegrationTests/SharpSql.IntegrationTests.csproj" />
   <Project Path="tests/SharpSql.Tests/SharpSql.Tests.csproj" />

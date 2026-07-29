@@ -73,7 +73,8 @@ application at `$(OutputPath)$(AssemblyName).sql`. It can discover the only
 `.csproj` in a directory, so running `sharpsql init` from the project directory
 is enough. Existing project elements, comments, custom output paths, and entry
 settings are preserved; generation and analyzer switches follow the options on
-each run.
+each run. It also adds a `SharpSql (SQL Server)` profile to
+`Properties/launchSettings.json`, preserving existing IDE profiles.
 
 Customize the generated path or select a non-default static entry method while
 initializing:
@@ -87,19 +88,21 @@ sharpsql init path/to/MyApp.csproj \
 Use `--analyzer-only` to skip SQL generation during normal builds,
 `--no-analyzer` to disable live diagnostics, or `--no-restore` when restore is
 handled separately. Central package management is supported with a version
-override.
+override. Use `--no-launch-profile` if the IDE profile is not wanted.
 
 The equivalent manual project configuration is:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="SharpSql.Sdk" Version="0.1.1" PrivateAssets="all" />
+  <PackageReference Include="SharpSql.Sdk" Version="0.1.2" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>
   <!-- Required for libraries; executable projects use their normal entry point. -->
   <SharpSqlEntryPoint>MyApp.SqlJob::Run</SharpSqlEntryPoint>
   <SharpSqlOutputLocation>BuildOutput</SharpSqlOutputLocation>
+  <SharpSqlKeepContainer>false</SharpSqlKeepContainer>
+  <SharpSqlContainerDatabase>SharpSql</SharpSqlContainerDatabase>
 </PropertyGroup>
 ```
 
@@ -121,6 +124,41 @@ invoke the dedicated target:
 dotnet build -p:SharpSqlTranspileOnly=true
 dotnet msbuild -t:SharpSqlTranspile
 ```
+
+Run the generated SQL directly in SQL Server:
+
+```bash
+sharpsql run path/to/MyApp.csproj
+dotnet msbuild path/to/MyApp.csproj -t:SharpSqlRun
+```
+
+The IDE launch profile invokes the same `SharpSqlRun` target. Without a
+configured connection, both commands start an isolated SQL Server 2022
+Testcontainer and remove it afterward. Retain and reuse the project-scoped
+container when initializing or per invocation:
+
+```bash
+sharpsql init path/to/MyApp.csproj --keep-container
+sharpsql run path/to/MyApp.csproj --keep-container
+sharpsql run path/to/MyApp.csproj --remove-container
+```
+
+To use an existing development server, store only its connection name in the
+project and keep the secret in normal .NET configuration:
+
+```bash
+sharpsql init path/to/MyApp.csproj --connection Development
+dotnet user-secrets init --project path/to/MyApp.csproj
+dotnet user-secrets set --project path/to/MyApp.csproj \
+  'ConnectionStrings:Development' 'Server=localhost;Database=MyApp;Integrated Security=true;TrustServerCertificate=true'
+```
+
+Named connections are resolved from `appsettings.json`, environment-specific
+appsettings, user secrets, and `ConnectionStrings__Development`. Set
+`SHARPSQL_CONNECTION_STRING` for an unnamed external connection, use
+`--connection-string-env` for a custom variable, or pass `--container` to
+override a configured connection. Generated `.sql` files can also be executed
+directly with `sharpsql run generated.sql`.
 
 Set `SharpSqlGenerateOnBuild` to `false` for IDE/build diagnostics without SQL
 generation, `SharpSqlEnableAnalyzer` to `false` to disable live diagnostics, or
@@ -230,7 +268,7 @@ var result = await new SharpSqlProjectCompiler().TranspileAsync(
 
 - Top-level C# statements and conventional `Main` bodies
 - Multi-file SDK-style C# projects loaded with their real references, generated sources, global usings, language version, and conditional symbols
-- Installable `SharpSql.Sdk` integration with build-time SQL output, a dedicated transpile target, transpile-only builds, and live Roslyn compatibility diagnostics
+- Installable `SharpSql.Sdk` integration with build-time SQL output, explicit transpile/run targets, IDE launch profiles, named development connections, reusable Testcontainers, transpile-only builds, and live Roslyn compatibility diagnostics
 - Core numeric types, `bool`, `char`, `string`, nullable values, date/time types, `Guid`, `byte[]`, and `object`
 - Declarations, assignment, arithmetic, comparisons, boolean expressions, interpolation, and casts
 - String length/indexing and `string(char[])` construction
