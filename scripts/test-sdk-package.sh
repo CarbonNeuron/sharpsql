@@ -62,7 +62,12 @@ if [[ -n "$tool_path" ]]; then
         printf 'The init command did not add the SQL Server IDE launch profile.\n' >&2
         exit 1
     fi
-    default_run_output="$(dotnet msbuild "$work_dir/default/InitDefault.csproj" \
+    if ! grep -Fq "$work_dir/default" "$work_dir/default/Properties/launchSettings.json" || \
+       ! grep -Fq "$work_dir/default/InitDefault.csproj" "$work_dir/default/Properties/launchSettings.json"; then
+        printf 'The SQL Server IDE launch profile does not use absolute project paths.\n' >&2
+        exit 1
+    fi
+    default_run_output="$(cd "$work_dir/package-default" && dotnet msbuild "$work_dir/default/InitDefault.csproj" \
         -t:SharpSqlRun \
         -p:Configuration=Release \
         -p:SharpSqlKeepContainer=false \

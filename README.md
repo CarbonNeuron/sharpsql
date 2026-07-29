@@ -74,7 +74,9 @@ application at `$(OutputPath)$(AssemblyName).sql`. It can discover the only
 is enough. Existing project elements, comments, custom output paths, and entry
 settings are preserved; generation and analyzer switches follow the options on
 each run. It also adds a `SharpSql (SQL Server)` profile to
-`Properties/launchSettings.json`, preserving existing IDE profiles.
+`Properties/launchSettings.json`, preserving existing IDE profiles. The
+profile records the absolute project path and working directory so IDEs can
+launch it correctly even when their process starts in the solution directory.
 
 Customize the generated path or select a non-default static entry method while
 initializing:
@@ -94,7 +96,7 @@ The equivalent manual project configuration is:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="SharpSql.Sdk" Version="0.1.3" PrivateAssets="all" />
+  <PackageReference Include="SharpSql.Sdk" Version="0.1.4" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>

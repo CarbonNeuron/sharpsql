@@ -317,6 +317,12 @@ public sealed class CliTests
         Assert.Equal(
             "dotnet",
             launchSettings?["profiles"]?["SharpSql (SQL Server)"]?["executablePath"]?.GetValue<string>());
+        Assert.Equal(
+            project.DirectoryPath,
+            launchSettings?["profiles"]?["SharpSql (SQL Server)"]?["workingDirectory"]?.GetValue<string>());
+        Assert.Equal(
+            $"msbuild \"{project.ProjectPath}\" -t:SharpSqlRun",
+            launchSettings?["profiles"]?["SharpSql (SQL Server)"]?["commandLineArgs"]?.GetValue<string>());
         Assert.Equal("keep me", Element(document, "ExistingProperty"));
         Assert.Contains("existing comment", await File.ReadAllTextAsync(
             project.ProjectPath,
@@ -486,6 +492,9 @@ public sealed class CliTests
         Assert.Contains(
             "-t:SharpSqlRun",
             launchSettings?["profiles"]?["SharpSql (SQL Server)"]?["commandLineArgs"]?.GetValue<string>());
+        Assert.Equal(
+            project.DirectoryPath,
+            launchSettings?["profiles"]?["SharpSql (SQL Server)"]?["workingDirectory"]?.GetValue<string>());
     }
 
     [Fact]
