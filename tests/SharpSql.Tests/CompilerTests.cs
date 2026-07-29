@@ -939,6 +939,25 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void ImplicitArraysUseTheirInferredElementType()
+    {
+        const string source = """
+            var names = new[] { "Potion", "Sword", "Shield" };
+            var random = new Random(2);
+            string selected = names[random.Next(names.Length)];
+            Console.WriteLine(selected);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("(__type_id, __count) VALUES (1003, 3)", result.Sql);
+        Assert.Contains("__text_value) VALUES", result.Sql);
+        Assert.Contains("N'Potion'", result.Sql);
+        Assert.Contains("N'Shield'", result.Sql);
+    }
+
+    [Fact]
     public void InstanceMethodsReceiveThisAndCanMutateFields()
     {
         const string source = """

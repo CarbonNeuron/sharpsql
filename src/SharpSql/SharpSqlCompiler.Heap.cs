@@ -67,7 +67,9 @@ public sealed partial class SharpSqlCompiler
         }
 
         if (sourceNodes.SelectMany(source => source.DescendantNodesAndSelf().OfType<ArrayCreationExpressionSyntax>())
-            .Any(creation => creation.Type.ElementType.ToString() != "byte"))
+                .Any(creation => creation.Type.ElementType.ToString() != "byte") ||
+            sourceNodes.SelectMany(source => source.DescendantNodesAndSelf().OfType<ImplicitArrayCreationExpressionSyntax>())
+                .Any(creation => InferType(creation, new VariableScope()).Name != "byte[]"))
         {
             _usesLists = true;
             _heapRuntimeNeeded = true;
@@ -270,7 +272,9 @@ public sealed partial class SharpSqlCompiler
         expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsLinqMaterialization) ||
         expression.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>().Any() ||
         expression.DescendantNodesAndSelf().OfType<ArrayCreationExpressionSyntax>()
-            .Any(creation => creation.Type.ElementType.ToString() != "byte");
+            .Any(creation => creation.Type.ElementType.ToString() != "byte") ||
+        expression.DescendantNodesAndSelf().OfType<ImplicitArrayCreationExpressionSyntax>()
+            .Any(creation => InferType(creation, new VariableScope()).Name != "byte[]");
 
     private bool IsHeapCreation(BaseObjectCreationExpressionSyntax creation)
     {
@@ -315,6 +319,13 @@ public sealed partial class SharpSqlCompiler
             return true;
         }
 
+        if (expression is ImplicitArrayCreationExpressionSyntax implicitArrayCreation &&
+            InferType(implicitArrayCreation, scope).Name != "byte[]")
+        {
+            EmitNewImplicitArray(implicitArrayCreation, scope, context, continuation);
+            return true;
+        }
+
         if (expression is not BaseObjectCreationExpressionSyntax creation || !IsHeapCreation(creation))
             return false;
 
@@ -346,29 +357,12 @@ public sealed partial class SharpSqlCompiler
         var elementType = CSharpTypeFactory.From(creation.Type.ElementType);
         if (creation.Initializer is not null)
         {
-            var captured = new List<VmTemporary>();
-            EvaluateItem(0);
-
-            void EvaluateItem(int index)
-            {
-                if (index == creation.Initializer.Expressions.Count)
-                {
-                    var array = AllocateHeapHeader(1003, "__count", captured.Count.ToString());
-                    InsertListItems(
-                        array,
-                        elementType,
-                        captured.Select(ReadVmTemporary).ToArray());
-                    continuation(array);
-                    return;
-                }
-                EmitVmExpression(creation.Initializer.Expressions[index], scope, context, value =>
-                {
-                    var storage = AllocateVmTemporary(elementType, context);
-                    StoreVmTemporary(storage, value);
-                    captured.Add(storage);
-                    EvaluateItem(index + 1);
-                });
-            }
+            EmitNewInitializedArray(
+                creation.Initializer.Expressions.ToArray(),
+                elementType,
+                scope,
+                context,
+                continuation);
             return;
         }
 
@@ -390,6 +384,56 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("END;");
             continuation(array);
         });
+    }
+
+    private void EmitNewImplicitArray(
+        ImplicitArrayCreationExpressionSyntax creation,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        var arrayType = InferType(creation, scope);
+        if (!IsArrayType(arrayType.Name))
+        {
+            AddDiagnostic("SS6301", "Could not infer the implicit array element type.", creation);
+            continuation("NULL");
+            return;
+        }
+
+        EmitNewInitializedArray(
+            creation.Initializer.Expressions.ToArray(),
+            SequenceElementType(arrayType.Name),
+            scope,
+            context,
+            continuation);
+    }
+
+    private void EmitNewInitializedArray(
+        IReadOnlyList<ExpressionSyntax> items,
+        IrType elementType,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        var captured = new List<string>();
+        EvaluateItem(0);
+
+        void EvaluateItem(int index)
+        {
+            if (index == items.Count)
+            {
+                var array = AllocateHeapHeader(1003, "__count", captured.Count.ToString());
+                InsertListItems(array, elementType, captured);
+                continuation(array);
+                return;
+            }
+
+            EmitVmExpression(items[index], scope, context, value =>
+            {
+                captured.Add(CaptureHeapValue(items[index], elementType, value, scope, context));
+                EvaluateItem(index + 1);
+            });
+        }
     }
 
     private void EmitNewObject(
