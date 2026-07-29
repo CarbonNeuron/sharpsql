@@ -94,7 +94,7 @@ The equivalent manual project configuration is:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="SharpSql.Sdk" Version="0.1.2" PrivateAssets="all" />
+  <PackageReference Include="SharpSql.Sdk" Version="0.1.3" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>

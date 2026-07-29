@@ -57,4 +57,34 @@ public sealed class BuildHostTests
 
         Assert.Equal(2, exitCode);
     }
+
+    [Fact]
+    public async Task NormalizesMsBuildDirectorySeparatorsInOutputPaths()
+    {
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-build-{Guid.NewGuid():N}", "output.sql");
+        var foreignPath = Path.DirectorySeparatorChar == '/'
+            ? outputPath.Replace('/', '\\')
+            : outputPath.Replace('\\', '/');
+        try
+        {
+            var exitCode = await BuildProgram.RunAsync(
+                [
+                    "--project", ProjectPath,
+                    "--output", foreignPath,
+                    "--configuration", "Release",
+                    "--framework", "net10.0",
+                    "--entry", "MultiFileProject.SqlJob::Run"
+                ],
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(outputPath));
+        }
+        finally
+        {
+            var directory = Path.GetDirectoryName(outputPath)!;
+            if (Directory.Exists(directory))
+                Directory.Delete(directory, recursive: true);
+        }
+    }
 }

@@ -62,6 +62,17 @@ if [[ -n "$tool_path" ]]; then
         printf 'The init command did not add the SQL Server IDE launch profile.\n' >&2
         exit 1
     fi
+    default_run_output="$(dotnet msbuild "$work_dir/default/InitDefault.csproj" \
+        -t:SharpSqlRun \
+        -p:Configuration=Release \
+        -p:SharpSqlKeepContainer=false \
+        -verbosity:minimal)"
+    if [[ "$default_run_output" != *"Hello, World!"* ]] || \
+       [[ "$default_run_output" != *"SharpSql executed SQL"* ]]; then
+        printf '%s\n' "$default_run_output" >&2
+        printf 'The initialized project run target did not execute its build-output SQL.\n' >&2
+        exit 1
+    fi
 fi
 
 for project in "$work_dir/valid/SdkConsumer.csproj" "$work_dir/invalid/SdkConsumer.csproj"; do

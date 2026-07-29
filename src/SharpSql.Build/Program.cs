@@ -48,7 +48,7 @@ public static class Program
             return 1;
         }
 
-        var outputPath = Path.GetFullPath(parsed.OutputPath!);
+        var outputPath = NormalizePath(parsed.OutputPath!);
         var outputDirectory = Path.GetDirectoryName(outputPath);
         if (!string.IsNullOrEmpty(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
@@ -77,7 +77,7 @@ public static class Program
                 parsed.DatabaseName,
                 parsed.KeepContainer),
             cancellationToken);
-        var sql = await File.ReadAllTextAsync(parsed.SqlPath!, cancellationToken);
+        var sql = await File.ReadAllTextAsync(NormalizePath(parsed.SqlPath!), cancellationToken);
         var result = await SqlBatchExecutor.ExecuteAsync(
             session.Connection,
             sql,
@@ -102,6 +102,14 @@ public static class Program
             ? string.Empty
             : $"{diagnostic.FilePath}({diagnostic.Line},{diagnostic.Column}): ";
         Console.Error.WriteLine($"{location}error {diagnostic.Code}: {diagnostic.Message}");
+    }
+
+    private static string NormalizePath(string path)
+    {
+        var platformPath = Path.DirectorySeparatorChar == '/'
+            ? path.Replace('\\', '/')
+            : path.Replace('/', '\\');
+        return Path.GetFullPath(platformPath);
     }
 
     private sealed record BuildArguments(
