@@ -504,7 +504,6 @@ internal static class LaunchProfileInstaller
 
     public static void Install(string projectPath)
     {
-        projectPath = Path.GetFullPath(projectPath);
         var projectDirectory = Path.GetDirectoryName(projectPath)!;
         var propertiesDirectory = Path.Combine(projectDirectory, "Properties");
         var launchSettingsPath = Path.Combine(propertiesDirectory, "launchSettings.json");
@@ -541,8 +540,9 @@ internal static class LaunchProfileInstaller
         {
             ["commandName"] = "Executable",
             ["executablePath"] = "dotnet",
-            ["commandLineArgs"] = $"msbuild \"{projectPath}\" -t:SharpSqlRun",
-            ["workingDirectory"] = projectDirectory
+            ["commandLineArgs"] =
+                $"msbuild \"{Path.GetFileName(projectPath)}\" -t:SharpSqlRun --tl:off -verbosity:minimal",
+            ["workingDirectory"] = "."
         };
 
         Directory.CreateDirectory(propertiesDirectory);

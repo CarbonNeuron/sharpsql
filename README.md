@@ -75,8 +75,10 @@ is enough. Existing project elements, comments, custom output paths, and entry
 settings are preserved; generation and analyzer switches follow the options on
 each run. It also adds a `SharpSql (SQL Server)` profile to
 `Properties/launchSettings.json`, preserving existing IDE profiles. The
-profile records the absolute project path and working directory so IDEs can
-launch it correctly even when their process starts in the solution directory.
+profile uses a project-relative working directory, so IDEs can launch it from
+any solution directory and the file remains portable when committed to Git.
+The profile uses MSBuild's classic console logger so Rider and Visual Studio
+show SQL generation, SQL Server startup, execution, and cleanup progress.
 
 Customize the generated path or select a non-default static entry method while
 initializing:
@@ -96,7 +98,7 @@ The equivalent manual project configuration is:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="SharpSql.Sdk" Version="0.1.4" PrivateAssets="all" />
+  <PackageReference Include="SharpSql.Sdk" Version="0.1.5" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>

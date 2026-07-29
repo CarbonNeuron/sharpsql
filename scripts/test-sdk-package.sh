@@ -62,20 +62,25 @@ if [[ -n "$tool_path" ]]; then
         printf 'The init command did not add the SQL Server IDE launch profile.\n' >&2
         exit 1
     fi
-    if ! grep -Fq "$work_dir/default" "$work_dir/default/Properties/launchSettings.json" || \
-       ! grep -Fq "$work_dir/default/InitDefault.csproj" "$work_dir/default/Properties/launchSettings.json"; then
-        printf 'The SQL Server IDE launch profile does not use absolute project paths.\n' >&2
+    if grep -Fq "$work_dir/default" "$work_dir/default/Properties/launchSettings.json" || \
+       ! grep -Fq 'InitDefault.csproj' "$work_dir/default/Properties/launchSettings.json" || \
+       ! grep -Fq -- '--tl:off' "$work_dir/default/Properties/launchSettings.json" || \
+       ! grep -Fq '"workingDirectory": "."' "$work_dir/default/Properties/launchSettings.json"; then
+        printf 'The SQL Server IDE launch profile is not project-relative.\n' >&2
         exit 1
     fi
-    default_run_output="$(cd "$work_dir/package-default" && dotnet msbuild "$work_dir/default/InitDefault.csproj" \
+    default_run_output="$(cd "$work_dir/default" && dotnet msbuild "InitDefault.csproj" \
         -t:SharpSqlRun \
         -p:Configuration=Release \
         -p:SharpSqlKeepContainer=false \
         -verbosity:minimal)"
     if [[ "$default_run_output" != *"Hello, World!"* ]] || \
-       [[ "$default_run_output" != *"SharpSql executed SQL"* ]]; then
+       [[ "$default_run_output" != *"SharpSql: parsing and transpiling"* ]] || \
+       [[ "$default_run_output" != *"SharpSql: starting or reusing SQL Server container"* ]] || \
+       [[ "$default_run_output" != *"SharpSql: executing SQL batch"* ]] || \
+       [[ "$default_run_output" != *"SharpSql: SQL execution completed"* ]]; then
         printf '%s\n' "$default_run_output" >&2
-        printf 'The initialized project run target did not execute its build-output SQL.\n' >&2
+        printf 'The initialized project run target did not report and execute every SQL stage.\n' >&2
         exit 1
     fi
 fi
@@ -107,7 +112,7 @@ run_output="$(dotnet msbuild "$work_dir/valid/SdkConsumer.csproj" \
     -p:Configuration=Release \
     -p:SharpSqlKeepContainer=false \
     -verbosity:minimal)"
-if [[ "$run_output" != *"answer=42"* ]] || [[ "$run_output" != *"SharpSql executed SQL"* ]]; then
+if [[ "$run_output" != *"answer=42"* ]] || [[ "$run_output" != *"SharpSql: SQL execution completed"* ]]; then
     printf '%s\n' "$run_output" >&2
     printf 'The SharpSqlRun target did not execute generated SQL in Testcontainers.\n' >&2
     exit 1

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using SharpSql.SqlServer;
 
@@ -32,6 +33,8 @@ public static class Program
 
     private static async Task<int> GenerateSqlAsync(BuildArguments parsed, CancellationToken cancellationToken)
     {
+        var elapsed = Stopwatch.StartNew();
+        WriteProgress($"parsing and transpiling {Path.GetFileName(parsed.ProjectPath)}...");
         var result = await new SharpSqlProjectCompiler().TranspileAsync(
             parsed.ProjectPath,
             new ProjectTranspileOptions
@@ -57,19 +60,29 @@ public static class Program
             result.Sql,
             new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             cancellationToken);
-        Console.WriteLine($"SharpSql generated {outputPath}");
+        elapsed.Stop();
+        WriteProgress(
+            $"generated {CountLines(result.Sql)} SQL lines at {outputPath} ({FormatDuration(elapsed.Elapsed)}).");
         return 0;
     }
 
     private static async Task<int> RunSqlAsync(BuildArguments parsed, CancellationToken cancellationToken)
     {
+        var totalTime = Stopwatch.StartNew();
+        WriteProgress("resolving SQL Server configuration...");
         var connectionString = parsed.ForceContainer
             ? null
             : SqlServerConnectionResolver.Resolve(
                 parsed.ProjectPath,
                 parsed.ConnectionName,
                 parsed.ConnectionStringEnvironmentVariable);
-        await using var session = await SqlServerSessionFactory.OpenAsync(
+        if (connectionString is null)
+            WriteProgress($"starting or reusing SQL Server container {parsed.SqlServerImage}...");
+        else
+            WriteProgress("connecting to configured SQL Server...");
+
+        var connectionTime = Stopwatch.StartNew();
+        var session = await SqlServerSessionFactory.OpenAsync(
             new SqlServerSessionOptions(
                 parsed.ProjectPath,
                 connectionString,
@@ -77,24 +90,54 @@ public static class Program
                 parsed.DatabaseName,
                 parsed.KeepContainer),
             cancellationToken);
+        connectionTime.Stop();
+        WriteProgress($"SQL Server ready at {session.Description} ({FormatDuration(connectionTime.Elapsed)}).");
+
+        SqlBatchExecutionResult result;
         var sql = await File.ReadAllTextAsync(NormalizePath(parsed.SqlPath!), cancellationToken);
-        var result = await SqlBatchExecutor.ExecuteAsync(
-            session.Connection,
-            sql,
-            parsed.CommandTimeoutSeconds,
-            cancellationToken);
-        foreach (var message in result.Messages)
-            Console.WriteLine(message);
+        var executionTime = Stopwatch.StartNew();
+        WriteProgress($"executing SQL batch ({CountLines(sql)} lines)...");
+        try
+        {
+            result = await SqlBatchExecutor.ExecuteAsync(
+                session.Connection,
+                sql,
+                parsed.CommandTimeoutSeconds,
+                cancellationToken);
+            foreach (var message in result.Messages)
+                Console.WriteLine(message);
+        }
+        finally
+        {
+            executionTime.Stop();
+            if (session.IsContainer && !session.KeepContainer)
+                WriteProgress("stopping temporary SQL Server container...");
+            await session.DisposeAsync();
+            if (session.IsContainer && !session.KeepContainer)
+                WriteProgress("temporary SQL Server container removed.");
+        }
         if (!result.Success)
         {
             Console.Error.WriteLine($"error SSB0002: SQL Server error {result.ErrorNumber}: {result.ErrorMessage}");
             return 1;
         }
-        Console.WriteLine($"SharpSql executed SQL on {session.Description}");
+        totalTime.Stop();
+        WriteProgress(
+            $"SQL execution completed on {session.Description} " +
+            $"({FormatDuration(executionTime.Elapsed)} execution, {FormatDuration(totalTime.Elapsed)} total).");
         if (session.KeepContainer)
-            Console.WriteLine("SharpSql SQL Server container kept running for reuse.");
+            WriteProgress("SQL Server container kept running for reuse.");
         return 0;
     }
+
+    private static void WriteProgress(string message) => Console.WriteLine($"SharpSql: {message}");
+
+    private static int CountLines(string value) =>
+        value.Length == 0 ? 0 : value.Count(character => character == '\n') + (value[^1] == '\n' ? 0 : 1);
+
+    private static string FormatDuration(TimeSpan elapsed) => elapsed.TotalSeconds >= 1
+        ? $"{elapsed.TotalSeconds:0.0}s"
+        : $"{elapsed.TotalMilliseconds:0}ms";
 
     private static void WriteDiagnostic(CompilerDiagnostic diagnostic)
     {
