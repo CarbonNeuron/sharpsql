@@ -7,6 +7,123 @@ namespace SharpSql.IntegrationTests;
 public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture sqlServer)
 {
     [Fact]
+    public async Task PersistsTheBrokerErrorCodeAndDescriptionForAnUndeliverableRootTask()
+    {
+        await using var connection = await OpenBrokerDatabaseAsync();
+        await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
+
+        var executionId = Guid.NewGuid();
+        await ExecuteAsync(
+            connection,
+            "ALTER QUEUE [SharpSql].[WorkerQueue] WITH ACTIVATION (STATUS = OFF);",
+            120);
+        try
+        {
+            long taskId;
+            await using (var arrange = connection.CreateCommand())
+            {
+                arrange.CommandText = """
+                    INSERT INTO [SharpSql].[Executions] ([ExecutionId], [State], [StartedAtUtc])
+                    VALUES (@executionId, 1, SYSUTCDATETIME());
+
+                    DECLARE @taskId BIGINT;
+                    DECLARE @scheduled TABLE (
+                        [TaskId] BIGINT NOT NULL,
+                        [InitialState] TINYINT NOT NULL,
+                        [Enqueued] BIT NOT NULL,
+                        [DueAtUtc] DATETIME2(3) NULL
+                    );
+                    INSERT INTO @scheduled ([TaskId], [InitialState], [Enqueued], [DueAtUtc])
+                    EXEC [SharpSql].[ScheduleTask]
+                        @ExecutionId = @executionId,
+                        @ProgramId = N'00000000000000000000000000000000',
+                        @HandlerName = N'__entry',
+                        @PayloadJson = N'{}',
+                        @TaskId = @taskId OUTPUT;
+
+                    DECLARE @targetHandle UNIQUEIDENTIFIER;
+                    WAITFOR (
+                        RECEIVE TOP (1) @targetHandle = [conversation_handle]
+                        FROM [SharpSql].[WorkerQueue]
+                    ), TIMEOUT 10000;
+                    IF @targetHandle IS NULL
+                        THROW 51998, 'The worker queue did not receive the test request.', 1;
+
+                    END CONVERSATION @targetHandle
+                        WITH ERROR = 56789 DESCRIPTION = N'Native broker delivery description';
+
+                    SELECT @taskId;
+                    """;
+                arrange.Parameters.AddWithValue("@executionId", executionId);
+                arrange.CommandTimeout = 30;
+                taskId = (long)(await arrange.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
+            }
+
+            await ExecuteAsync(
+                connection,
+                "ALTER QUEUE [SharpSql].[WorkerQueue] WITH ACTIVATION (STATUS = ON);",
+                120);
+
+            var completed = false;
+            for (var attempt = 0; attempt < 200 && !completed; attempt++)
+            {
+                await using var poll = connection.CreateCommand();
+                poll.CommandText = "SELECT [State] FROM [SharpSql].[Executions] WHERE [ExecutionId] = @executionId;";
+                poll.Parameters.AddWithValue("@executionId", executionId);
+                completed = Equals(
+                    await poll.ExecuteScalarAsync(TestContext.Current.CancellationToken),
+                    (byte)3);
+                if (completed)
+                    break;
+                await Task.Delay(25, TestContext.Current.CancellationToken);
+            }
+
+            Assert.True(completed, "The dispatcher did not persist the broker error before the timeout.");
+            await using var assertion = connection.CreateCommand();
+            assertion.CommandText = """
+                SELECT
+                    [task].[State],
+                    [task].[ErrorNumber],
+                    [task].[ErrorMessage],
+                    [execution].[State],
+                    [execution].[ErrorNumber],
+                    [execution].[ErrorMessage]
+                FROM [SharpSql].[Tasks] AS [task]
+                INNER JOIN [SharpSql].[Executions] AS [execution]
+                    ON [execution].[ExecutionId] = [task].[ExecutionId]
+                WHERE [task].[ExecutionId] = @executionId AND [task].[TaskId] = @taskId;
+                """;
+            assertion.Parameters.AddWithValue("@executionId", executionId);
+            assertion.Parameters.AddWithValue("@taskId", taskId);
+            await using var reader = await assertion.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            Assert.Equal((byte)5, reader.GetByte(0));
+            Assert.Equal(56789, reader.GetInt32(1));
+            Assert.Equal("Native broker delivery description", reader.GetString(2));
+            Assert.Equal((byte)3, reader.GetByte(3));
+            Assert.Equal(56789, reader.GetInt32(4));
+            Assert.Equal("Native broker delivery description", reader.GetString(5));
+        }
+        finally
+        {
+            try
+            {
+                await using var cleanup = connection.CreateCommand();
+                cleanup.CommandText = "DELETE FROM [SharpSql].[Executions] WHERE [ExecutionId] = @executionId;";
+                cleanup.Parameters.AddWithValue("@executionId", executionId);
+                await cleanup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                await ExecuteAsync(
+                    connection,
+                    "ALTER QUEUE [SharpSql].[WorkerQueue] WITH ACTIVATION (STATUS = ON);",
+                    120);
+            }
+        }
+    }
+
+    [Fact]
     public async Task RollsBackPartiallyScheduledChildrenWhenTheRootFailsBeforeAwait()
     {
         await using var connection = await OpenBrokerDatabaseAsync();

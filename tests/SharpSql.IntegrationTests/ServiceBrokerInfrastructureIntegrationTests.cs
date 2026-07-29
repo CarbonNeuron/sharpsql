@@ -337,9 +337,55 @@ public sealed class ServiceBrokerInfrastructureIntegrationTests(SqlServerFixture
         }
     }
 
-    private async Task<SqlConnection> OpenBrokerDatabaseAsync()
+    [Fact]
+    public async Task DispatcherReturnsAfterConsumingTheLastEndDialog()
     {
-        const string databaseName = "SharpSqlBrokerTests";
+        await using var connection = await OpenBrokerDatabaseAsync("SharpSqlBrokerDispatcherLoopTests");
+        await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql());
+
+        await using (var setup = connection.CreateCommand())
+        {
+            setup.CommandText = """
+                ALTER QUEUE [SharpSql].[WorkerQueue] WITH ACTIVATION (STATUS = OFF);
+
+                DECLARE @initiatorHandle UNIQUEIDENTIFIER;
+                BEGIN DIALOG CONVERSATION @initiatorHandle
+                    FROM SERVICE [//sharpsql/v1/worker]
+                    TO SERVICE N'//sharpsql/v1/worker'
+                    ON CONTRACT [//sharpsql/v1/execution/contract]
+                    WITH ENCRYPTION = OFF;
+
+                DECLARE @requestBody VARBINARY(MAX) = 0x;
+                SEND ON CONVERSATION @initiatorHandle
+                    MESSAGE TYPE [//sharpsql/v1/execution/request] (@requestBody);
+
+                DECLARE @targetHandle UNIQUEIDENTIFIER;
+                WAITFOR (
+                    RECEIVE TOP (1) @targetHandle = [conversation_handle]
+                    FROM [SharpSql].[WorkerQueue]
+                ), TIMEOUT 10000;
+                IF @targetHandle IS NULL THROW 51998, 'The worker queue did not receive the probe request.', 1;
+                END CONVERSATION @targetHandle;
+                """;
+            await setup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        await using (var dispatch = connection.CreateCommand())
+        {
+            dispatch.CommandText = "EXEC [SharpSql].[DispatchWorker];";
+            dispatch.CommandTimeout = 5;
+            await dispatch.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        await using var assertion = connection.CreateCommand();
+        assertion.CommandText = "SELECT COUNT(*) FROM [SharpSql].[WorkerQueue];";
+        Assert.Equal(0, Convert.ToInt32(
+            await assertion.ExecuteScalarAsync(TestContext.Current.CancellationToken),
+            System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private async Task<SqlConnection> OpenBrokerDatabaseAsync(string databaseName = "SharpSqlBrokerTests")
+    {
         await using (var master = new SqlConnection(sqlServer.ConnectionString))
         {
             await master.OpenAsync(TestContext.Current.CancellationToken);

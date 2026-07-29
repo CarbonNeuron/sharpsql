@@ -37,7 +37,21 @@ internal static class ServiceBrokerWorkerDispatcherSqlEmitter
                 procedure.Line("DECLARE @HandlerName NVARCHAR(450);");
                 procedure.Line("DECLARE @RequestedProgramId NVARCHAR(128);");
                 procedure.Line("DECLARE @RequestedHandlerName NVARCHAR(450);");
-                procedure.Line("DECLARE @TaskValidated BIT = 0;");
+                procedure.Line("DECLARE @TaskValidated BIT;");
+                procedure.Line();
+                procedure.Line("-- DECLARE does not reinitialize variables on later WHILE iterations.");
+                procedure.Line("SET @ConversationHandle = NULL;");
+                procedure.Line("SET @ConversationId = NULL;");
+                procedure.Line("SET @MessageTypeName = NULL;");
+                procedure.Line("SET @MessageBody = NULL;");
+                procedure.Line("SET @MessageJson = NULL;");
+                procedure.Line("SET @ExecutionId = NULL;");
+                procedure.Line("SET @TaskId = NULL;");
+                procedure.Line("SET @ProgramId = NULL;");
+                procedure.Line("SET @HandlerName = NULL;");
+                procedure.Line("SET @RequestedProgramId = NULL;");
+                procedure.Line("SET @RequestedHandlerName = NULL;");
+                procedure.Line("SET @TaskValidated = 0;");
                 procedure.Line();
                 procedure.Line("BEGIN TRY");
                 using (procedure.Indent())
@@ -124,6 +138,29 @@ internal static class ServiceBrokerWorkerDispatcherSqlEmitter
                     procedure.Line("BEGIN");
                     using (procedure.Indent())
                     {
+                        procedure.Line("DECLARE @BrokerErrorXml XML;");
+                        procedure.Line("DECLARE @BrokerErrorCodeText NVARCHAR(32);");
+                        procedure.Line("DECLARE @BrokerErrorNumber INT;");
+                        procedure.Line("DECLARE @BrokerErrorMessage NVARCHAR(3000);");
+                        procedure.Line("SET @BrokerErrorXml = TRY_CONVERT(XML, @MessageBody);");
+                        procedure.Line("SET @BrokerErrorCodeText = NULL;");
+                        procedure.Line($"SET @BrokerErrorNumber = {BrokerDeliveryErrorNumber};");
+                        procedure.Line("SET @BrokerErrorMessage = NULL;");
+                        procedure.Line("IF @BrokerErrorXml IS NOT NULL");
+                        procedure.Line("BEGIN");
+                        using (procedure.Indent())
+                        {
+                            procedure.Line("SELECT");
+                            using (procedure.Indent())
+                            {
+                                procedure.Line("@BrokerErrorCodeText = @BrokerErrorXml.value('declare default element namespace \"http://schemas.microsoft.com/SQL/ServiceBroker/Error\"; string((/Error/Code/text())[1])', 'NVARCHAR(32)'),");
+                                procedure.Line("@BrokerErrorMessage = NULLIF(@BrokerErrorXml.value('declare default element namespace \"http://schemas.microsoft.com/SQL/ServiceBroker/Error\"; string((/Error/Description/text())[1])', 'NVARCHAR(3000)'), N'');");
+                            }
+                            procedure.Line($"SET @BrokerErrorNumber = COALESCE(TRY_CONVERT(INT, NULLIF(@BrokerErrorCodeText, N'')), {BrokerDeliveryErrorNumber});");
+                        }
+                        procedure.Line("END;");
+                        procedure.Line("SET @BrokerErrorMessage = COALESCE(@BrokerErrorMessage, N'Service Broker could not deliver a SharpSql worker request.');");
+                        procedure.Line();
                         procedure.Line("SELECT @ExecutionId = [ExecutionId], @TaskId = [TaskId], @HandlerName = [HandlerName]");
                         procedure.Line("FROM [SharpSql].[Tasks] WITH (UPDLOCK, HOLDLOCK)");
                         procedure.Line("WHERE [DispatchConversationHandle] = @ConversationHandle AND [State] = 2;");
@@ -138,8 +175,8 @@ internal static class ServiceBrokerWorkerDispatcherSqlEmitter
                                 procedure.Line("@ExecutionId = @ExecutionId,");
                                 procedure.Line("@TaskId = @TaskId,");
                                 procedure.Line("@State = 5,");
-                                procedure.Line($"@ErrorNumber = {BrokerDeliveryErrorNumber},");
-                                procedure.Line("@ErrorMessage = N'Service Broker could not deliver a SharpSql worker request.';");
+                                procedure.Line("@ErrorNumber = @BrokerErrorNumber,");
+                                procedure.Line("@ErrorMessage = @BrokerErrorMessage;");
                             }
                             procedure.Line("IF @HandlerName = N'__entry'");
                             using (procedure.Indent())
@@ -149,8 +186,8 @@ internal static class ServiceBrokerWorkerDispatcherSqlEmitter
                                 {
                                     procedure.Line("@ExecutionId = @ExecutionId,");
                                     procedure.Line("@State = 3,");
-                                    procedure.Line($"@ErrorNumber = {BrokerDeliveryErrorNumber},");
-                                    procedure.Line("@ErrorMessage = N'Service Broker could not deliver the SharpSql root task.';");
+                                    procedure.Line("@ErrorNumber = @BrokerErrorNumber,");
+                                    procedure.Line("@ErrorMessage = @BrokerErrorMessage;");
                                 }
                             }
                         }
@@ -227,7 +264,7 @@ internal static class ServiceBrokerWorkerDispatcherSqlEmitter
                     {
                         procedure.Line("IF @ConversationHandle IS NOT NULL");
                         using (procedure.Indent())
-                            procedure.Line($"END CONVERSATION @ConversationHandle WITH ERROR = {InvalidMessageErrorNumber} DESCRIPTION = N'SharpSql worker dispatch failed.';");
+                            procedure.Line($"END CONVERSATION @ConversationHandle WITH ERROR = {InvalidMessageErrorNumber} DESCRIPTION = @RouterErrorMessage;");
                     }
                     procedure.Line("END TRY");
                     procedure.Line("BEGIN CATCH");
