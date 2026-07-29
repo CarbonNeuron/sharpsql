@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text;
+using Docker.DotNet.Models;
+using DotNet.Testcontainers.Configurations;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Emit;
@@ -60,19 +62,17 @@ public sealed class TestcontainersParityRunner : IParityRunner
             return new ParityRunResult(csharp, new ParityOutcome(string.Empty, null), transpileResult.Sql);
 
         var containerBuilder = new MsSqlBuilder(request.SqlServerImage)
-            .WithLogger(NullLogger.Instance);
-        if (request.KeepContainer)
-        {
-            containerBuilder = containerBuilder
-                .WithReuse(true)
-                .WithLabel("io.sharpsql.verify.reusable", "true");
-        }
+            .WithLogger(NullLogger.Instance)
+            .WithReuse(true)
+            .WithLabel("io.sharpsql.verify.reusable", "true");
 
         var container = containerBuilder.Build();
+        string? containerId = null;
         try
         {
             reportStage?.Invoke(new ParityStageUpdate(ParityStage.StartingSqlServer));
             await container.StartAsync(cancellationToken);
+            containerId = container.Id;
             reportStage?.Invoke(new ParityStageUpdate(ParityStage.EvaluatingSqlServer));
             var sqlServer = await ExecuteSqlAsync(
                 transpileResult.Sql,
@@ -83,9 +83,20 @@ public sealed class TestcontainersParityRunner : IParityRunner
         }
         finally
         {
-            if (!request.KeepContainer)
-                await container.DisposeAsync();
+            if (!request.KeepContainer && containerId is not null)
+                await RemoveContainerAsync(containerId, CancellationToken.None);
         }
+    }
+
+    private static async Task RemoveContainerAsync(string containerId, CancellationToken cancellationToken)
+    {
+        using var dockerClient = TestcontainersSettings.OS.DockerEndpointAuthConfig
+            .GetDockerClientBuilder(Guid.Empty)
+            .Build();
+        await dockerClient.Containers.RemoveContainerAsync(
+            containerId,
+            new ContainerRemoveParameters { Force = true, RemoveVolumes = true },
+            cancellationToken);
     }
 
     private static async Task<ProjectCompilationResult> LoadCompilationAsync(

@@ -85,8 +85,9 @@ sharpsql verify path/to/MyProject.csproj \
 ```
 
 Add `--keep-container` to retain and reuse the matching SQL Server container on
-later verification runs. Without the option, each run removes its container at
-the end as usual. Retained containers are labeled
+later verification runs. Without the option, verification still reuses a
+matching retained container when one exists, then removes it at the end.
+Retained containers are labeled
 `io.sharpsql.verify.reusable=true` so they can be found or removed with Docker
 Desktop or the Docker CLI.
 
