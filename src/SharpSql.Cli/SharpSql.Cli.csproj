@@ -20,6 +20,7 @@
     <ProjectReference Include="../SharpSql.SqlServer/SharpSql.SqlServer.csproj" />
     <ProjectReference Include="../SharpSql/SharpSql.csproj" />
     <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <Compile Include="../../tests/SharpSql.ConformanceTests/ConformanceRunner.cs" Link="Conformance/ConformanceRunner.cs" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="SharpSql.Tests" />

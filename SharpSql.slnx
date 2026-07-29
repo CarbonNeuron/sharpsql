@@ -8,5 +8,6 @@
   <Project Path="src/SharpSql.SqlServer/SharpSql.SqlServer.csproj" />
   <Project Path="src/SharpSql.Cli/SharpSql.Cli.csproj" />
   <Project Path="tests/SharpSql.IntegrationTests/SharpSql.IntegrationTests.csproj" />
+  <Project Path="tests/SharpSql.ConformanceTests/SharpSql.ConformanceTests.csproj" />
   <Project Path="tests/SharpSql.Tests/SharpSql.Tests.csproj" />
 </Solution>

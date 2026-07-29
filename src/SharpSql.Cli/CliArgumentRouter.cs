@@ -5,6 +5,7 @@ public static class CliArgumentRouter
     private static readonly HashSet<string> RootArguments = new(StringComparer.OrdinalIgnoreCase)
     {
         "transpile",
+        "conformance",
         "init",
         "run",
         "verify",

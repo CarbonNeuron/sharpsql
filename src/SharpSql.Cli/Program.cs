@@ -14,6 +14,7 @@ app.Configure(configurator =>
     configurator.SetApplicationVersion(applicationVersion);
     configurator.ConfigureConsole(AnsiConsole.Console);
     configurator.AddCommand<InitCommand>("init").WithData(environment);
+    configurator.AddCommand<ConformanceCommand>("conformance").WithData(environment);
     configurator.AddCommand<RunCommand>("run").WithData(environment);
     configurator.AddCommand<TranspileCommand>("transpile").WithData(environment);
     configurator.AddCommand<VerifyCommand>("verify").WithData(environment);

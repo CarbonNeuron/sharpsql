@@ -13,3 +13,5 @@ coverage/
 *.suo
 .DS_Store
 Thumbs.db
+tests/conformance/mono-tests/
+tests/conformance/results.json
