@@ -422,9 +422,9 @@ public sealed partial class SharpSqlCompiler
             var field = heapType.Fields[constructor.TargetFields[index]];
             EmitVmExpression(arguments[index].Expression, scope, context, value =>
             {
-                var storage = AllocateVmTemporary(field.Type, context);
-                StoreVmTemporary(storage, value);
-                assignments.Add(new HeapValueAssignment(field, storage));
+                assignments.Add(new HeapValueAssignment(
+                    field,
+                    CaptureHeapValue(arguments[index].Expression, field.Type, value, scope, context)));
                 EvaluateConstructorArgument(index + 1);
             });
         }
@@ -447,10 +447,10 @@ public sealed partial class SharpSqlCompiler
 
             EmitVmExpression(initializer.Value, scope, context, value =>
             {
-                var storage = AllocateVmTemporary(field.Type, context);
-                StoreVmTemporary(storage, value);
                 assignments.RemoveAll(item => item.Field.Name == field.Name);
-                assignments.Add(new HeapValueAssignment(field, storage));
+                assignments.Add(new HeapValueAssignment(
+                    field,
+                    CaptureHeapValue(initializer.Value, field.Type, value, scope, context)));
                 EvaluateInitializers(index + 1, initializers);
             });
         }
@@ -467,11 +467,25 @@ public sealed partial class SharpSqlCompiler
             {
                 columns.Add(field.SqlName);
                 var assigned = assignments.LastOrDefault(item => item.Field.Name == field.Name);
-                values.Add(assigned is null ? DefaultSql(field.Type) : ReadVmTemporary(assigned.Value));
+                values.Add(assigned is null ? DefaultSql(field.Type) : assigned.ValueSql);
             }
             _sql.Line($"INSERT INTO {heapType.TableName} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", values)});");
             continuation(objectSql);
         }
+    }
+
+    private string CaptureHeapValue(
+        ExpressionSyntax expression,
+        IrType type,
+        string value,
+        VariableScope scope,
+        VmMethod? context)
+    {
+        if (AnalyzeExpression(expression, scope).HasConstantValue)
+            return value;
+        var storage = AllocateVmTemporary(type, context);
+        StoreVmTemporary(storage, value);
+        return ReadVmTemporary(storage);
     }
 
     private void EmitRecordWith(
@@ -489,6 +503,7 @@ public sealed partial class SharpSqlCompiler
         }
 
         var initializers = InitializerAssignments(expression.Initializer).ToArray();
+        var initializedFields = initializers.Select(initializer => initializer.Name).ToHashSet(StringComparer.Ordinal);
         var unknownMember = initializers.FirstOrDefault(initializer => !heapType.Fields.ContainsKey(initializer.Name));
         if (unknownMember != default)
         {
@@ -514,11 +529,16 @@ public sealed partial class SharpSqlCompiler
                 }
 
                 var field = heapType.Fields.Values.ElementAt(index);
+                if (initializedFields.Contains(field.Name))
+                {
+                    CaptureField(index + 1);
+                    return;
+                }
                 var storage = AllocateVmTemporary(field.Type, context);
                 StoreVmTemporary(
                     storage,
                     $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE __object_id = {savedReceiver})");
-                assignments.Add(new HeapValueAssignment(field, storage));
+                assignments.Add(new HeapValueAssignment(field, ReadVmTemporary(storage)));
                 CaptureField(index + 1);
             }
 
@@ -537,7 +557,7 @@ public sealed partial class SharpSqlCompiler
                     var storage = AllocateVmTemporary(field.Type, context);
                     StoreVmTemporary(storage, value);
                     assignments.RemoveAll(item => item.Field.Name == field.Name);
-                    assignments.Add(new HeapValueAssignment(field, storage));
+                    assignments.Add(new HeapValueAssignment(field, ReadVmTemporary(storage)));
                     EvaluateInitializer(index + 1);
                 });
             }
@@ -553,7 +573,7 @@ public sealed partial class SharpSqlCompiler
                 foreach (var field in heapType.Fields.Values)
                 {
                     columns.Add(field.SqlName);
-                    values.Add(ReadVmTemporary(assignments.Single(item => item.Field.Name == field.Name).Value));
+                    values.Add(assignments.Single(item => item.Field.Name == field.Name).ValueSql);
                 }
                 _sql.Line($"INSERT INTO {heapType.TableName} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", values)});");
                 continuation(objectSql);
@@ -570,7 +590,7 @@ public sealed partial class SharpSqlCompiler
     {
         var elementType = GenericArguments(typeName)[0];
         var items = creation.Initializer?.Expressions ?? default;
-        var captured = new List<VmTemporary>();
+        var captured = new List<string>();
         EvaluateItem(0);
 
         void EvaluateItem(int index)
@@ -582,9 +602,17 @@ public sealed partial class SharpSqlCompiler
             }
             EmitVmExpression(items[index], scope, context, value =>
             {
-                var storage = AllocateVmTemporary(elementType, context);
-                StoreVmTemporary(storage, value);
-                captured.Add(storage);
+                if (items[index] is BaseObjectCreationExpressionSyntax creation && IsHeapCreation(creation) ||
+                    items[index] is WithExpressionSyntax)
+                {
+                    captured.Add(value);
+                }
+                else
+                {
+                    var storage = AllocateVmTemporary(elementType, context);
+                    StoreVmTemporary(storage, value);
+                    captured.Add(ReadVmTemporary(storage));
+                }
                 EvaluateItem(index + 1);
             });
         }
@@ -595,7 +623,7 @@ public sealed partial class SharpSqlCompiler
             InsertListItems(
                 listSql,
                 elementType,
-                captured.Select(ReadVmTemporary).ToArray());
+                captured);
             if (captured.Count > 0)
                 _sql.Line($"UPDATE {HeapObjects} SET __count = {captured.Count} WHERE __id = {listSql};");
             continuation(listSql);
@@ -1347,5 +1375,5 @@ public sealed partial class SharpSqlCompiler
 
     private sealed record HeapField(string Name, IrType Type, string SqlName, SyntaxNode Syntax);
     private sealed record HeapConstructor(IReadOnlyList<string> TargetFields);
-    private sealed record HeapValueAssignment(HeapField Field, VmTemporary Value);
+    private sealed record HeapValueAssignment(HeapField Field, string ValueSql);
 }

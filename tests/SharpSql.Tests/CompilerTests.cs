@@ -405,8 +405,8 @@ public sealed class CompilerTests
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Equal(1, Count(result.Sql, "(__owner_id, __index, __reference_value) VALUES"));
         Assert.Equal(1, Count(result.Sql, "(__owner_id, __index, __value) VALUES"));
-        Assert.Contains("(@_object_4, 0, @_vm_temp_3),", result.Sql);
-        Assert.Contains("(@_object_4, 2, @_vm_temp_9);", result.Sql);
+        Assert.Contains("(@_object_4, 0, @_object),", result.Sql);
+        Assert.Contains("(@_object_4, 2, @_object_3);", result.Sql);
     }
 
     [Fact]
@@ -483,6 +483,24 @@ public sealed class CompilerTests
         Assert.DoesNotContain("#__sharpsql_randoms", result.Sql);
         Assert.DoesNotContain("#__sharpsql_random_state", result.Sql);
         Assert.DoesNotContain("RAND(", result.Sql);
+    }
+
+    [Fact]
+    public void TrimsUnreachableLargeRangeRandomBranches()
+    {
+        const string source = """
+            var random = new Random(42);
+            int maximum = 100;
+            int small = random.Next(0, maximum);
+            int knownSmall = random.Next(-10, 11);
+            int fullRange = random.Next(-2147483648, 2147483647);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Equal(1, Count(result.Sql, "DECLARE @_random_large_sample"));
+        Assert.Contains("% 55 + 1", result.Sql);
     }
 
     [Fact]

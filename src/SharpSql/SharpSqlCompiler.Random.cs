@@ -1,3 +1,4 @@
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
@@ -155,7 +156,7 @@ public sealed partial class SharpSqlCompiler
             return;
         }
 
-        var captured = new List<VmTemporary>();
+        var evaluatedArguments = new List<string>();
         EvaluateArgument(0);
 
         void EvaluateArgument(int argumentIndex)
@@ -168,9 +169,19 @@ public sealed partial class SharpSqlCompiler
 
             EmitVmExpression(arguments[argumentIndex].Expression, scope, context, value =>
             {
-                var storage = AllocateVmTemporary(IrType.Int, context);
-                StoreVmTemporary(storage, value);
-                captured.Add(storage);
+                var mustCapture = ContainsRuntimeExpression(arguments[argumentIndex].Expression) ||
+                                  arguments.Skip(argumentIndex + 1)
+                                      .Any(argument => ContainsRuntimeExpression(argument.Expression));
+                if (mustCapture)
+                {
+                    var storage = AllocateVmTemporary(IrType.Int, context);
+                    StoreVmTemporary(storage, value);
+                    evaluatedArguments.Add(ReadVmTemporary(storage));
+                }
+                else
+                {
+                    evaluatedArguments.Add(value);
+                }
                 EvaluateArgument(argumentIndex + 1);
             });
         }
@@ -178,12 +189,12 @@ public sealed partial class SharpSqlCompiler
         void EmitCall()
         {
             var random = EmitScalar(member.Expression, scope);
-            var firstArgument = captured.Count > 0 ? ReadVmTemporary(captured[0]) : null;
-            var secondArgument = captured.Count > 1 ? ReadVmTemporary(captured[1]) : null;
+            var firstArgument = evaluatedArguments.Count > 0 ? evaluatedArguments[0] : null;
+            var secondArgument = evaluatedArguments.Count > 1 ? evaluatedArguments[1] : null;
 
-            if (methodName == "Next" && captured.Count == 1)
+            if (methodName == "Next" && evaluatedArguments.Count == 1)
                 _sql.Line($"IF {firstArgument} < 0 THROW 51004, 'Random maximum must be non-negative.', 1;");
-            else if (methodName == "Next" && captured.Count == 2)
+            else if (methodName == "Next" && evaluatedArguments.Count == 2)
                 _sql.Line($"IF {firstArgument} > {secondArgument} THROW 51005, 'Random minimum must not exceed maximum.', 1;");
 
             var sample = EmitRandomSample(random);
@@ -195,23 +206,30 @@ public sealed partial class SharpSqlCompiler
                 return;
             }
 
-            if (captured.Count == 0)
+            if (evaluatedArguments.Count == 0)
             {
                 continuation(sample);
                 return;
             }
 
             var integerResult = _names.Allocate("_random_result");
-            _sql.Line($"DECLARE {integerResult} INT;");
-            if (captured.Count == 1)
+            if (evaluatedArguments.Count == 1)
             {
-                _sql.Line($"SET {integerResult} = CONVERT(INT, CONVERT(FLOAT, {sample}) * (CAST(1 AS FLOAT) / CAST({RandomMax} AS FLOAT)) * {firstArgument});");
+                _sql.Line($"DECLARE {integerResult} INT = CONVERT(INT, CONVERT(FLOAT, {sample}) * (CAST(1 AS FLOAT) / CAST({RandomMax} AS FLOAT)) * {firstArgument});");
                 continuation(integerResult);
                 return;
             }
 
             var range = _names.Allocate("_random_range");
             _sql.Line($"DECLARE {range} BIGINT = CONVERT(BIGINT, {secondArgument}) - CONVERT(BIGINT, {firstArgument});");
+            if (RandomRangeFitsInt32(arguments, scope))
+            {
+                _sql.Line($"DECLARE {integerResult} INT = CONVERT(INT, CONVERT(FLOAT, {sample}) * (CAST(1 AS FLOAT) / CAST({RandomMax} AS FLOAT)) * {range}) + {firstArgument};");
+                continuation(integerResult);
+                return;
+            }
+
+            _sql.Line($"DECLARE {integerResult} INT;");
             _sql.Line($"IF {range} <= {RandomMax}");
             _sql.Line($"    SET {integerResult} = CONVERT(INT, CONVERT(FLOAT, {sample}) * (CAST(1 AS FLOAT) / CAST({RandomMax} AS FLOAT)) * {range}) + {firstArgument};");
             _sql.Line("ELSE");
@@ -230,19 +248,46 @@ public sealed partial class SharpSqlCompiler
         }
     }
 
+    private bool RandomRangeFitsInt32(SeparatedSyntaxList<ArgumentSyntax> arguments, VariableScope scope)
+    {
+        if (arguments.Count != 2)
+            return false;
+        var hasMinimum = TryGetInt32Constant(arguments[0].Expression, scope, out var minimum);
+        var hasMaximum = TryGetInt32Constant(arguments[1].Expression, scope, out var maximum);
+        if (hasMinimum && hasMaximum)
+            return (long)maximum - minimum <= RandomMax;
+        return hasMinimum && minimum >= 0 || hasMaximum && maximum < 0;
+    }
+
+    private bool TryGetInt32Constant(ExpressionSyntax expression, VariableScope scope, out int value)
+    {
+        var facts = AnalyzeExpression(expression, scope);
+        if (facts.HasConstantValue && facts.ConstantValue is not null)
+        {
+            try
+            {
+                value = Convert.ToInt32(facts.ConstantValue, System.Globalization.CultureInfo.InvariantCulture);
+                return true;
+            }
+            catch (Exception exception) when (exception is FormatException or InvalidCastException or OverflowException)
+            {
+                // The argument is not an Int32 constant.
+            }
+        }
+        value = default;
+        return false;
+    }
+
     private string EmitRandomSample(string random)
     {
         var next = _names.Allocate("_random_inext");
         var nextPartner = _names.Allocate("_random_inextp");
         var sample = _names.Allocate("_random_sample");
-        _sql.Line($"DECLARE {next} INT = (SELECT __random_inext FROM {HeapObjects} WHERE __id = {random}) + 1;");
-        _sql.Line($"IF {next} >= 56 SET {next} = 1;");
-        _sql.Line($"DECLARE {nextPartner} INT = (SELECT __random_inextp FROM {HeapObjects} WHERE __id = {random}) + 1;");
-        _sql.Line($"IF {nextPartner} >= 56 SET {nextPartner} = 1;");
+        _sql.Line($"DECLARE {next} INT = (SELECT __random_inext FROM {HeapObjects} WHERE __id = {random}) % 55 + 1;");
+        _sql.Line($"DECLARE {nextPartner} INT = (SELECT __random_inextp FROM {HeapObjects} WHERE __id = {random}) % 55 + 1;");
         _sql.Line($"DECLARE {sample} BIGINT = CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = {next})) - CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = {nextPartner}));");
-        EmitInt32Wrap(sample);
-        _sql.Line($"IF {sample} = {RandomMax} SET {sample} = {sample} - 1;");
-        _sql.Line($"IF {sample} < 0 SET {sample} = {sample} + {RandomMax};");
+        _sql.Line($"SET {sample} = (({sample} + 2147483648) % 4294967296 + 4294967296) % 4294967296 - 2147483648;");
+        _sql.Line($"SET {sample} = CASE WHEN {sample} = {RandomMax} THEN {sample} - 1 WHEN {sample} < 0 THEN {sample} + {RandomMax} ELSE {sample} END;");
         _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {sample})) WHERE __owner_id = {random} AND __index = {next};");
         _sql.Line($"UPDATE {HeapObjects} SET __random_inext = {next}, __random_inextp = {nextPartner} WHERE __id = {random};");
         return sample;
