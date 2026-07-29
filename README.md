@@ -150,7 +150,7 @@ var result = await new SharpSqlProjectCompiler().TranspileAsync(
 - Classes and records with reference identity, typed fields, object initializers, mapped constructors, and instance methods
 - One-dimensional arrays and `List<T>` with indexing, mutation, iteration, and common operations
 - `Dictionary<TKey,TValue>` with indexing and common mutation/query operations
-- Relational LINQ over arrays and `List<T>`: filtering/projection, ordering/paging, distinct values, joins, grouped-key pipelines, aggregates, and element operators, plus ordered `Enumerable.Repeat` materialization
+- Relational LINQ over arrays, `List<T>`, and `Enumerable.Range`: filtering/projection, ordering/paging, distinct values, joins, grouped-key pipelines, aggregates, and element operators, plus ordered `ToList`/`ToArray` and `Enumerable.Repeat` materialization
 - Deferred query variables, managed `AsEnumerable`/`AsQueryable`, query syntax, stored/captured delegates, helper-method plan flow, LINQ `foreach`, and `ToList`/`ToArray` materialization
 - Stateful `Random` instances with `Next()`, bounded/ranged `Next(...)`, and `NextDouble()`
 - Roslyn semantic typing for `var`, generics, members, and expression results

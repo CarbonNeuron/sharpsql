@@ -120,6 +120,8 @@ public sealed partial class SharpSqlCompiler
             userMethod.PureExpression is not null &&
             IsLinqSequenceType(userMethod.ReturnType.Name))
             return true;
+        if (expression is InvocationExpressionSyntax invocation && IsEnumerableRangeInvocation(invocation))
+            return true;
         return expression is InvocationExpressionSyntax
         {
             Expression: MemberAccessExpressionSyntax
@@ -153,6 +155,10 @@ public sealed partial class SharpSqlCompiler
 
         if (expression is QueryExpressionSyntax queryExpression)
             return TryBuildQueryExpression(queryExpression, scope, substitutions, out query);
+
+        if (expression is InvocationExpressionSyntax rangeInvocation &&
+            TryBuildEnumerableRangeQuery(rangeInvocation, scope, substitutions, out query))
+            return true;
 
         if (expression is InvocationExpressionSyntax userInvocation &&
             _methods.TryGetValue(InvocationName(userInvocation.Expression) ?? string.Empty, out var userMethod) &&
@@ -211,6 +217,27 @@ public sealed partial class SharpSqlCompiler
                 Expression: MemberAccessExpressionSyntax member
             } invocation)
         {
+            if (IsLinqMaterialization(invocation))
+            {
+                string? collection = null;
+                if (!TryEmitLinqMaterialization(
+                        invocation,
+                        scope,
+                        context: null,
+                        value => collection = value,
+                        substitutions) ||
+                    collection is null)
+                {
+                    query = null!;
+                    return false;
+                }
+
+                var collectionType = InferType(invocation, scope, substitutions);
+                var itemType = SequenceElementType(collectionType.Name);
+                query = new SqlLinqQueryPlan(collection, itemType, itemType, []);
+                return true;
+            }
+
             var method = member.Name.Identifier.ValueText;
             if (method is "AsEnumerable" or "AsQueryable")
             {
@@ -363,6 +390,56 @@ public sealed partial class SharpSqlCompiler
 
         query = null!;
         return false;
+    }
+
+    private bool TryBuildEnumerableRangeQuery(
+        InvocationExpressionSyntax invocation,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out SqlLinqQueryPlan query)
+    {
+        if (!IsEnumerableRangeInvocation(invocation))
+        {
+            query = null!;
+            return false;
+        }
+
+        var arguments = invocation.ArgumentList.Arguments;
+        var start = _names.Allocate("_range_start");
+        var count = _names.Allocate("_range_count");
+        _sql.Line($"DECLARE {start} INT = {EmitScalar(arguments[0].Expression, scope, substitutions)};");
+        _sql.Line($"DECLARE {count} INT = {EmitScalar(arguments[1].Expression, scope, substitutions)};");
+        _sql.Line(
+            $"IF {count} < 0 OR ({count} > 0 AND CONVERT(BIGINT, {start}) + CONVERT(BIGINT, {count}) - 1 > 2147483647) " +
+            "THROW 51006, 'Enumerable.Range arguments are out of range.', 1;");
+
+        var collection = AllocateHeapHeader(1003, "__count", count);
+        var index = _names.Allocate("_range_index");
+        _sql.Line($"DECLARE {index} INT = 0;");
+        _sql.Line($"WHILE {index} < {count}");
+        _sql.Line("BEGIN");
+        using (_sql.Indent())
+        {
+            InsertListItem(collection, index, IrType.Int, $"{start} + {index}");
+            _sql.Line($"SET {index} = {index} + 1;");
+        }
+        _sql.Line("END;");
+
+        query = new SqlLinqQueryPlan(collection, IrType.Int, IrType.Int, []);
+        return true;
+    }
+
+    private bool IsEnumerableRangeInvocation(InvocationExpressionSyntax invocation)
+    {
+        if (invocation.ArgumentList.Arguments.Count != 2)
+            return false;
+        var method = SemanticModelFor(invocation)?.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+        return method is
+        {
+            Name: "Range",
+            ContainingType.Name: "Enumerable",
+            ContainingType.ContainingNamespace.Name: "Linq"
+        };
     }
 
     private bool TryBuildQueryExpression(
@@ -1066,7 +1143,8 @@ public sealed partial class SharpSqlCompiler
         ExpressionSyntax expression,
         VariableScope scope,
         VmMethod? context,
-        Action<string> continuation)
+        Action<string> continuation,
+        IReadOnlyDictionary<string, Substitution>? substitutions = null)
     {
         if (expression is not InvocationExpressionSyntax
             {
@@ -1079,7 +1157,7 @@ public sealed partial class SharpSqlCompiler
         if (TryEmitRepeatSelectMaterialization(member, scope, context, continuation))
             return true;
 
-        if (!TryBuildLinqQuery(member.Expression, scope, substitutions: null, out var query))
+        if (!TryBuildLinqQuery(member.Expression, scope, substitutions, out var query))
             return false;
         if (IsGroupingType(query.ElementType.Name))
         {
@@ -1091,7 +1169,7 @@ public sealed partial class SharpSqlCompiler
             return true;
         }
 
-        var querySql = RenderLinqQuery(query, scope, substitutions: null);
+        var querySql = RenderLinqQuery(query, scope, substitutions);
         var sourceAlias = NextLinqAlias("materialize");
         var collection = AllocateHeapHeader(
             member.Name.Identifier.ValueText == "ToList" ? 1001 : 1003,

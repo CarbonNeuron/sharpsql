@@ -75,7 +75,8 @@ public sealed partial class SharpSqlCompiler
             _heapRuntimeNeeded = true;
         }
 
-        if (sourceNodes.SelectMany(source => source.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()).Any(IsLinqMaterialization))
+        if (sourceNodes.SelectMany(source => source.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
+            .Any(invocation => IsLinqMaterialization(invocation) || IsEnumerableRangeInvocation(invocation)))
         {
             _usesLists = true;
             _heapRuntimeNeeded = true;
@@ -270,6 +271,7 @@ public sealed partial class SharpSqlCompiler
             _heapTypes.ContainsKey(InferType(withExpression.Expression, new VariableScope()).Name)) ||
         expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsRandomInvocation) ||
         expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsLinqMaterialization) ||
+        expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsEnumerableRangeInvocation) ||
         expression.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>().Any() ||
         expression.DescendantNodesAndSelf().OfType<ArrayCreationExpressionSyntax>()
             .Any(creation => creation.Type.ElementType.ToString() != "byte") ||

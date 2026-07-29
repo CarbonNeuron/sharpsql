@@ -707,6 +707,28 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void LowersRangeAndChainedLinqMaterialization()
+    {
+        const string source = """
+            var numbers = Enumerable.Range(1, 10);
+            var filtered = numbers.Where(x => x > 2).ToList().Take(2).ToList();
+            var sum = filtered.Sum();
+            var average = filtered.Average();
+            Console.WriteLine($"The sum of numbers is {sum}");
+            Console.WriteLine($"The average of numbers is {average}");
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("Enumerable.Range arguments are out of range.", result.Sql);
+        Assert.Contains("DECLARE @_range_index INT = 0;", result.Sql);
+        Assert.Equal(2, Count(result.Sql, "INT = @@ROWCOUNT;"));
+        Assert.Contains("SELECT SUM(", result.Sql);
+        Assert.Contains("SELECT AVG(", result.Sql);
+    }
+
+    [Fact]
     public void LowersAdvancedOrderingPagingJoinAndGroupingStages()
     {
         const string source = """
