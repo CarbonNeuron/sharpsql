@@ -23,6 +23,50 @@ internal sealed record MethodFlowSummary(
         new HashSet<string>(StringComparer.Ordinal));
 }
 
+[Flags]
+internal enum MethodEffects
+{
+    None = 0,
+    ReadsMutableState = 1 << 0,
+    WritesMutableState = 1 << 1,
+    Allocates = 1 << 2,
+    MayThrow = 1 << 3,
+    Nondeterministic = 1 << 4,
+    PerformsIo = 1 << 5,
+    InvokesUnknown = 1 << 6,
+    UsesRandom = 1 << 7
+}
+
+internal sealed record MethodBehaviorSummary(
+    MethodEffects Effects,
+    IReadOnlySet<int> MutatedParameters,
+    IReadOnlySet<int> EscapingParameters,
+    IReadOnlySet<int> ReturnedParameters,
+    bool ReturnsFreshReference,
+    bool ReturnsUnknownReference)
+{
+    private const MethodEffects ObservableEffects =
+        MethodEffects.WritesMutableState |
+        MethodEffects.Allocates |
+        MethodEffects.MayThrow |
+        MethodEffects.Nondeterministic |
+        MethodEffects.PerformsIo |
+        MethodEffects.InvokesUnknown;
+
+    public bool IsSideEffectFree => (Effects & ObservableEffects) == MethodEffects.None;
+
+    public bool IsDeterministic =>
+        (Effects & (MethodEffects.Nondeterministic | MethodEffects.InvokesUnknown)) == MethodEffects.None;
+
+    public static MethodBehaviorSummary Empty { get; } = new(
+        MethodEffects.None,
+        new HashSet<int>(),
+        new HashSet<int>(),
+        new HashSet<int>(),
+        ReturnsFreshReference: false,
+        ReturnsUnknownReference: false);
+}
+
 internal sealed record MethodDefinition(
     string Name,
     IrType ReturnType,
@@ -34,6 +78,7 @@ internal sealed record MethodDefinition(
     bool IsInstance = false)
 {
     public MethodFlowSummary Flow { get; init; } = MethodFlowSummary.Empty;
+    public MethodBehaviorSummary Behavior { get; init; } = MethodBehaviorSummary.Empty;
 
     public IrExpression? PureExpression => ExpressionBody ??
         (Body?.Statements is [ProceduralReturn { Expression: not null } statement]

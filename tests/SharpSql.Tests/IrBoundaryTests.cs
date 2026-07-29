@@ -89,4 +89,83 @@ public sealed class IrBoundaryTests
             return type.IsGenericType && type.GetGenericArguments().Any(ContainsRoslynType);
         }
     }
+
+    [Fact]
+    public void MethodBehaviorSummariesPropagateEffectsAliasesAndEscapes()
+    {
+        const string source = """
+            Console.WriteLine("analysis");
+            Box MutateAndReturn(Box value)
+            {
+                value.Value += 1;
+                return value;
+            }
+
+            Box Forward(Box value) => MutateAndReturn(value);
+            Box Choose(bool second, Box first, Box other)
+            {
+                Box result = first;
+                if (second)
+                    result = other;
+                return result;
+            }
+            Box Fresh() => new Box();
+            IEnumerable<int> Above(List<int> values, Box threshold) =>
+                values.Where(value => value > threshold.Value);
+            class Box { public int Value; }
+            """;
+        var compiler = new SharpSqlCompiler();
+
+        var result = compiler.Transpile(source);
+
+        var methods = Assert.IsType<IrProgram>(compiler.BoundProgram).Methods.ToDictionary(method => method.Name);
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        var mutation = methods["MutateAndReturn"].Behavior;
+        Assert.True(mutation.Effects.HasFlag(MethodEffects.ReadsMutableState));
+        Assert.True(mutation.Effects.HasFlag(MethodEffects.WritesMutableState));
+        Assert.Contains(0, mutation.MutatedParameters);
+        Assert.Contains(0, mutation.EscapingParameters);
+        Assert.Contains(0, mutation.ReturnedParameters);
+
+        var forwarded = methods["Forward"].Behavior;
+        Assert.True(forwarded.Effects.HasFlag(MethodEffects.WritesMutableState));
+        Assert.Contains(0, forwarded.MutatedParameters);
+        Assert.Contains(0, forwarded.EscapingParameters);
+        Assert.Contains(0, forwarded.ReturnedParameters);
+
+        var choice = methods["Choose"].Behavior;
+        Assert.Equal(new[] { 1, 2 }, choice.ReturnedParameters.Order());
+        Assert.Equal(new[] { 1, 2 }, choice.EscapingParameters.Order());
+
+        var fresh = methods["Fresh"].Behavior;
+        Assert.True(fresh.Effects.HasFlag(MethodEffects.Allocates));
+        Assert.True(fresh.ReturnsFreshReference);
+        Assert.Empty(fresh.ReturnedParameters);
+
+        var deferred = methods["Above"].Behavior;
+        Assert.True(deferred.Effects.HasFlag(MethodEffects.ReadsMutableState));
+        Assert.Equal(new[] { 0, 1 }, deferred.EscapingParameters.Order());
+        Assert.True(deferred.ReturnsUnknownReference);
+    }
+
+    [Fact]
+    public void RetainsDiscardedCallsThatMayThrowTransitively()
+    {
+        const string source = """
+            int Divide(int divisor) => 10 / divisor;
+            int Forward(int divisor) => Divide(divisor);
+            Forward(0);
+            """;
+        var compiler = new SharpSqlCompiler();
+
+        var result = compiler.Transpile(source);
+
+        var forward = Assert.IsType<IrProgram>(compiler.BoundProgram).Methods.Single(method => method.Name == "Forward");
+        Assert.True(
+            result.Success,
+            $"Effects: {forward.Behavior.Effects}{Environment.NewLine}" +
+            string.Join(Environment.NewLine, result.Diagnostics) + Environment.NewLine + result.Sql);
+        Assert.True(forward.Behavior.Effects.HasFlag(MethodEffects.MayThrow));
+        Assert.Contains("DECLARE @_discarded INT = 10 / 0;", result.Sql);
+    }
 }

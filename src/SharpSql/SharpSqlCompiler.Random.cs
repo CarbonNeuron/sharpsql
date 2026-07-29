@@ -37,10 +37,8 @@ public sealed partial class SharpSqlCompiler
         IsRandomType(InferType(member.Expression, new VariableScope()).Name) &&
         member.Name.Identifier.ValueText is "Next" or "NextDouble";
 
-    private bool MethodUsesRandom(MethodDefinition method) =>
-        CSharpSyntax<Microsoft.CodeAnalysis.SyntaxNode>(method.Source).DescendantNodesAndSelf()
-            .OfType<InvocationExpressionSyntax>()
-            .Any(IsRandomInvocation);
+    private static bool MethodUsesRandom(MethodDefinition method) =>
+        method.Behavior.Effects.HasFlag(MethodEffects.UsesRandom);
 
     private void EmitNewRandom(
         BaseObjectCreationExpressionSyntax creation,

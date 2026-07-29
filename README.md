@@ -268,10 +268,10 @@ The first typed-IR and data-flow phase is complete:
 - Roslyn constant-flow facts used during predicate lowering
 - Definite-assignment, use-before-declaration, missing-return, and out-parameter preflight diagnostics
 - Reusable method summaries for endpoint reachability, statement cost, reads, writes, and captures
+- Conservative fixed-point method effects with parameter mutation, escape, returned-alias, and fresh-reference summaries
 
 ### Broader missing layers
 
-- Extend method summaries with interprocedural alias, escape, and side-effect analysis
 - Constructor bodies, inheritance, interfaces, and virtual dispatch
 - General-purpose delegate invocation outside LINQ, iterators, and async-state-machine diagnostics
 - Exceptions and structured unwinding across VM frames

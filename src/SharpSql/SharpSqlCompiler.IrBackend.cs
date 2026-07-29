@@ -92,6 +92,20 @@ public sealed partial class SharpSqlCompiler
             EmitVmExpression(expression, scope, null, _ => { });
             return;
         }
+        if (expression is IrInvocationExpression discardedCall &&
+            _methods.TryGetValue(discardedCall.MethodName ?? string.Empty, out var discardedMethod))
+        {
+            var invocation = CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>(discardedCall.Source);
+            if (discardedMethod.Behavior.IsSideEffectFree && InvocationInputsAreDiscardable(invocation))
+                return;
+
+            if (discardedMethod.ReturnType.Name != "void" && discardedMethod.PureExpression is not null)
+            {
+                var discarded = _names.Allocate("_discarded");
+                _sql.Line($"DECLARE {discarded} {discardedMethod.ReturnType.SqlType()} = {EmitScalar(discardedCall, scope)};");
+                return;
+            }
+        }
 
         switch (expression)
         {

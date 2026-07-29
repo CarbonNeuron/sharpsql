@@ -108,6 +108,7 @@ public sealed partial class SharpSqlCompiler
         var compilationSources = topLevelStatements.Cast<SyntaxNode>().Concat(reachableMethods).ToArray();
         foreach (var root in roots)
             CollectMethods(root, selectedEntryPoint, reachableMethods);
+        AnalyzeMethodBehaviors();
         CountCalls(compilationSources);
         FindRecursion();
         PrepareVmMethods();
@@ -191,9 +192,10 @@ public sealed partial class SharpSqlCompiler
             return new SharpSqlCompiler().Transpile(program, options);
         _used = true;
         _options = options ?? new TranspileOptions();
-        _boundProgram = program;
         foreach (var method in program.Methods)
             _methods.TryAdd(method.Name, method);
+        AnalyzeMethodBehaviors();
+        _boundProgram = program with { Methods = _methods.Values.ToArray() };
 
         EmitIrComments(program.FileComments);
         if (_options.EmitNoCount)
@@ -725,8 +727,19 @@ public sealed partial class SharpSqlCompiler
                 return;
             }
 
-            if (_methods.ContainsKey(InvocationName(invocation.Expression) ?? string.Empty))
-                return; // A pure, side-effect-free result can be discarded.
+            if (_methods.TryGetValue(InvocationName(invocation.Expression) ?? string.Empty, out var discardedMethod))
+            {
+                if (discardedMethod.Behavior.IsSideEffectFree &&
+                    InvocationInputsAreDiscardable(invocation))
+                    return;
+
+                if (discardedMethod.ReturnType.Name != "void" && discardedMethod.PureExpression is not null)
+                {
+                    var discarded = _names.Allocate("_discarded");
+                    _sql.Line($"DECLARE {discarded} {discardedMethod.ReturnType.SqlType()} = {EmitScalar(invocation, scope)};");
+                    return;
+                }
+            }
         }
 
         foreach (var line in MutationLines(expression, scope))
@@ -1572,6 +1585,38 @@ public sealed partial class SharpSqlCompiler
         MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText,
         _ => null
     };
+
+    private bool InvocationInputsAreDiscardable(InvocationExpressionSyntax invocation)
+    {
+        if (invocation.Expression is MemberAccessExpressionSyntax member &&
+            !ExpressionIsDiscardable(member.Expression))
+            return false;
+        return invocation.ArgumentList.Arguments.All(argument => ExpressionIsDiscardable(argument.Expression));
+    }
+
+    private bool ExpressionIsDiscardable(ExpressionSyntax expression)
+    {
+        expression = StripParentheses(expression);
+        return expression switch
+        {
+            LiteralExpressionSyntax or IdentifierNameSyntax or ThisExpressionSyntax => true,
+            CastExpressionSyntax cast => ExpressionIsDiscardable(cast.Expression),
+            PrefixUnaryExpressionSyntax prefix when prefix.Kind() is not (
+                SyntaxKind.PreIncrementExpression or SyntaxKind.PreDecrementExpression) =>
+                ExpressionIsDiscardable(prefix.Operand),
+            BinaryExpressionSyntax binary when binary.Kind() is not (
+                SyntaxKind.DivideExpression or SyntaxKind.ModuloExpression) =>
+                ExpressionIsDiscardable(binary.Left) && ExpressionIsDiscardable(binary.Right),
+            ConditionalExpressionSyntax conditional =>
+                ExpressionIsDiscardable(conditional.Condition) &&
+                ExpressionIsDiscardable(conditional.WhenTrue) &&
+                ExpressionIsDiscardable(conditional.WhenFalse),
+            InvocationExpressionSyntax nested when
+                _methods.TryGetValue(InvocationName(nested.Expression) ?? string.Empty, out var method) =>
+                method.Behavior.IsSideEffectFree && InvocationInputsAreDiscardable(nested),
+            _ => false
+        };
+    }
 
     private static ExpressionSyntax StripParentheses(ExpressionSyntax expression)
     {
