@@ -261,6 +261,9 @@ public sealed class AsyncStateMachinePlanTests
         Assert.Contains("EXEC [SharpSql].[RegisterTaskDependency]", result.Sql);
         Assert.Contains("INNER JOIN [SharpSql].[Tasks]", result.Sql);
         Assert.Contains("EXEC [SharpSql].[AppendOutput]", result.Sql);
+        Assert.Contains("IF DATALENGTH(@__sharpsql_output_text) <= 4000", result.Sql);
+        Assert.Contains("RAISERROR(N'%s', 0, 1, @__sharpsql_output_text) WITH NOWAIT;", result.Sql);
+        Assert.Contains("PRINT @__sharpsql_output_text;", result.Sql);
         Assert.Contains("ERROR_NUMBER()", result.Sql);
         Assert.Contains("= 51012", result.Sql);
         Assert.Contains("IF XACT_STATE() <> 1 THROW;", result.Sql);

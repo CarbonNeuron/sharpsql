@@ -191,6 +191,26 @@ appsettings, user secrets, and `ConnectionStrings__Development`. Set
 override a configured connection. Generated `.sql` files can also be executed
 directly with `sharpsql run generated.sql`.
 
+`run` streams ordinary SQL informational output as it arrives. Service Broker
+lines above 2,000 UTF-16 code units retain SQL Server's larger buffered `PRINT`
+fallback. Add `--debug` for the
+actual SQL plan and SharpSql heap counters, `--profile` for one warm-up and
+three measured SQL runs, and `--output` to retain the generated program SQL:
+
+```bash
+sharpsql run path/to/MyApp.csproj \
+  --runtime-storage ServiceBroker \
+  --debug --profile \
+  --output out.sql
+```
+
+Only the warm-up output is streamed during profiling; measured and debug-only
+repeats are silent, so program output is shown once. For Service Broker programs,
+`--output out.sql` also writes the standalone,
+idempotent runtime installer to `out.installer.sql`. Use `--installer-output` to
+select another path. The installer intentionally does not enable Service Broker
+at the database level.
+
 Set `SharpSqlGenerateOnBuild` to `false` for IDE/build diagnostics without SQL
 generation, `SharpSqlEnableAnalyzer` to `false` to disable live diagnostics, or
 `SharpSqlEnabled` to `false` to disable both integrations. Standard Roslyn
@@ -213,6 +233,9 @@ Compile to a file:
 ```bash
 dotnet run --project src/SharpSql.Cli -- examples/objects.cs -o objects.sql
 ```
+
+When `--runtime-storage ServiceBroker` is selected, this also writes the
+standalone runtime installer beside the program as `objects.installer.sql`.
 
 Verify a source file by running it as C# locally and running its generated SQL
 against an ephemeral SQL Server 2022 container, then comparing console output

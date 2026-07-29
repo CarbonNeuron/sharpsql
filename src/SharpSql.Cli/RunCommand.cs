@@ -67,6 +67,22 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [DefaultValue(RuntimeStorageKind.Ephemeral)]
         public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;
 
+        [CommandOption("-o|--output <OUTPUT>")]
+        [Description("Write the generated program SQL to a file before reporting the result.")]
+        public string? OutputPath { get; init; }
+
+        [CommandOption("--installer-output <OUTPUT>")]
+        [Description("Write the standalone Service Broker installer SQL to this file.")]
+        public string? InstallerOutputPath { get; init; }
+
+        [CommandOption("--debug")]
+        [Description("Show SQL plan and live SharpSql heap diagnostics.")]
+        public bool Debug { get; init; }
+
+        [CommandOption("--profile")]
+        [Description("Warm up and repeatedly measure SQL execution.")]
+        public bool Profile { get; init; }
+
         public override ValidationResult Validate()
         {
             if (KeepContainer && RemoveContainer)
@@ -82,6 +98,18 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 return ValidationResult.Error("--database cannot be empty.");
             if (CommandTimeoutSeconds <= 0)
                 return ValidationResult.Error("--timeout must be greater than zero.");
+            if (string.IsNullOrWhiteSpace(OutputPath) && OutputPath is not null)
+                return ValidationResult.Error("--output cannot be empty.");
+            if (string.IsNullOrWhiteSpace(InstallerOutputPath) && InstallerOutputPath is not null)
+                return ValidationResult.Error("--installer-output cannot be empty.");
+            if (InstallerOutputPath is not null && RuntimeStorage != RuntimeStorageKind.ServiceBroker)
+                return ValidationResult.Error("--installer-output requires --runtime-storage ServiceBroker.");
+            if (OutputPath is not null && InstallerOutputPath is not null &&
+                string.Equals(
+                    Path.GetFullPath(OutputPath),
+                    Path.GetFullPath(InstallerOutputPath),
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                return ValidationResult.Error("--output and --installer-output must use different files.");
             return ValidationResult.Success();
         }
     }
@@ -119,6 +147,10 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         var projectSettings = isProject
             ? SharpSqlRunProjectSettings.Load(inputPath)
             : SharpSqlRunProjectSettings.Default;
+        var artifactPaths = SqlOutputArtifacts.ResolvePaths(
+            settings.OutputPath,
+            settings.InstallerOutputPath,
+            settings.RuntimeStorage);
         var keepContainer = settings.KeepContainer ||
                             (!settings.RemoveContainer && projectSettings.KeepContainer);
         var request = new SqlRunRequest(
@@ -134,13 +166,20 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             settings.SqlServerImage ?? projectSettings.SqlServerImage,
             settings.DatabaseName ?? projectSettings.DatabaseName,
             settings.CommandTimeoutSeconds ?? projectSettings.CommandTimeoutSeconds,
-            settings.RuntimeStorage);
+            settings.RuntimeStorage,
+            settings.Debug,
+            settings.Profile,
+            artifactPaths.ProgramPath,
+            artifactPaths.InstallerPath);
 
         SqlRunResult result;
         try
         {
             result = await (environment.SqlRunService ?? new SqlRunService())
-                .RunAsync(request, cancellationToken);
+                .RunAsync(
+                    request,
+                    message => environment.Console.WriteLine(message),
+                    cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -151,8 +190,9 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 
         foreach (var diagnostic in result.Diagnostics)
             environment.Console.WriteLine(diagnostic.ToString());
-        foreach (var message in result.Messages)
-            environment.Console.WriteLine(message);
+        RenderDebugDiagnostics(environment.Console, result);
+        RenderProfile(environment.Console, result.Profile);
+        RenderArtifactPaths(environment.Console, artifactPaths, result);
         if (!result.Success)
         {
             if (result.ErrorMessage is not null)
@@ -170,6 +210,23 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         return 0;
     }
 
+    private static void RenderArtifactPaths(
+        IAnsiConsole console,
+        SqlOutputArtifactPaths artifactPaths,
+        SqlRunResult result)
+    {
+        if (artifactPaths.ProgramPath is not null && result.GeneratedSql is not null)
+        {
+            console.MarkupLine(
+                $"[grey]Program SQL: {Markup.Escape(Path.GetFullPath(artifactPaths.ProgramPath))}[/]");
+        }
+        if (artifactPaths.InstallerPath is not null && result.InstallerSql is not null)
+        {
+            console.MarkupLine(
+                $"[grey]Installer SQL: {Markup.Escape(Path.GetFullPath(artifactPaths.InstallerPath))}[/]");
+        }
+    }
+
     private static string ResolveInput(string? requestedPath)
     {
         if (requestedPath is null || Directory.Exists(requestedPath))
@@ -179,6 +236,67 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             throw new ProjectInitializationException($"Input file was not found: {path}");
         return path;
     }
+
+    private static void RenderDebugDiagnostics(IAnsiConsole console, SqlRunResult result)
+    {
+        if (result.DebugInfo is not { } debug)
+            return;
+
+        console.MarkupLine("[blue]Debug diagnostics[/]");
+        console.MarkupLine(
+            $"  Plan: [yellow]{debug.PlanOperatorCount:N0} operators[/], " +
+            $"{debug.PlanStatementCount:N0} statements, maximum depth {debug.MaximumPlanDepth:N0}");
+        console.MarkupLine(
+            $"  Estimate: subtree cost {debug.EstimatedSubtreeCost:0.####}, " +
+            $"compile {debug.CompileTimeMilliseconds:N0} ms, " +
+            $"compile memory {debug.CompileMemoryKilobytes:N0} KB");
+        if (debug.HeapDiagnosticsObserved)
+        {
+            console.MarkupLine(
+                $"  Heap now: [yellow]{debug.HeapObjectsAllocated:N0} objects[/], " +
+                $"{debug.IndexedItemsAllocated:N0} indexed items, " +
+                $"{debug.DictionaryEntriesAllocated:N0} dictionary entries");
+        }
+        else
+        {
+            console.MarkupLine("  Heap now: [grey]not reported by this SQL batch[/]");
+        }
+        if (result.GeneratedSql is not null)
+        {
+            console.MarkupLine(
+                $"  Generated SQL: {ParityRunResult.CountLines(result.GeneratedSql):N0} lines, " +
+                $"{result.GeneratedSql.Length:N0} characters");
+        }
+    }
+
+    private static void RenderProfile(IAnsiConsole console, SqlRunProfile? profile)
+    {
+        if (profile is null)
+            return;
+
+        console.MarkupLine(
+            $"[blue]Profile[/] [grey]({profile.WarmupRuns} warm-up, " +
+            $"{profile.SqlServerSamples.Count} measured runs)[/]");
+        if (profile.SqlServerSamples.Count == 0)
+        {
+            console.MarkupLine("  SQL Server: [grey]no successful samples[/]");
+            return;
+        }
+
+        var ordered = profile.SqlServerSamples.Order().ToArray();
+        var median = ordered.Length % 2 == 1
+            ? ordered[ordered.Length / 2]
+            : TimeSpan.FromTicks((ordered[ordered.Length / 2 - 1].Ticks + ordered[ordered.Length / 2].Ticks) / 2);
+        console.MarkupLine(
+            $"  SQL Server: [yellow]{FormatDuration(median)} median[/] " +
+            $"[grey]({FormatDuration(ordered[0])}–{FormatDuration(ordered[^1])})[/]");
+    }
+
+    private static string FormatDuration(TimeSpan elapsed) => elapsed.TotalSeconds < 1
+        ? $"{elapsed.TotalMilliseconds:0} ms"
+        : elapsed.TotalMinutes < 1
+            ? $"{elapsed.TotalSeconds:0.00} s"
+            : $"{(int)elapsed.TotalMinutes}:{elapsed.Seconds:00}.{elapsed.Milliseconds / 10:00}";
 }
 
 internal sealed record SharpSqlRunProjectSettings(

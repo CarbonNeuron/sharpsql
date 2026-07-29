@@ -429,6 +429,53 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
     }
 
     [Fact]
+    public async Task StreamsOutputBeforeTheAsyncExecutionCompletes()
+    {
+        await using var connection = await OpenBrokerDatabaseAsync();
+        await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
+
+        const string source = """
+            var values = new List<int> { 1 };
+            Console.WriteLine("started 100%");
+            var tasks = values.Select(Work).ToList();
+            await Task.WhenAll(tasks);
+            Console.WriteLine("finished");
+
+            async Task<int> Work(int value)
+            {
+                await Task.Delay(2000);
+                return value;
+            }
+            """;
+        var compilation = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions { RuntimeStorage = RuntimeStorageKind.ServiceBroker });
+        Assert.True(compilation.Success, string.Join(Environment.NewLine, compilation.Diagnostics));
+
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnInfoMessage(object sender, SqlInfoMessageEventArgs args)
+        {
+            if (args.Errors.Cast<SqlError>().Any(error => error.Class == 0 && error.Message == "started 100%"))
+                started.TrySetResult();
+        }
+
+        connection.InfoMessage += OnInfoMessage;
+        Task execution;
+        try
+        {
+            execution = ExecuteAsync(connection, compilation.Sql, 120);
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Assert.False(execution.IsCompleted, "The async execution completed before its first output was streamed.");
+            await execution;
+        }
+        finally
+        {
+            connection.InfoMessage -= OnInfoMessage;
+        }
+        await AssertExecutionsCleanedUpAsync(connection);
+    }
+
+    [Fact]
     public async Task ExecutesForkJoinDelaysCatchAndWorkerOutputEndToEnd()
     {
         await using var connection = await OpenBrokerDatabaseAsync();

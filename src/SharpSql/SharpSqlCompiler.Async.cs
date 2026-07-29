@@ -742,7 +742,15 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("SELECT TOP (1) @__sharpsql_next_output_sequence = [SequenceNumber], @__sharpsql_output_text = [OutputText]");
             _sql.Line($"FROM [SharpSql].[OutputEvents] WHERE [ExecutionId] = {RuntimeExecutionId} AND [SequenceNumber] > @__sharpsql_output_sequence ORDER BY [SequenceNumber];");
             _sql.Line("IF @__sharpsql_next_output_sequence IS NULL BREAK;");
-            _sql.Line("PRINT @__sharpsql_output_text;");
+            // PRINT can buffer several kilobytes before sending an InfoMessage. A constant
+            // format string keeps user '%' characters safe while NOWAIT streams ordinary
+            // lines. Keep PRINT's larger payload limit rather than truncating long lines.
+            _sql.Line("IF DATALENGTH(@__sharpsql_output_text) <= 4000");
+            using (_sql.Indent())
+                _sql.Line("RAISERROR(N'%s', 0, 1, @__sharpsql_output_text) WITH NOWAIT;");
+            _sql.Line("ELSE");
+            using (_sql.Indent())
+                _sql.Line("PRINT @__sharpsql_output_text;");
             _sql.Line("SET @__sharpsql_output_sequence = @__sharpsql_next_output_sequence;");
         }
         _sql.Line("END;");

@@ -152,6 +152,33 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task WritesServiceBrokerProgramAndInstallerToSeparateFiles()
+    {
+        var tester = CreateTester("Console.WriteLine(42);");
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-{Guid.NewGuid():N}.sql");
+        var installerPath = SqlOutputArtifacts.DefaultInstallerPath(outputPath);
+        try
+        {
+            var result = await tester.RunAsync(
+                ["--runtime-storage", "ServiceBroker", "--output", outputPath],
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Contains(
+                "PRINT",
+                await File.ReadAllTextAsync(outputPath, TestContext.Current.CancellationToken));
+            var installer = await File.ReadAllTextAsync(installerPath, TestContext.Current.CancellationToken);
+            Assert.Contains("CREATE QUEUE [SharpSql].[WorkerQueue]", installer);
+            Assert.Contains("PROCEDURE_NAME = [SharpSql].[DispatchWorker]", installer);
+        }
+        finally
+        {
+            File.Delete(outputPath);
+            File.Delete(installerPath);
+        }
+    }
+
+    [Fact]
     public async Task RendersGeneratedSpectreHelp()
     {
         var tester = CreateRoutedTester();
@@ -644,17 +671,60 @@ public sealed class CliTests
     }
 
     [Fact]
-    public void SqlRunServiceProvisionsServiceBrokerBeforeExecutingTheProgram()
+    public async Task RunStreamsOnceAndRendersDebugProfileAndSavedArtifacts()
     {
-        const string sql = "PRINT N'program';";
+        using var project = TemporaryProject.Create("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <OutputType>Exe</OutputType>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+        var outputPath = Path.Combine(project.DirectoryPath, "out.sql");
+        var installerPath = SqlOutputArtifacts.DefaultInstallerPath(outputPath);
+        var service = new StubSqlRunService(new SqlRunResult(
+            true,
+            "container abc",
+            ["live output"],
+            [],
+            ContainerKept: false,
+            GeneratedSql: "PRINT N'program';",
+            InstallerSql: "CREATE QUEUE [SharpSql].[WorkerQueue];",
+            DebugInfo: new SharpSql.SqlServer.SqlBatchDebugInfo(2, 12, 3, 1.25, 4, 512, 7, 8, 9, true),
+            Profile: new SqlRunProfile(
+                1,
+                [TimeSpan.FromMilliseconds(4), TimeSpan.FromMilliseconds(6), TimeSpan.FromMilliseconds(5)])));
+        var tester = CreateRoutedTester(sqlRunService: service);
 
-        var batches = SqlRunService.CreateExecutionBatches(RuntimeStorageKind.ServiceBroker, sql);
+        var result = await tester.RunAsync(
+            CliArgumentRouter.Route([
+                "run", project.ProjectPath,
+                "--runtime-storage", "ServiceBroker",
+                "--output", outputPath,
+                "--debug",
+                "--profile"
+            ]),
+            TestContext.Current.CancellationToken);
 
-        Assert.Equal(2, batches.Count);
-        Assert.Contains("CREATE QUEUE [SharpSql].[WorkerQueue]", batches[0]);
-        Assert.Contains("PROCEDURE_NAME = [SharpSql].[DispatchWorker]", batches[0]);
-        Assert.Equal(sql, batches[1]);
-        Assert.Equal([sql], SqlRunService.CreateExecutionBatches(RuntimeStorageKind.Ephemeral, sql));
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(1, result.Output.Split("live output", StringSplitOptions.None).Length - 1);
+        Assert.Contains("Debug diagnostics", result.Output);
+        Assert.Contains("12 operators", result.Output);
+        Assert.Contains("Profile", result.Output);
+        Assert.Contains("5 ms median", result.Output);
+        Assert.Contains("Program SQL:", result.Output);
+        Assert.Contains("Installer SQL:", result.Output);
+        Assert.Equal("PRINT N'program';", await File.ReadAllTextAsync(outputPath, TestContext.Current.CancellationToken));
+        Assert.Contains(
+            "CREATE QUEUE [SharpSql].[WorkerQueue]",
+            await File.ReadAllTextAsync(installerPath, TestContext.Current.CancellationToken));
+        var request = Assert.IsType<SqlRunRequest>(service.LastRequest);
+        Assert.True(request.Debug);
+        Assert.True(request.Profile);
+        Assert.Equal(RuntimeStorageKind.ServiceBroker, request.RuntimeStorage);
+        Assert.Equal(outputPath, request.OutputPath);
+        Assert.Equal(installerPath, request.InstallerOutputPath);
     }
 
     [Theory]
@@ -734,10 +804,18 @@ public sealed class CliTests
     {
         public SqlRunRequest? LastRequest { get; private set; }
 
-        public Task<SqlRunResult> RunAsync(SqlRunRequest request, CancellationToken cancellationToken)
+        public async Task<SqlRunResult> RunAsync(SqlRunRequest request, CancellationToken cancellationToken)
         {
             LastRequest = request;
-            return Task.FromResult(result);
+            await SqlOutputArtifacts.WriteAsync(
+                SqlOutputArtifacts.ResolvePaths(
+                    request.OutputPath,
+                    request.InstallerOutputPath,
+                    request.RuntimeStorage),
+                result.GeneratedSql,
+                result.InstallerSql,
+                cancellationToken);
+            return result;
         }
     }
 

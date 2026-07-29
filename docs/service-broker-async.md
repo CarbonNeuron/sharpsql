@@ -54,6 +54,11 @@ drains committed events and emits them on its connection. Writes within one task
 ordered. Timer continuations are currently serialized within one execution; output
 ordering between different executions remains scheduler-dependent.
 
+The CLI receives ordinary output lines with `NOWAIT`, so they are visible while the
+execution is still running. Lines above 2,000 UTF-16 code units retain the larger
+buffered `PRINT` path rather than being truncated by SQL Server's informational-error
+limit.
+
 ## Provisioning
 
 The infrastructure script is available programmatically:
@@ -67,6 +72,12 @@ database permissions to create a schema, tables, procedures, message types, queu
 contracts, services, and the activated dispatcher; it intentionally does not run
 `ALTER DATABASE ... ENABLE_BROKER`. Run provisioning as a standalone batch rather
 than inside an existing transaction.
+
+The CLI keeps that deployment boundary explicit. Transpiling or running with
+`--runtime-storage ServiceBroker --output out.sql` writes the program to `out.sql`
+and the idempotent standalone installer to `out.installer.sql`. Override the latter
+with `--installer-output`. `run` executes the installer once before the program and
+excludes installation and container startup from `--profile` measurements.
 
 The dispatcher accepts only 32-character hexadecimal compiler program IDs and maps
 them to `[SharpSql].[Program_<hash>]`; message data cannot supply an arbitrary
@@ -96,7 +107,10 @@ For a `SharpSql.Sdk` project, use the matching MSBuild property:
 `ServiceBroker`. The SDK passes it to the analyzer and build host, and
 `SharpSqlRun` provisions the infrastructure as a separate batch before running
 the generated program SQL. The CLI exposes the same choice as
-`--runtime-storage ServiceBroker` for `transpile` and `run`.
+`--runtime-storage ServiceBroker` for `transpile` and `run`. The `run` command also
+supports live output, `--debug`, `--profile`, and `--output` without requiring the
+C# side of a parity run. Profile timings cover the end-to-end execution, including
+activated workers; plan diagnostics cover statements observed on the launcher session.
 
 The executable first slice includes:
 

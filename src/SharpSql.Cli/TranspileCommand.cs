@@ -4,7 +4,7 @@ using Spectre.Console.Cli;
 
 namespace SharpSql.Cli;
 
-[Description("Transpile a C# source file or SDK-style project into a self-contained T-SQL batch.")]
+[Description("Transpile a C# source file or SDK-style project into a T-SQL program batch.")]
 public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
 {
     public sealed class Settings : CommandSettings
@@ -16,6 +16,10 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         [CommandOption("-o|--output <OUTPUT>")]
         [Description("Write generated SQL to a file instead of standard output.")]
         public string? OutputPath { get; init; }
+
+        [CommandOption("--installer-output <OUTPUT>")]
+        [Description("Write the standalone Service Broker installer SQL to this file.")]
+        public string? InstallerOutputPath { get; init; }
 
         [CommandOption("--entry <METHOD>")]
         [Description("Project entry method in Namespace.Type::Method form.")]
@@ -44,6 +48,18 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
                 return ValidationResult.Error("--framework is supported only for .csproj inputs.");
             if (InputPath is not null && !File.Exists(InputPath))
                 return ValidationResult.Error($"Input file was not found: {InputPath}");
+            if (string.IsNullOrWhiteSpace(OutputPath) && OutputPath is not null)
+                return ValidationResult.Error("--output cannot be empty.");
+            if (string.IsNullOrWhiteSpace(InstallerOutputPath) && InstallerOutputPath is not null)
+                return ValidationResult.Error("--installer-output cannot be empty.");
+            if (InstallerOutputPath is not null && RuntimeStorage != RuntimeStorageKind.ServiceBroker)
+                return ValidationResult.Error("--installer-output requires --runtime-storage ServiceBroker.");
+            if (OutputPath is not null && InstallerOutputPath is not null &&
+                string.Equals(
+                    Path.GetFullPath(OutputPath),
+                    Path.GetFullPath(InstallerOutputPath),
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                return ValidationResult.Error("--output and --installer-output must use different files.");
             return ValidationResult.Success();
         }
     }
@@ -90,15 +106,31 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         if (!result.Success)
             return 1;
 
-        if (settings.OutputPath is null)
+        var artifactPaths = SqlOutputArtifacts.ResolvePaths(
+            settings.OutputPath,
+            settings.InstallerOutputPath,
+            settings.RuntimeStorage);
+        if (artifactPaths.ProgramPath is null)
         {
             if (environment.Output is null)
                 environment.Console.Write(new Text(result.Sql));
             else
                 await environment.Output.WriteAsync(result.Sql.AsMemory(), cancellationToken);
         }
-        else
-            await File.WriteAllTextAsync(settings.OutputPath, result.Sql, cancellationToken);
+        await SqlOutputArtifacts.WriteAsync(
+            artifactPaths,
+            result.Sql,
+            settings.RuntimeStorage == RuntimeStorageKind.ServiceBroker
+                ? SharpSqlServiceBrokerRuntime.GenerateProvisioningSql()
+                : null,
+            cancellationToken);
+        if (settings.RuntimeStorage == RuntimeStorageKind.ServiceBroker && artifactPaths.InstallerPath is null)
+        {
+            const string message =
+                "Service Broker installer SQL was not written; use --output or --installer-output to create it.";
+            if (environment.Error is not null)
+                await environment.Error.WriteLineAsync(message.AsMemory(), cancellationToken);
+        }
         return 0;
     }
 }

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using Microsoft.Data.SqlClient;
 using SharpSql.SqlServer;
 
 namespace SharpSql.Cli;
@@ -15,10 +17,18 @@ public sealed record SqlRunRequest(
     string SqlServerImage,
     string DatabaseName,
     int CommandTimeoutSeconds,
-    RuntimeStorageKind RuntimeStorage = RuntimeStorageKind.Ephemeral)
+    RuntimeStorageKind RuntimeStorage = RuntimeStorageKind.Ephemeral,
+    bool Debug = false,
+    bool Profile = false,
+    string? OutputPath = null,
+    string? InstallerOutputPath = null)
 {
     public bool IsProject => Sql is null;
 }
+
+public sealed record SqlRunProfile(
+    int WarmupRuns,
+    IReadOnlyList<TimeSpan> SqlServerSamples);
 
 public sealed record SqlRunResult(
     bool Success,
@@ -27,18 +37,56 @@ public sealed record SqlRunResult(
     IReadOnlyList<CompilerDiagnostic> Diagnostics,
     bool ContainerKept,
     int? ErrorNumber = null,
-    string? ErrorMessage = null);
+    string? ErrorMessage = null,
+    string? GeneratedSql = null,
+    string? InstallerSql = null,
+    SqlBatchDebugInfo? DebugInfo = null,
+    SqlRunProfile? Profile = null);
 
 public interface ISqlRunService
 {
     Task<SqlRunResult> RunAsync(SqlRunRequest request, CancellationToken cancellationToken);
+
+    async Task<SqlRunResult> RunAsync(
+        SqlRunRequest request,
+        Action<string>? reportMessage,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunAsync(request, cancellationToken);
+        if (reportMessage is not null)
+        {
+            foreach (var message in result.Messages)
+            {
+                try
+                {
+                    reportMessage(message);
+                }
+                catch
+                {
+                    // Output observers must not replace the SQL execution result.
+                }
+            }
+        }
+        return result;
+    }
 }
 
 public sealed class SqlRunService : ISqlRunService
 {
+    private const int ProfileWarmupRuns = 1;
+    private const int ProfileSampleRuns = 3;
+
     public async Task<SqlRunResult> RunAsync(SqlRunRequest request, CancellationToken cancellationToken)
+        => await RunAsync(request, reportMessage: null, cancellationToken);
+
+    public async Task<SqlRunResult> RunAsync(
+        SqlRunRequest request,
+        Action<string>? reportMessage,
+        CancellationToken cancellationToken)
     {
         string sql;
+        IReadOnlyList<CompilerDiagnostic> diagnostics;
+        var transpileSucceeded = true;
         if (request.IsProject)
         {
             var transpileResult = await new SharpSqlProjectCompiler().TranspileAsync(
@@ -48,23 +96,43 @@ public sealed class SqlRunService : ISqlRunService
                     EntryPoint = request.EntryPoint,
                     Configuration = request.Configuration,
                     TargetFramework = request.TargetFramework,
-                    CompilerOptions = new TranspileOptions { RuntimeStorage = request.RuntimeStorage }
+                    CompilerOptions = new TranspileOptions
+                    {
+                        RuntimeStorage = request.RuntimeStorage,
+                        EmitRuntimeDiagnostics = request.Debug
+                    }
                 },
                 cancellationToken);
-            if (!transpileResult.Success)
-            {
-                return new SqlRunResult(
-                    false,
-                    string.Empty,
-                    [],
-                    transpileResult.Diagnostics,
-                    ContainerKept: false);
-            }
             sql = transpileResult.Sql;
+            diagnostics = transpileResult.Diagnostics;
+            transpileSucceeded = transpileResult.Success;
         }
         else
         {
             sql = request.Sql!;
+            diagnostics = [];
+        }
+
+        var installerSql = InstallerSql(request.RuntimeStorage);
+        var artifactPaths = SqlOutputArtifacts.ResolvePaths(
+            request.OutputPath,
+            request.InstallerOutputPath,
+            request.RuntimeStorage);
+        await SqlOutputArtifacts.WriteAsync(
+            artifactPaths,
+            sql,
+            installerSql,
+            cancellationToken);
+        if (!transpileSucceeded)
+        {
+            return new SqlRunResult(
+                false,
+                string.Empty,
+                [],
+                diagnostics,
+                ContainerKept: false,
+                GeneratedSql: sql,
+                InstallerSql: installerSql);
         }
 
         var connectionString = request.ForceContainer
@@ -81,33 +149,158 @@ public sealed class SqlRunService : ISqlRunService
                 request.DatabaseName,
                 request.KeepContainer),
             cancellationToken);
-        var messages = new List<string>();
-        foreach (var batch in CreateExecutionBatches(request.RuntimeStorage, sql))
+        var installationMessages = Array.Empty<string>();
+        if (installerSql is not null)
         {
-            var execution = await SqlBatchExecutor.ExecuteAsync(
+            var installation = await SqlBatchExecutor.ExecuteAsync(
                 session.Connection,
-                batch,
+                installerSql,
                 request.CommandTimeoutSeconds,
                 cancellationToken);
-            messages.AddRange(execution.Messages);
-            if (!execution.Success)
+            installationMessages = installation.Messages.ToArray();
+            ReportMessages(installationMessages, reportMessage);
+            if (!installation.Success)
             {
                 return new SqlRunResult(
                     false,
                     session.Description,
-                    messages,
-                    [],
+                    installationMessages,
+                    diagnostics,
                     session.KeepContainer,
-                    execution.ErrorNumber,
-                    execution.ErrorMessage);
+                    installation.ErrorNumber,
+                    installation.ErrorMessage,
+                    sql,
+                    installerSql,
+                    installation.DebugInfo);
             }
         }
 
-        return new SqlRunResult(true, session.Description, messages, [], session.KeepContainer);
+        var (execution, profile) = request.Profile
+            ? await ExecuteProfileAsync(
+                session.Connection,
+                sql,
+                request.CommandTimeoutSeconds,
+                request.Debug,
+                reportMessage,
+                cancellationToken)
+            : (await ExecuteProgramAsync(
+                session.Connection,
+                sql,
+                request.CommandTimeoutSeconds,
+                request.Debug,
+                request.Debug,
+                reportMessage,
+                cancellationToken), null);
+        return new SqlRunResult(
+            execution.Success,
+            session.Description,
+            installationMessages.Concat(execution.Messages).ToArray(),
+            diagnostics,
+            session.KeepContainer,
+            execution.ErrorNumber,
+            execution.ErrorMessage,
+            sql,
+            installerSql,
+            execution.DebugInfo,
+            profile);
     }
 
-    internal static IReadOnlyList<string> CreateExecutionBatches(RuntimeStorageKind runtimeStorage, string sql) =>
+    private static async Task<(SqlBatchExecutionResult Execution, SqlRunProfile Profile)> ExecuteProfileAsync(
+        SqlConnection connection,
+        string sql,
+        int commandTimeoutSeconds,
+        bool collectDebugInfo,
+        Action<string>? reportMessage,
+        CancellationToken cancellationToken)
+    {
+        for (var index = 0; index < ProfileWarmupRuns; index++)
+        {
+            var warmup = await ExecuteProgramAsync(
+                connection,
+                sql,
+                commandTimeoutSeconds,
+                collectDebugInfo: false,
+                consumeHeapDiagnostics: collectDebugInfo,
+                reportMessage,
+                cancellationToken);
+            if (!warmup.Success)
+                return (warmup, new SqlRunProfile(ProfileWarmupRuns, []));
+        }
+
+        var samples = new List<TimeSpan>(ProfileSampleRuns);
+        SqlBatchExecutionResult? canonical = null;
+        for (var index = 0; index < ProfileSampleRuns; index++)
+        {
+            var timer = Stopwatch.StartNew();
+            var sample = await ExecuteProgramAsync(
+                connection,
+                sql,
+                commandTimeoutSeconds,
+                collectDebugInfo: false,
+                consumeHeapDiagnostics: collectDebugInfo,
+                reportMessage: null,
+                cancellationToken);
+            timer.Stop();
+            samples.Add(timer.Elapsed);
+            canonical ??= sample;
+            if (!sample.Success)
+                return (sample, new SqlRunProfile(ProfileWarmupRuns, samples));
+        }
+
+        if (collectDebugInfo)
+        {
+            var debug = await ExecuteProgramAsync(
+                connection,
+                sql,
+                commandTimeoutSeconds,
+                collectDebugInfo: true,
+                consumeHeapDiagnostics: true,
+                reportMessage: null,
+                cancellationToken);
+            if (!debug.Success)
+                return (debug, new SqlRunProfile(ProfileWarmupRuns, samples));
+            canonical = canonical! with { DebugInfo = debug.DebugInfo };
+        }
+
+        return (canonical!, new SqlRunProfile(ProfileWarmupRuns, samples));
+    }
+
+    private static Task<SqlBatchExecutionResult> ExecuteProgramAsync(
+        SqlConnection connection,
+        string sql,
+        int commandTimeoutSeconds,
+        bool collectDebugInfo,
+        bool consumeHeapDiagnostics,
+        Action<string>? reportMessage,
+        CancellationToken cancellationToken) =>
+        SqlBatchExecutor.ExecuteAsync(
+            connection,
+            sql,
+            commandTimeoutSeconds,
+            new SqlBatchExecutionOptions(collectDebugInfo, reportMessage, consumeHeapDiagnostics),
+            cancellationToken);
+
+    private static void ReportMessages(
+        IReadOnlyList<string> messages,
+        Action<string>? reportMessage)
+    {
+        if (reportMessage is null)
+            return;
+        foreach (var message in messages)
+        {
+            try
+            {
+                reportMessage(message);
+            }
+            catch
+            {
+                // Output observers must not replace the SQL execution result.
+            }
+        }
+    }
+
+    private static string? InstallerSql(RuntimeStorageKind runtimeStorage) =>
         runtimeStorage == RuntimeStorageKind.ServiceBroker
-            ? [SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), sql]
-            : [sql];
+            ? SharpSqlServiceBrokerRuntime.GenerateProvisioningSql()
+            : null;
 }

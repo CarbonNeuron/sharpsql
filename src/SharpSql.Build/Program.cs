@@ -109,9 +109,8 @@ public static class Program
                     session.Connection,
                     SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(),
                     parsed.CommandTimeoutSeconds,
+                    new SqlBatchExecutionOptions(MessageReceived: Console.WriteLine),
                     cancellationToken);
-                foreach (var message in result.Messages)
-                    Console.WriteLine(message);
                 if (result.Success)
                     WriteProgress("Service Broker runtime ready.");
             }
@@ -123,9 +122,8 @@ public static class Program
                     session.Connection,
                     sql,
                     parsed.CommandTimeoutSeconds,
+                    new SqlBatchExecutionOptions(MessageReceived: Console.WriteLine),
                     cancellationToken);
-                foreach (var message in result.Messages)
-                    Console.WriteLine(message);
             }
         }
         finally
