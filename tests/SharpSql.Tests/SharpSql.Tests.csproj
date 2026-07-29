@@ -4,12 +4,17 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.Build.Framework" Version="17.11.31" ExcludeAssets="runtime" PrivateAssets="all" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
+    <PackageReference Include="Spectre.Console.Cli.Testing" Version="0.55.0" />
     <PackageReference Include="xunit.v3" Version="3.2.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <ProjectReference Include="../../src/SharpSql.Cli/SharpSql.Cli.csproj" />
+    <ProjectReference Include="../../src/SharpSql.MSBuild/SharpSql.MSBuild.csproj" />
     <ProjectReference Include="../../src/SharpSql/SharpSql.csproj" />
+    <None Include="../fixtures/MultiFileProject/**/*" Exclude="../fixtures/MultiFileProject/bin/**/*;../fixtures/MultiFileProject/obj/**/*" Link="fixtures/MultiFileProject/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

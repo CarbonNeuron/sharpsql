@@ -9,6 +9,9 @@
     <PackageTags>csharp;sql;transpiler;compiler;roslyn;sqlserver;dotnet-tool</PackageTags>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.Build.Framework" Version="17.11.31" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Spectre.Console.Cli" Version="0.55.0" />
+    <ProjectReference Include="../SharpSql.MSBuild/SharpSql.MSBuild.csproj" />
     <ProjectReference Include="../SharpSql/SharpSql.csproj" />
     <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>

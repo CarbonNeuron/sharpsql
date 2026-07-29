@@ -3,7 +3,7 @@
 The compiler pipeline is:
 
 ```text
-C# source
+C# source text or MSBuild project
   -> Roslyn syntax + semantic model
   -> C# frontend binding + supported-subset validation
   -> immutable SharpSql.Ir program
@@ -13,6 +13,8 @@ C# source
 ```
 
 `SharpSql.Ir` is a separate assembly with no Roslyn or SQL Server dependency. Its immutable `IrProgram` owns typed methods, symbols, expressions, query clauses, source spans/comments, and a `ProceduralStatement` hierarchy with explicit declarations, assignments, branches, loops, jumps, and returns. Source identity uses `IrSymbolId`; diagnostics and comments use neutral source records rather than retaining Roslyn nodes. The C# frontend finishes binding the entry point and every method before SQL emission begins.
+
+Single-file mode creates a Roslyn compilation directly. Project mode is isolated in `SharpSql.MSBuild`: `MSBuildWorkspace` performs a design-time build and supplies the resulting `CSharpCompilation`, so all documents share the project's actual references, generated sources, global usings, language version, nullable context, and conditional symbols. The user selects a parameterless static method with `Namespace.Type::Method`, or an executable project's compiler-selected entry point is used. The frontend collects methods and heap types across all syntax trees before lowering, while generated-file banner comments are excluded from SQL output. Project-reference assemblies participate in semantic binding, but SharpSql currently lowers method bodies only from the selected project's source compilation.
 
 `IrType` carries only language/runtime type identity. `CSharpTypeFactory` is the frontend mapping from Roslyn, while `SqlTypeMapper` belongs to the SQL Server backend. Likewise, `SqlScalarExpression` and the `SqlLinq*` plans are explicitly backend models: SQL text and precedence never appear in compiler IR. LINQ lambda bodies are bound IR expressions, and query syntax is represented by neutral query clauses before the backend chooses relational SQL.
 

@@ -6,8 +6,10 @@ namespace SharpSql;
 
 public sealed partial class SharpSqlCompiler
 {
-    private readonly Dictionary<(int Start, int Length), SyntaxNode> _csharpSourceNodes = [];
+    private readonly Dictionary<IrSource, SyntaxNode> _csharpSourceNodes = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<SyntaxTree, int> _sourceOffsets = [];
     private readonly Dictionary<ISymbol, IrSymbol> _irSymbols = new(SymbolEqualityComparer.Default);
+    private int _nextSourceOffset;
     private int _nextIrSymbolId;
 
     private ProceduralDeclaration BindProceduralDeclaration(
@@ -28,7 +30,7 @@ public sealed partial class SharpSqlCompiler
                 return new ProceduralVariable(
                     ToIrSource(variable),
                     GetOrCreateIrSymbol(
-                        _semanticModel?.GetDeclaredSymbol(variable),
+                        SemanticModelFor(variable)?.GetDeclaredSymbol(variable),
                         variable.Identifier.ValueText,
                         type),
                     initializer);
@@ -74,7 +76,7 @@ public sealed partial class SharpSqlCompiler
             ForEachStatementSyntax forEach => new ProceduralForEach(
                 ToIrSource(forEach),
                 GetOrCreateIrSymbol(
-                    _semanticModel?.GetDeclaredSymbol(forEach),
+                    SemanticModelFor(forEach)?.GetDeclaredSymbol(forEach),
                     forEach.Identifier.ValueText,
                     InferProceduralForEachElementType(forEach, scope)),
                 BindIrExpression(forEach.Expression, scope),
@@ -104,7 +106,7 @@ public sealed partial class SharpSqlCompiler
                 source,
                 facts,
                 GetOrCreateIrSymbol(
-                    _semanticModel?.GetSymbolInfo(identifier).Symbol,
+                    SemanticModelFor(identifier)?.GetSymbolInfo(identifier).Symbol,
                     identifier.Identifier.ValueText,
                     facts.Type)),
             ThisExpressionSyntax => new IrThisExpression(
@@ -223,7 +225,7 @@ public sealed partial class SharpSqlCompiler
         {
             var type = parameter.Type is null ? IrType.Unknown : CSharpTypeFactory.From(parameter.Type);
             return GetOrCreateIrSymbol(
-                _semanticModel?.GetDeclaredSymbol(parameter),
+                SemanticModelFor(parameter)?.GetDeclaredSymbol(parameter),
                 parameter.Identifier.ValueText,
                 type);
         }).ToArray();
@@ -243,11 +245,12 @@ public sealed partial class SharpSqlCompiler
         ExpressionFacts facts,
         VariableScope scope)
     {
-        var rangeType = _semanticModel?.GetTypeInfo(query.FromClause.Expression).Type is { } sourceType
+        var semanticModel = SemanticModelFor(query);
+        var rangeType = semanticModel?.GetTypeInfo(query.FromClause.Expression).Type is { } sourceType
             ? SequenceElementType(CSharpTypeFactory.From(sourceType).Name)
             : IrType.Unknown;
         var range = GetOrCreateIrSymbol(
-            _semanticModel?.GetDeclaredSymbol(query.FromClause),
+            semanticModel?.GetDeclaredSymbol(query.FromClause),
             query.FromClause.Identifier.ValueText,
             rangeType);
         var clauses = new List<IrQueryClause>();
@@ -313,18 +316,19 @@ public sealed partial class SharpSqlCompiler
 
     private IrSource ToIrSource(SyntaxNode node)
     {
-        _csharpSourceNodes[(node.SpanStart, node.Span.Length)] = node;
         var position = node.SyntaxTree.GetLineSpan(node.Span).StartLinePosition;
-        return new IrSource(
-            new IrSourceSpan(node.SpanStart, node.Span.Length, position.Line + 1, position.Character + 1),
-            ToIrComments(node.GetLeadingTrivia()),
-            ToIrComments(node.GetTrailingTrivia()),
-            ToIrComments(node.DescendantTrivia(descendIntoTrivia: true)));
+        var source = new IrSource(
+            new IrSourceSpan(GlobalSourcePosition(node.SyntaxTree, node.SpanStart), node.Span.Length, position.Line + 1, position.Character + 1),
+            ToIrComments(node.GetLeadingTrivia(), node.SyntaxTree),
+            ToIrComments(node.GetTrailingTrivia(), node.SyntaxTree),
+            ToIrComments(node.DescendantTrivia(descendIntoTrivia: true), node.SyntaxTree));
+        _csharpSourceNodes[source] = node;
+        return source;
     }
 
-    private static IReadOnlyList<IrComment> ToIrComments(IEnumerable<SyntaxTrivia> trivia) =>
+    private IReadOnlyList<IrComment> ToIrComments(IEnumerable<SyntaxTrivia> trivia, SyntaxTree tree) =>
         trivia.Where(IsComment).Select(item => new IrComment(
-            item.SpanStart,
+            GlobalSourcePosition(tree, item.SpanStart),
             item.ToFullString().TrimEnd('\r', '\n'),
             item.IsKind(SyntaxKind.SingleLineCommentTrivia)
                 ? IrCommentKind.Line
@@ -333,14 +337,25 @@ public sealed partial class SharpSqlCompiler
                     ? IrCommentKind.Documentation
                     : IrCommentKind.Block)).ToArray();
 
+    private int GlobalSourcePosition(SyntaxTree tree, int position)
+    {
+        if (!_sourceOffsets.TryGetValue(tree, out var offset))
+        {
+            offset = _nextSourceOffset;
+            _sourceOffsets.Add(tree, offset);
+            _nextSourceOffset += tree.Length + 1;
+        }
+        return offset + position;
+    }
+
     private T CSharpSyntax<T>(IrSource source) where T : SyntaxNode =>
-        (T)_csharpSourceNodes[(source.Span.Start, source.Span.Length)];
+        (T)_csharpSourceNodes[source];
 
     private ExpressionSyntax CSharpExpression(IrExpression expression) =>
         CSharpSyntax<ExpressionSyntax>(expression.Source);
 
     private bool HasCSharpSource(IrSource source) =>
-        _csharpSourceNodes.ContainsKey((source.Span.Start, source.Span.Length));
+        _csharpSourceNodes.ContainsKey(source);
 
     private static bool TryGetIrBinaryOperator(SyntaxKind kind, out IrBinaryOperator result)
     {

@@ -16,16 +16,27 @@ public sealed partial class SharpSqlCompiler
     private const string HeapIndexedItems = "#__sharpsql_indexed_items";
     private const string HeapDictionaryEntries = "#__sharpsql_dictionary_entries";
 
-    private void PrepareHeapRuntime(CompilationUnitSyntax root)
+    private void PrepareHeapRuntime(
+        IReadOnlyList<CompilationUnitSyntax> roots,
+        IReadOnlyList<SyntaxNode>? compilationSources)
     {
-        foreach (var declaration in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
+        var sourceNodes = compilationSources ?? roots.Cast<SyntaxNode>().ToArray();
+        var creations = sourceNodes
+            .SelectMany(source => source.DescendantNodesAndSelf().OfType<ObjectCreationExpressionSyntax>())
+            .ToArray();
+        var usedHeapTypeNames = creations
+            .Select(creation => NormalizeTypeName(creation.Type.ToString()))
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var declaration in roots.SelectMany(root => root.DescendantNodes().OfType<TypeDeclarationSyntax>()))
         {
             if (declaration is not (ClassDeclarationSyntax or RecordDeclarationSyntax or StructDeclarationSyntax))
+                continue;
+            if (compilationSources is not null && !usedHeapTypeNames.Contains(declaration.Identifier.ValueText))
                 continue;
             AddHeapType(declaration);
         }
 
-        foreach (var creation in root.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
+        foreach (var creation in creations)
         {
             var name = NormalizeTypeName(creation.Type.ToString());
             if (IsListType(name))
@@ -39,14 +50,14 @@ public sealed partial class SharpSqlCompiler
             _heapRuntimeNeeded = true;
         }
 
-        if (root.DescendantNodes().OfType<ArrayCreationExpressionSyntax>()
+        if (sourceNodes.SelectMany(source => source.DescendantNodesAndSelf().OfType<ArrayCreationExpressionSyntax>())
             .Any(creation => creation.Type.ElementType.ToString() != "byte"))
         {
             _usesLists = true;
             _heapRuntimeNeeded = true;
         }
 
-        if (root.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(IsLinqMaterialization))
+        if (sourceNodes.SelectMany(source => source.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()).Any(IsLinqMaterialization))
         {
             _usesLists = true;
             _heapRuntimeNeeded = true;

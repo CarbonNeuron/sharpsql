@@ -20,7 +20,9 @@ public sealed partial class SharpSqlCompiler
     private readonly HashSet<string> _recursiveMethods = new(StringComparer.Ordinal);
     private readonly NameAllocator _names = new();
     private readonly SqlWriter _sql = new();
-    private SemanticModel? _semanticModel;
+    private readonly Dictionary<SyntaxTree, SemanticModel> _semanticModels = [];
+    private CSharpCompilation? _compilation;
+    private Diagnostic[]? _semanticDiagnostics;
     private TranspileOptions _options = new();
     private IrProgram? _boundProgram;
     private int _inlineId;
@@ -34,54 +36,108 @@ public sealed partial class SharpSqlCompiler
             return new SharpSqlCompiler().Transpile(source, options);
         _used = true;
 
-        _options = options ?? new TranspileOptions();
         var tree = CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Preview));
-        var root = tree.GetCompilationUnitRoot();
-        _semanticModel = CreateSemanticModel(tree);
+        return TranspileCompilation(CreateCompilation(tree), entryPoint: null, options, compileReachableOnly: false);
+    }
 
-        AddParseDiagnostics(tree);
-        AddSemanticDiagnostics(tree);
-        CollectMethods(root);
-        CountCalls(root);
-        FindRecursion();
-        PrepareVmMethods();
-        PrepareHeapRuntime(root);
+    public TranspileResult Transpile(
+        CSharpCompilation compilation,
+        string? entryPoint = null,
+        TranspileOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(compilation);
+        if (_used)
+            return new SharpSqlCompiler().Transpile(compilation, entryPoint, options);
+        _used = true;
+        return TranspileCompilation(compilation, entryPoint, options, compileReachableOnly: true);
+    }
 
-        var scope = new VariableScope();
-        var topLevelStatements = root.Members
+    private TranspileResult TranspileCompilation(
+        CSharpCompilation compilation,
+        string? entryPoint,
+        TranspileOptions? options,
+        bool compileReachableOnly)
+    {
+        _options = options ?? new TranspileOptions();
+        _compilation = compilation;
+        var roots = compilation.SyntaxTrees
+            .Select(tree => tree.GetCompilationUnitRoot())
+            .ToArray();
+
+        if (roots.Length == 0)
+        {
+            _diagnostics.Add(new CompilerDiagnostic("SS0001", "The compilation contains no C# source files.", 0, 0));
+            return new TranspileResult(string.Empty, _diagnostics.AsReadOnly());
+        }
+
+        foreach (var root in roots)
+        {
+            AddParseDiagnostics(root.SyntaxTree);
+            AddSemanticDiagnostics(root.SyntaxTree);
+        }
+
+        var selectedEntryPoint = SelectEntryPoint(compilation, roots, entryPoint);
+        var topLevelStatements = roots
+            .SelectMany(root => root.Members)
             .OfType<GlobalStatementSyntax>()
             .Select(member => member.Statement)
             .Where(statement => statement is not LocalFunctionStatementSyntax)
             .ToArray();
-        ProceduralBlock entryPoint;
-        if (topLevelStatements.Length > 0)
+        var reachableMethods = compileReachableOnly
+            ? FindReachableMethods(selectedEntryPoint, topLevelStatements)
+            : roots.SelectMany(root => root.DescendantNodes().Where(node =>
+                    node is MethodDeclarationSyntax or LocalFunctionStatementSyntax))
+                .ToHashSet<SyntaxNode>(ReferenceEqualityComparer.Instance);
+        var compilationSources = topLevelStatements.Cast<SyntaxNode>().Concat(reachableMethods).ToArray();
+        foreach (var root in roots)
+            CollectMethods(root, selectedEntryPoint, reachableMethods);
+        CountCalls(compilationSources);
+        FindRecursion();
+        PrepareVmMethods();
+        PrepareHeapRuntime(roots, compileReachableOnly ? compilationSources : null);
+
+        var scope = new VariableScope();
+        var relevantTrees = topLevelStatements.Select(statement => statement.SyntaxTree)
+            .Concat(reachableMethods.Select(method => method.SyntaxTree))
+            .ToHashSet();
+        var commentRoots = roots
+            .Where(root => relevantTrees.Contains(root.SyntaxTree) && !IsGeneratedSource(root))
+            .ToArray();
+        ProceduralBlock entryBlock;
+        if (selectedEntryPoint is not null)
         {
-            entryPoint = new ProceduralBlock(
-                ToIrSource(root),
+            entryBlock = selectedEntryPoint.Body is not null
+                ? (ProceduralBlock)BindProceduralStatement(selectedEntryPoint.Body, scope)
+                : selectedEntryPoint.ExpressionBody is not null
+                    ? new ProceduralBlock(
+                        ToIrSource(selectedEntryPoint),
+                        [new ProceduralExpressionStatement(
+                            ToIrSource(selectedEntryPoint.ExpressionBody.Expression),
+                            BindIrExpression(selectedEntryPoint.ExpressionBody.Expression, scope))])
+                    : new ProceduralBlock(ToIrSource(selectedEntryPoint), []);
+        }
+        else if (topLevelStatements.Length > 0)
+        {
+            entryBlock = new ProceduralBlock(
+                ToIrSource(topLevelStatements[0].SyntaxTree.GetCompilationUnitRoot()),
                 topLevelStatements.Select(statement => BindProceduralStatement(statement, scope)).ToArray());
         }
         else
         {
-            var main = root.DescendantNodes().OfType<MethodDeclarationSyntax>()
-                .FirstOrDefault(method => method.Identifier.ValueText == "Main");
-            entryPoint = main?.Body is not null
-                ? (ProceduralBlock)BindProceduralStatement(main.Body, scope)
-                : main?.ExpressionBody is not null
-                    ? new ProceduralBlock(
-                        ToIrSource(main),
-                        [new ProceduralExpressionStatement(
-                            ToIrSource(main.ExpressionBody.Expression),
-                            BindIrExpression(main.ExpressionBody.Expression, scope))])
-                    : new ProceduralBlock(ToIrSource(root), []);
-            if (entryPoint.Statements.Count == 0 && _diagnostics.Count == 0)
-                AddDiagnostic("SS0001", "No top-level statements or Main method were found.", root);
+            entryBlock = new ProceduralBlock(ToIrSource(roots[0]), []);
+            if (entryBlock.Statements.Count == 0 && _diagnostics.Count == 0)
+                AddDiagnostic("SS0001", "No top-level statements or selected entry method were found.", roots[0]);
         }
         _boundProgram = new IrProgram(
             _methods.Values.ToArray(),
-            entryPoint,
-            ToIrSource(root).DescendantComments);
+            entryBlock,
+            (compileReachableOnly ? compilationSources : commentRoots.Cast<SyntaxNode>())
+                .Where(source => !IsGeneratedSource(source.SyntaxTree.GetCompilationUnitRoot()))
+                .SelectMany(source => ToIrSource(source).DescendantComments)
+                .ToArray());
 
-        EmitFileHeaderComments(root);
+        foreach (var root in commentRoots)
+            EmitFileHeaderComments(root);
 
         if (_options.EmitNoCount)
         {
@@ -97,7 +153,16 @@ public sealed partial class SharpSqlCompiler
         EmitProceduralStatementSequence(_boundProgram.EntryPoint.Statements, scope, null, null, null);
 
         EmitVmEpilogue();
-        EmitAllRemainingComments(root);
+        if (compileReachableOnly)
+        {
+            foreach (var source in compilationSources.Where(source => !IsGeneratedSource(source.SyntaxTree.GetCompilationUnitRoot())))
+                EmitAllRemainingComments(source);
+        }
+        else
+        {
+            foreach (var root in commentRoots)
+                EmitAllRemainingComments(root);
+        }
         EmitHeapEpilogue();
 
         return new TranspileResult(_sql.ToString(), _diagnostics.AsReadOnly());
@@ -134,23 +199,25 @@ public sealed partial class SharpSqlCompiler
                 "CS-PARSE",
                 diagnostic.GetMessage(CultureInfo.InvariantCulture),
                 position.Line + 1,
-                position.Character + 1));
+                position.Character + 1,
+                tree.FilePath));
         }
     }
 
     private void AddSemanticDiagnostics(SyntaxTree tree)
     {
-        if (_semanticModel is null)
+        if (_compilation is null)
             return;
 
         var parseErrors = tree.GetDiagnostics()
             .Where(item => item.Severity == DiagnosticSeverity.Error)
             .Select(item => (item.Id, item.Location.SourceSpan))
             .ToHashSet();
-        foreach (var diagnostic in _semanticModel.Compilation.GetDiagnostics()
+        _semanticDiagnostics ??= _compilation.GetDiagnostics()
+            .Where(item => item.Severity == DiagnosticSeverity.Error && DataFlowDiagnosticIds.Contains(item.Id))
+            .ToArray();
+        foreach (var diagnostic in _semanticDiagnostics
                      .Where(item =>
-                         item.Severity == DiagnosticSeverity.Error &&
-                         DataFlowDiagnosticIds.Contains(item.Id) &&
                          item.Location.SourceTree == tree &&
                          !parseErrors.Contains((item.Id, item.Location.SourceSpan))))
         {
@@ -159,11 +226,12 @@ public sealed partial class SharpSqlCompiler
                 diagnostic.Id,
                 diagnostic.GetMessage(CultureInfo.InvariantCulture),
                 position.Line + 1,
-                position.Character + 1));
+                position.Character + 1,
+                tree.FilePath));
         }
     }
 
-    private static SemanticModel CreateSemanticModel(SyntaxTree sourceTree)
+    private static CSharpCompilation CreateCompilation(SyntaxTree sourceTree)
     {
         var trustedAssemblies = ((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))?
             .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries) ?? [];
@@ -176,12 +244,135 @@ public sealed partial class SharpSqlCompiler
             [sourceTree, globalUsings],
             references,
             new CSharpCompilationOptions(OutputKind.ConsoleApplication));
-        return compilation.GetSemanticModel(sourceTree, ignoreAccessibility: true);
+        return compilation;
     }
 
-    private void CollectMethods(CompilationUnitSyntax root)
+    private SemanticModel? SemanticModelFor(SyntaxNode node)
     {
-        foreach (var local in root.DescendantNodes().OfType<LocalFunctionStatementSyntax>())
+        if (_compilation is null || !_compilation.SyntaxTrees.Contains(node.SyntaxTree))
+            return null;
+        if (_semanticModels.TryGetValue(node.SyntaxTree, out var semanticModel))
+            return semanticModel;
+        semanticModel = _compilation.GetSemanticModel(node.SyntaxTree, ignoreAccessibility: true);
+        _semanticModels.Add(node.SyntaxTree, semanticModel);
+        return semanticModel;
+    }
+
+    private static bool IsGeneratedSource(CompilationUnitSyntax root)
+    {
+        var source = root.ToFullString();
+        var prefix = source.AsSpan(0, Math.Min(source.Length, 512));
+        return prefix.Contains("<auto-generated", StringComparison.OrdinalIgnoreCase) ||
+               prefix.Contains("<autogenerated", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private MethodDeclarationSyntax? SelectEntryPoint(
+        CSharpCompilation compilation,
+        IReadOnlyList<CompilationUnitSyntax> roots,
+        string? requestedEntryPoint)
+    {
+        var hasTopLevelStatements = roots.Any(root => root.Members.OfType<GlobalStatementSyntax>().Any());
+        if (string.IsNullOrWhiteSpace(requestedEntryPoint))
+        {
+            if (hasTopLevelStatements)
+                return null;
+            var compilerEntryPoint = compilation.GetEntryPoint(default);
+            return compilerEntryPoint?.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() as MethodDeclarationSyntax;
+        }
+
+        var requested = requestedEntryPoint.Trim();
+        var candidates = roots
+            .SelectMany(root => root.DescendantNodes().OfType<MethodDeclarationSyntax>())
+            .Select(method => (Method: method, Symbol: SemanticModelFor(method)?.GetDeclaredSymbol(method)))
+            .Where(candidate => candidate.Symbol is not null && EntryPointMatches(candidate.Symbol, requested))
+            .ToArray();
+
+        if (candidates.Length == 0)
+        {
+            AddDiagnostic("SS0002", $"Entry method '{requested}' was not found.", roots[0]);
+            return null;
+        }
+        if (candidates.Length > 1)
+        {
+            AddDiagnostic("SS0002", $"Entry method '{requested}' is ambiguous; use 'Namespace.Type::Method'.", roots[0]);
+            return null;
+        }
+
+        var candidate = candidates[0];
+        if (!candidate.Symbol!.IsStatic)
+        {
+            AddDiagnostic("SS0002", $"Entry method '{requested}' must be static.", candidate.Method);
+            return null;
+        }
+        if (candidate.Symbol.Parameters.Length != 0)
+        {
+            AddDiagnostic("SS0002", $"Entry method '{requested}' must be parameterless.", candidate.Method);
+            return null;
+        }
+        return candidate.Method;
+
+        static bool EntryPointMatches(IMethodSymbol method, string requested)
+        {
+            var typeName = method.ContainingType.ToDisplayString();
+            return string.Equals(method.Name, requested, StringComparison.Ordinal) ||
+                   string.Equals($"{typeName}.{method.Name}", requested, StringComparison.Ordinal) ||
+                   string.Equals($"{typeName}::{method.Name}", requested, StringComparison.Ordinal);
+        }
+    }
+
+    private IReadOnlySet<SyntaxNode> FindReachableMethods(
+        MethodDeclarationSyntax? selectedEntryPoint,
+        IReadOnlyList<StatementSyntax> topLevelStatements)
+    {
+        var reachable = new HashSet<SyntaxNode>(ReferenceEqualityComparer.Instance);
+        var pending = new Queue<SyntaxNode>();
+        if (selectedEntryPoint is not null)
+        {
+            reachable.Add(selectedEntryPoint);
+            pending.Enqueue(selectedEntryPoint);
+        }
+        else
+        {
+            foreach (var statement in topLevelStatements)
+                pending.Enqueue(statement);
+        }
+
+        while (pending.TryDequeue(out var source))
+        {
+            foreach (var invocation in InvocationsIn(source))
+            {
+                var symbolInfo = SemanticModelFor(invocation)?.GetSymbolInfo(invocation);
+                var method = symbolInfo?.Symbol as IMethodSymbol ??
+                             symbolInfo?.CandidateSymbols.OfType<IMethodSymbol>().SingleOrDefault();
+                if (method is null)
+                    continue;
+                method = method.ReducedFrom ?? method;
+                foreach (var reference in method.OriginalDefinition.DeclaringSyntaxReferences)
+                {
+                    var declaration = reference.GetSyntax();
+                    if (declaration is not (MethodDeclarationSyntax or LocalFunctionStatementSyntax) ||
+                        _compilation is null || !_compilation.SyntaxTrees.Contains(declaration.SyntaxTree) ||
+                        !reachable.Add(declaration))
+                        continue;
+                    pending.Enqueue(declaration);
+                }
+            }
+        }
+        return reachable;
+
+        static IEnumerable<InvocationExpressionSyntax> InvocationsIn(SyntaxNode source) =>
+            source.DescendantNodesAndSelf(node =>
+                    ReferenceEquals(node, source) || node is not (LocalFunctionStatementSyntax or MethodDeclarationSyntax))
+                .OfType<InvocationExpressionSyntax>();
+    }
+
+    private void CollectMethods(
+        CompilationUnitSyntax root,
+        MethodDeclarationSyntax? selectedEntryPoint,
+        IReadOnlySet<SyntaxNode> reachableMethods)
+    {
+        foreach (var local in root.DescendantNodes().OfType<LocalFunctionStatementSyntax>()
+                     .Where(reachableMethods.Contains))
         {
             var scope = new VariableScope();
             AddMethod(new MethodDefinition(
@@ -193,9 +384,10 @@ public sealed partial class SharpSqlCompiler
                 ToIrSource(local)));
         }
 
-        foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
+        foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>()
+                     .Where(reachableMethods.Contains))
         {
-            if (method.Identifier.ValueText == "Main")
+            if (method == selectedEntryPoint)
                 continue;
 
             var containingType = method.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
@@ -229,7 +421,7 @@ public sealed partial class SharpSqlCompiler
 
     private MethodFlowSummary AnalyzeMethodFlow(MethodDefinition method)
     {
-        if (method.Body is null || _semanticModel is null)
+        if (method.Body is null)
         {
             return new MethodFlowSummary(
                 EndPointIsReachable: method.ReturnType.Name == "void",
@@ -241,8 +433,9 @@ public sealed partial class SharpSqlCompiler
         }
 
         var body = CSharpSyntax<BlockSyntax>(method.Body.Source);
-        var controlFlow = _semanticModel.AnalyzeControlFlow(body);
-        var dataFlow = _semanticModel.AnalyzeDataFlow(body);
+        var semanticModel = SemanticModelFor(body);
+        var controlFlow = semanticModel?.AnalyzeControlFlow(body);
+        var dataFlow = semanticModel?.AnalyzeDataFlow(body);
         return new MethodFlowSummary(
             controlFlow is { Succeeded: true, EndPointIsReachable: true },
             body.DescendantNodes().OfType<ReturnStatementSyntax>().Any(),
@@ -257,13 +450,16 @@ public sealed partial class SharpSqlCompiler
 
     private ParameterDefinition ToParameter(ParameterSyntax parameter) =>
         new(GetOrCreateIrSymbol(
-            _semanticModel?.GetDeclaredSymbol(parameter),
+            SemanticModelFor(parameter)?.GetDeclaredSymbol(parameter),
             parameter.Identifier.ValueText,
             parameter.Type is null ? IrType.Unknown : CSharpTypeFactory.From(parameter.Type)));
 
-    private void CountCalls(CompilationUnitSyntax root)
+    private void CountCalls(IEnumerable<SyntaxNode> sources)
     {
-        foreach (var call in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+        foreach (var call in sources.SelectMany(source =>
+                     source.DescendantNodesAndSelf(node =>
+                             ReferenceEquals(node, source) || node is not (LocalFunctionStatementSyntax or MethodDeclarationSyntax))
+                         .OfType<InvocationExpressionSyntax>()))
         {
             var name = InvocationName(call.Expression);
             if (name is not null)
@@ -1218,12 +1414,13 @@ public sealed partial class SharpSqlCompiler
                 ConstantValue: null);
         }
 
-        if (_semanticModel is not null && expression.SyntaxTree == _semanticModel.SyntaxTree)
+        var semanticModel = SemanticModelFor(expression);
+        if (semanticModel is not null)
         {
-            var typeInfo = _semanticModel.GetTypeInfo(expression);
+            var typeInfo = semanticModel.GetTypeInfo(expression);
             if (typeInfo.Type is { TypeKind: not TypeKind.Error } semanticType)
             {
-                var constant = _semanticModel.GetConstantValue(expression);
+                var constant = semanticModel.GetConstantValue(expression);
                 return new ExpressionFacts(
                     CSharpTypeFactory.From(semanticType),
                     ToScalarNullability(typeInfo.Nullability.FlowState, expression),
@@ -1321,14 +1518,22 @@ public sealed partial class SharpSqlCompiler
     private void AddDiagnostic(string code, string message, SyntaxNode node)
     {
         var location = node.GetLocation().GetLineSpan().StartLinePosition;
-        var diagnostic = new CompilerDiagnostic(code, message, location.Line + 1, location.Character + 1);
+        var diagnostic = new CompilerDiagnostic(
+            code,
+            message,
+            location.Line + 1,
+            location.Character + 1,
+            node.SyntaxTree.FilePath);
         if (!_diagnostics.Contains(diagnostic))
             _diagnostics.Add(diagnostic);
     }
 
     private void AddDiagnostic(string code, string message, IrSource source)
     {
-        var diagnostic = new CompilerDiagnostic(code, message, source.Span.Line, source.Span.Column);
+        var filePath = _csharpSourceNodes.TryGetValue(source, out var node)
+            ? node.SyntaxTree.FilePath
+            : null;
+        var diagnostic = new CompilerDiagnostic(code, message, source.Span.Line, source.Span.Column, filePath);
         if (!_diagnostics.Contains(diagnostic))
             _diagnostics.Add(diagnostic);
     }

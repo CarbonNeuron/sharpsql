@@ -29,14 +29,15 @@ public sealed partial class SharpSqlCompiler
             .Where(trivia => trivia.SpanStart < firstMemberStart));
     }
 
-    private void EmitAllRemainingComments(CompilationUnitSyntax root) =>
-        EmitCommentTrivia(root.DescendantTrivia(descendIntoTrivia: true));
+    private void EmitAllRemainingComments(SyntaxNode node) =>
+        EmitCommentTrivia(node.DescendantTrivia(descendIntoTrivia: true));
 
     private void EmitCommentTrivia(IEnumerable<SyntaxTrivia> triviaItems)
     {
         foreach (var trivia in triviaItems)
         {
-            if (!IsComment(trivia) || !_emittedCommentPositions.Add(trivia.SpanStart))
+            if (!IsComment(trivia) || trivia.SyntaxTree is null ||
+                !_emittedCommentPositions.Add(GlobalSourcePosition(trivia.SyntaxTree, trivia.SpanStart)))
                 continue;
             EmitSqlComment(trivia);
         }

@@ -860,7 +860,7 @@ public sealed partial class SharpSqlCompiler
                 "ElementAt" or "ElementAtOrDefault" or "Min" or "Max" or "Average" or
                 "MinBy" or "MaxBy"))
             return false;
-        return _semanticModel?.GetSymbolInfo(invocation).Symbol is IMethodSymbol method &&
+        return SemanticModelFor(invocation)?.GetSymbolInfo(invocation).Symbol is IMethodSymbol method &&
             method.ContainingType.Name is "Enumerable" or "Queryable";
     }
 
@@ -999,7 +999,7 @@ public sealed partial class SharpSqlCompiler
 
     private bool LinqResultThrowsOnEmpty(InvocationExpressionSyntax invocation)
     {
-        var type = _semanticModel?.GetTypeInfo(invocation).Type;
+        var type = SemanticModelFor(invocation)?.GetTypeInfo(invocation).Type;
         if (type is null || type.IsReferenceType)
             return false;
         return type is not INamedTypeSymbol
@@ -1188,7 +1188,7 @@ public sealed partial class SharpSqlCompiler
         if (invocation.Expression is not MemberAccessExpressionSyntax member ||
             member.Name.Identifier.ValueText is not ("ToList" or "ToArray"))
             return false;
-        var receiverType = _semanticModel?.GetTypeInfo(member.Expression).Type;
+        var receiverType = SemanticModelFor(member)?.GetTypeInfo(member.Expression).Type;
         if (receiverType is null)
             return false;
         var type = CSharpTypeFactory.From(receiverType);

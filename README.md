@@ -65,6 +65,25 @@ Compile to a file:
 dotnet run --project src/SharpSql.Cli -- examples/objects.cs -o objects.sql
 ```
 
+Compile all C# documents in an MSBuild project by selecting a parameterless static entry method:
+
+```bash
+dotnet run --project src/SharpSql.Cli -- \
+  path/to/MyProject.csproj \
+  --entry MyCompany.Reporting.MonthEnd::Run \
+  --configuration Release \
+  --framework net10.0 \
+  -o MonthEnd.sql
+```
+
+`--framework` is only needed for multi-targeted projects. For executable projects, the normal C# entry point is selected automatically when `--entry` is omitted. Library projects should provide `--entry`.
+
+The CLI uses Spectre.Console.Cli for generated help, option binding, and validation:
+
+```bash
+dotnet run --project src/SharpSql.Cli -- --help
+```
+
 The CLI reads C# from standard input when no input path is supplied:
 
 ```bash
@@ -83,9 +102,18 @@ if (!result.Success)
 Console.WriteLine(result.Sql);
 ```
 
+Project loading is available separately so basic compiler consumers do not need to host MSBuild:
+
+```csharp
+var result = await new SharpSqlProjectCompiler().TranspileAsync(
+    "MyProject.csproj",
+    new ProjectTranspileOptions { EntryPoint = "MyCompany.Reporting.MonthEnd::Run" });
+```
+
 ## What works today
 
 - Top-level C# statements and conventional `Main` bodies
+- Multi-file SDK-style C# projects loaded with their real references, generated sources, global usings, language version, and conditional symbols
 - Core numeric types, `bool`, `char`, `string`, nullable values, date/time types, `Guid`, `byte[]`, and `object`
 - Declarations, assignment, arithmetic, comparisons, boolean expressions, interpolation, and casts
 - String length/indexing and `string(char[])` construction
@@ -229,7 +257,7 @@ dotnet build SharpSql.slnx --configuration Release --no-restore
 dotnet test SharpSql.slnx --configuration Release --no-build
 ```
 
-The full test command starts one shared SQL Server 2022 container. Every file in `examples/` is reported as an independent C#/SQL parity test, and the integration corpus also checks expected runtime exceptions and exact compiler diagnostic codes under [`tests/SharpSql.IntegrationTests/cases`](tests/SharpSql.IntegrationTests/cases). To run only the compiler unit tests without Docker:
+The full test command starts one shared SQL Server 2022 container. Every file in `examples/` is reported as an independent C#/SQL parity test, and the integration corpus also checks expected runtime exceptions and exact compiler diagnostic codes under [`tests/SharpSql.IntegrationTests/cases`](tests/SharpSql.IntegrationTests/cases). CLI parsing, help, validation, standard input, output files, and project options are exercised through `Spectre.Console.Cli.Testing`. To run only the compiler unit tests without Docker:
 
 ```bash
 dotnet test tests/SharpSql.Tests --configuration Release
