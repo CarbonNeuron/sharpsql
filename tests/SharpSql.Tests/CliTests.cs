@@ -2,6 +2,7 @@ using SharpSql.Cli;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Spectre.Console.Cli.Testing;
+using System.Xml.Linq;
 using Xunit;
 
 namespace SharpSql.Tests;
@@ -124,6 +125,7 @@ public sealed class CliTests
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("USAGE:", result.Output);
+        Assert.Contains("init", result.Output);
         Assert.Contains("transpile", result.Output);
         Assert.Contains("verify", result.Output);
     }
@@ -281,6 +283,152 @@ public sealed class CliTests
         Assert.Equal(["transpile", "Program.cs", "--output", "Program.sql"],
             CliArgumentRouter.Route(["Program.cs", "--output", "Program.sql"]));
         Assert.Equal(["verify", "Program.cs"], CliArgumentRouter.Route(["verify", "Program.cs"]));
+        Assert.Equal(["init", "App.csproj"], CliArgumentRouter.Route(["init", "App.csproj"]));
+    }
+
+    [Fact]
+    public async Task InitDiscoversAndConfiguresAConsoleProject()
+    {
+        using var project = TemporaryProject.Create();
+        var tester = CreateRoutedTester();
+
+        var result = await tester.RunAsync(
+            CliArgumentRouter.Route(["init", project.DirectoryPath, "--no-restore"]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("Configured", result.Output);
+        var document = XDocument.Load(project.ProjectPath);
+        Assert.Equal("SharpSql.Sdk", Attribute(document, "PackageReference", "Include"));
+        Assert.Equal(InitCommand.GetToolVersion(), Attribute(document, "PackageReference", "Version"));
+        Assert.Equal("all", Element(document, "PrivateAssets"));
+        Assert.Null(Element(document, "SharpSqlOutputPath"));
+        Assert.Equal("BuildOutput", Element(document, "SharpSqlOutputLocation"));
+        Assert.Equal("true", Element(document, "SharpSqlGenerateOnBuild"));
+        Assert.Equal("true", Element(document, "SharpSqlEnableAnalyzer"));
+        Assert.Equal("keep me", Element(document, "ExistingProperty"));
+        Assert.Contains("existing comment", await File.ReadAllTextAsync(
+            project.ProjectPath,
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task InitReconfiguresAnExistingInstallationWithoutDuplicates()
+    {
+        using var project = TemporaryProject.Create("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <OutputType>Exe</OutputType>
+                <TargetFramework>net10.0</TargetFramework>
+                <SharpSqlOutputPath>old.sql</SharpSqlOutputPath>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="SharpSql.Sdk" Version="0.0.1" />
+              </ItemGroup>
+            </Project>
+            """);
+        var tester = CreateRoutedTester();
+
+        var first = await tester.RunAsync(
+            CliArgumentRouter.Route([
+                "init", project.ProjectPath,
+                "--sdk-version", "9.8.7",
+                "--output", "$(MSBuildProjectDirectory)/generated/App.sql",
+                "--entry", "Demo.SqlJob::Run",
+                "--analyzer-only",
+                "--no-analyzer",
+                "--no-restore"
+            ]),
+            TestContext.Current.CancellationToken);
+        var second = await tester.RunAsync(
+            CliArgumentRouter.Route([
+                "init", project.ProjectPath,
+                "--sdk-version", "9.8.7",
+                "--no-restore"
+            ]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, first.ExitCode);
+        Assert.Equal(0, second.ExitCode);
+        var document = XDocument.Load(project.ProjectPath);
+        Assert.Single(
+            Elements(document, "PackageReference"),
+            element => Attribute(element, "Include") == "SharpSql.Sdk");
+        Assert.Equal("9.8.7", Attribute(document, "PackageReference", "Version"));
+        Assert.Equal("$(MSBuildProjectDirectory)/generated/App.sql", Element(document, "SharpSqlOutputPath"));
+        Assert.Equal("Demo.SqlJob::Run", Element(document, "SharpSqlEntryPoint"));
+        Assert.Equal("true", Element(document, "SharpSqlGenerateOnBuild"));
+        Assert.Equal("true", Element(document, "SharpSqlEnableAnalyzer"));
+    }
+
+    [Fact]
+    public async Task InitRestoresTheConfiguredProject()
+    {
+        using var project = TemporaryProject.Create();
+        var restorer = new StubProjectRestorer(exitCode: 0);
+        var tester = CreateRoutedTester(projectRestorer: restorer);
+
+        var result = await tester.RunAsync(
+            CliArgumentRouter.Route(["init", project.ProjectPath]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(project.ProjectPath, restorer.ProjectPath);
+        Assert.Contains("Restore completed", result.Output);
+    }
+
+    [Fact]
+    public async Task InitRejectsNonConsoleProjectsWithoutChangingThem()
+    {
+        using var project = TemporaryProject.Create("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+        var original = await File.ReadAllTextAsync(project.ProjectPath, TestContext.Current.CancellationToken);
+        var tester = CreateRoutedTester();
+
+        var result = await tester.RunAsync(
+            CliArgumentRouter.Route(["init", project.ProjectPath, "--no-restore"]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("console projects", result.Output);
+        Assert.Equal(original, await File.ReadAllTextAsync(
+            project.ProjectPath,
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task InitUsesAVersionOverrideWithCentralPackageManagement()
+    {
+        using var project = TemporaryProject.Create();
+        await File.WriteAllTextAsync(
+            Path.Combine(project.DirectoryPath, "Directory.Packages.props"),
+            """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+              </PropertyGroup>
+            </Project>
+            """,
+            TestContext.Current.CancellationToken);
+        var tester = CreateRoutedTester();
+
+        var result = await tester.RunAsync(
+            CliArgumentRouter.Route([
+                "init", project.ProjectPath,
+                "--sdk-version", "4.5.6",
+                "--no-restore"
+            ]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        var packageReference = Elements(XDocument.Load(project.ProjectPath), "PackageReference").Single();
+        Assert.Null(Attribute(packageReference, "Version"));
+        Assert.Equal("4.5.6", Attribute(packageReference, "VersionOverride"));
     }
 
     [Theory]
@@ -307,19 +455,82 @@ public sealed class CliTests
         return tester;
     }
 
-    private static CommandAppTester CreateRoutedTester(IParityRunner? parityRunner = null)
+    private static CommandAppTester CreateRoutedTester(
+        IParityRunner? parityRunner = null,
+        IProjectRestorer? projectRestorer = null)
     {
         var tester = new CommandAppTester(new CommandAppTesterSettings { TrimConsoleOutput = false });
         var environment = new CliExecutionEnvironment(
             tester.Console,
             new StringReader(string.Empty),
-            ParityRunner: parityRunner);
+            ParityRunner: parityRunner,
+            ProjectRestorer: projectRestorer);
         tester.Configure(configurator =>
         {
+            configurator.AddCommand<InitCommand>("init").WithData(environment);
             configurator.AddCommand<TranspileCommand>("transpile").WithData(environment);
             configurator.AddCommand<VerifyCommand>("verify").WithData(environment);
         });
         return tester;
+    }
+
+    private static IEnumerable<XElement> Elements(XDocument document, string localName) =>
+        document.Descendants().Where(element => element.Name.LocalName == localName);
+
+    private static string? Element(XDocument document, string localName) =>
+        Elements(document, localName).LastOrDefault()?.Value;
+
+    private static string? Attribute(XDocument document, string elementName, string attributeName) =>
+        Attribute(Elements(document, elementName).Last(), attributeName);
+
+    private static string? Attribute(XElement element, string attributeName) =>
+        element.Attribute(attributeName)?.Value;
+
+    private sealed class StubProjectRestorer(int exitCode) : IProjectRestorer
+    {
+        public string? ProjectPath { get; private set; }
+
+        public Task<int> RestoreAsync(
+            string projectPath,
+            TextWriter output,
+            TextWriter error,
+            CancellationToken cancellationToken)
+        {
+            ProjectPath = projectPath;
+            return Task.FromResult(exitCode);
+        }
+    }
+
+    private sealed class TemporaryProject : IDisposable
+    {
+        private TemporaryProject(string directoryPath, string projectPath)
+        {
+            DirectoryPath = directoryPath;
+            ProjectPath = projectPath;
+        }
+
+        public string DirectoryPath { get; }
+        public string ProjectPath { get; }
+
+        public static TemporaryProject Create(string? contents = null)
+        {
+            var directoryPath = Path.Combine(Path.GetTempPath(), $"sharpsql-init-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(directoryPath);
+            var projectPath = Path.Combine(directoryPath, "Demo.csproj");
+            File.WriteAllText(projectPath, contents ?? """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <!-- existing comment -->
+                  <PropertyGroup>
+                    <OutputType>Exe</OutputType>
+                    <TargetFramework>net10.0</TargetFramework>
+                    <ExistingProperty>keep me</ExistingProperty>
+                  </PropertyGroup>
+                </Project>
+                """);
+            return new TemporaryProject(directoryPath, projectPath);
+        }
+
+        public void Dispose() => Directory.Delete(DirectoryPath, recursive: true);
     }
 
     private sealed class StubParityRunner(ParityRunResult result) : IParityRunner

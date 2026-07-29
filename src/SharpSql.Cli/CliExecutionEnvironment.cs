@@ -7,4 +7,5 @@ public sealed record CliExecutionEnvironment(
     TextReader Input,
     TextWriter? Output = null,
     TextWriter? Error = null,
-    IParityRunner? ParityRunner = null);
+    IParityRunner? ParityRunner = null,
+    IProjectRestorer? ProjectRestorer = null);

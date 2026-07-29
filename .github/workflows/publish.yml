@@ -103,7 +103,7 @@ jobs:
             --no-http-cache
           test "$(artifacts/tool/sharpsql --version)" = "$PACKAGE_VERSION"
 
-          ./scripts/test-sdk-package.sh artifacts/packages "$PACKAGE_VERSION"
+          ./scripts/test-sdk-package.sh artifacts/packages "$PACKAGE_VERSION" artifacts/tool/sharpsql
 
       - name: Upload NuGet packages
         uses: actions/upload-artifact@v7

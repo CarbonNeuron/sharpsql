@@ -10,14 +10,19 @@
 
   <Target Name="SharpSqlTranspile"
           Condition="'$(SharpSqlEnabled)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <PropertyGroup>
+      <SharpSqlResolvedOutputPath Condition="'$(SharpSqlOutputPath)' != ''">$(SharpSqlOutputPath)</SharpSqlResolvedOutputPath>
+      <SharpSqlResolvedOutputPath Condition="'$(SharpSqlResolvedOutputPath)' == '' and '$(SharpSqlOutputLocation)' == 'BuildOutput'">$(OutputPath)$(AssemblyName).sql</SharpSqlResolvedOutputPath>
+      <SharpSqlResolvedOutputPath Condition="'$(SharpSqlResolvedOutputPath)' == ''">$(IntermediateOutputPath)sharpsql/$(AssemblyName).sql</SharpSqlResolvedOutputPath>
+    </PropertyGroup>
     <Error Condition="!Exists('$(SharpSqlBuildHostPath)')"
            Text="SharpSql build host was not found at '$(SharpSqlBuildHostPath)'." />
-    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --project &quot;$(MSBuildProjectFullPath)&quot; --output &quot;$(SharpSqlOutputPath)&quot; --configuration &quot;$(Configuration)&quot; --framework &quot;$(TargetFramework)&quot; --entry &quot;$(SharpSqlEntryPoint)&quot;"
+    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --project &quot;$(MSBuildProjectFullPath)&quot; --output &quot;$(SharpSqlResolvedOutputPath)&quot; --configuration &quot;$(Configuration)&quot; --framework &quot;$(TargetFramework)&quot; --entry &quot;$(SharpSqlEntryPoint)&quot;"
           ConsoleToMSBuild="true"
           StandardOutputImportance="High"
           StandardErrorImportance="High" />
     <ItemGroup>
-      <FileWrites Include="$(SharpSqlOutputPath)" />
+      <FileWrites Include="$(SharpSqlResolvedOutputPath)" />
     </ItemGroup>
   </Target>
 

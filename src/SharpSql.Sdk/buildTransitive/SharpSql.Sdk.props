@@ -3,7 +3,7 @@
     <SharpSqlEnabled Condition="'$(SharpSqlEnabled)' == ''">true</SharpSqlEnabled>
     <SharpSqlEnableAnalyzer Condition="'$(SharpSqlEnableAnalyzer)' == ''">true</SharpSqlEnableAnalyzer>
     <SharpSqlGenerateOnBuild Condition="'$(SharpSqlGenerateOnBuild)' == ''">true</SharpSqlGenerateOnBuild>
-    <SharpSqlOutputPath Condition="'$(SharpSqlOutputPath)' == ''">$(IntermediateOutputPath)sharpsql/$(AssemblyName).sql</SharpSqlOutputPath>
+    <SharpSqlOutputLocation Condition="'$(SharpSqlOutputLocation)' == ''">Intermediate</SharpSqlOutputLocation>
     <SkipCompilerExecution Condition="'$(SharpSqlTranspileOnly)' == 'true'">true</SkipCompilerExecution>
   </PropertyGroup>
   <ItemGroup>

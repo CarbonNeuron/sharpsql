@@ -66,8 +66,8 @@ jobs:
           -p:Version="$PACKAGE_VERSION"
           -p:PackageVersion="$PACKAGE_VERSION"
 
-      - name: Smoke-test project SDK
-        run: ./scripts/test-sdk-package.sh artifacts/packages "$PACKAGE_VERSION"
+      - name: Smoke-test project SDK and init command
+        run: ./scripts/test-sdk-package.sh artifacts/packages "$PACKAGE_VERSION" artifacts/tool/sharpsql
 
       - name: Upload test results
         if: always()

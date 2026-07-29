@@ -61,17 +61,45 @@ sharpsql --help
 
 ### Project build and IDE integration
 
-Add the SDK package to a project that should be transpiled:
+Let the tool install and configure the SDK in a console project:
+
+```bash
+sharpsql init path/to/MyApp.csproj
+```
+
+`init` pins `SharpSql.Sdk` to the tool version, enables build generation and
+live diagnostics, restores the project, and writes SQL beside the compiled
+application at `$(OutputPath)$(AssemblyName).sql`. It can discover the only
+`.csproj` in a directory, so running `sharpsql init` from the project directory
+is enough. Existing project elements, comments, custom output paths, and entry
+settings are preserved; generation and analyzer switches follow the options on
+each run.
+
+Customize the generated path or select a non-default static entry method while
+initializing:
+
+```bash
+sharpsql init path/to/MyApp.csproj \
+  --output '$(MSBuildProjectDirectory)/generated/MyApp.sql' \
+  --entry MyApp.SqlJob::Run
+```
+
+Use `--analyzer-only` to skip SQL generation during normal builds,
+`--no-analyzer` to disable live diagnostics, or `--no-restore` when restore is
+handled separately. Central package management is supported with a version
+override.
+
+The equivalent manual project configuration is:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="SharpSql.Sdk" Version="0.1.0" PrivateAssets="all" />
+  <PackageReference Include="SharpSql.Sdk" Version="0.1.1" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>
   <!-- Required for libraries; executable projects use their normal entry point. -->
   <SharpSqlEntryPoint>MyApp.SqlJob::Run</SharpSqlEntryPoint>
-  <SharpSqlOutputPath>$(OutputPath)MyApp.sql</SharpSqlOutputPath>
+  <SharpSqlOutputLocation>BuildOutput</SharpSqlOutputLocation>
 </PropertyGroup>
 ```
 
@@ -82,9 +110,12 @@ and emits SQL during a normal build:
 dotnet build
 ```
 
-Without `SharpSqlOutputPath`, output is written to
-`$(IntermediateOutputPath)sharpsql/$(AssemblyName).sql`. To generate SQL without
-running the C# compiler, use transpile-only mode, or invoke the dedicated target:
+`SharpSqlOutputLocation` can be `BuildOutput` or `Intermediate`; the latter is
+the package default and writes beneath `$(IntermediateOutputPath)sharpsql`.
+An explicit `SharpSqlOutputPath` takes precedence over both. Paths are resolved
+when the transpile target runs, after normal SDK output properties are known.
+To generate SQL without running the C# compiler, use transpile-only mode, or
+invoke the dedicated target:
 
 ```bash
 dotnet build -p:SharpSqlTranspileOnly=true
