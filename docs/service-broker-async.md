@@ -51,8 +51,8 @@ OutputEvents(execution_id, sequence_number, output_text, created_at_utc)
 Sequence allocation and insertion are atomic. When the execution has a response
 conversation, the append operation also sends an output notification. The launcher
 drains committed events and emits them on its connection. Writes within one task stay
-ordered; ordering between concurrent tasks is intentionally scheduler-dependent, as
-it is in .NET.
+ordered. Timer continuations are currently serialized within one execution; output
+ordering between different executions remains scheduler-dependent.
 
 ## Provisioning
 
@@ -108,9 +108,11 @@ The executable first slice includes:
 - a validated activated dispatcher and generated root orchestrator;
 - execution-scoped durable tasks with program/handler routing, continuation state,
   JSON payloads, typed scalar/text/binary/reference results, and fault details;
-- generation-scoped `Task.WhenAll` dependency joins whose final child queues one
-  continuation message even when children finish concurrently; and
-- millisecond `Task.Delay`, task results, fault propagation, and proxied worker output;
+- source-ordered execution of each async invocation through its first incomplete
+  `Task.Delay`, with pre-await failures captured on the corresponding child task;
+- generation-scoped `Task.WhenAll` dependency joins whose final child queues exactly
+  one continuation message;
+- millisecond `Task.Delay`, task results, fault propagation, and proxied worker output; and
 - ordinary `try`/`catch` around resumed code, including `ApplicationException` and
   `SharpSql.DatabaseException` mappings.
 
@@ -128,4 +130,9 @@ cancellation, and abandoned-execution leases remain future work.
 
 Sub-second `Task.Delay` uses the durable timer table because Broker conversation timers
 use whole seconds. The generated launcher calls `SharpSql.ClaimDueContinuations` while
-it waits; the procedure uses skip-locked claims and atomically queues each due task.
+it waits. Async prefixes run in source enumeration order, matching C# execution through
+the first incomplete await. At most one timer continuation runs at a time per execution,
+in due-time and task order, so separate Broker readers cannot reorder access to shared
+captured state. Different executions can still use the worker pool concurrently. This
+per-execution serialization, including for `Task.Delay(0)`, does not yet reproduce all
+.NET scheduler interleavings for genuinely overlapping post-await CPU work.

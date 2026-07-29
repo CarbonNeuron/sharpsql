@@ -1628,6 +1628,7 @@ internal static class ExecutionInfrastructureSqlEmitter
                 procedure.Line("[TaskId] BIGINT NOT NULL,");
                 procedure.Line("[SuspensionGeneration] INT NOT NULL,");
                 procedure.Line("[Source] TINYINT NOT NULL,");
+                procedure.Line("[OrderAtUtc] DATETIME2(7) NOT NULL,");
                 procedure.Line("PRIMARY KEY ([ExecutionId], [TaskId])");
             }
             procedure.Line(");");
@@ -1666,13 +1667,37 @@ internal static class ExecutionInfrastructureSqlEmitter
                         procedure.Line("AND [task].[SuspensionGeneration] = [timer].[SuspensionGeneration]");
                     }
                     procedure.Line("WHERE [timer].[State] = 0 AND [timer].[DueAtUtc] <= CONVERT(DATETIME2(3), @NowUtc) AND [task].[State] = 0");
+                    procedure.Line("AND NOT EXISTS (");
+                    using (procedure.Indent())
+                    {
+                        procedure.Line("SELECT 1");
+                        procedure.Line($"FROM [{SchemaName}].[{TaskTimersTableName}] AS [earlier_timer]");
+                        procedure.Line($"INNER JOIN [{SchemaName}].[{TasksTableName}] AS [earlier_task]");
+                        using (procedure.Indent())
+                        {
+                            procedure.Line("ON [earlier_task].[ExecutionId] = [earlier_timer].[ExecutionId]");
+                            procedure.Line("AND [earlier_task].[TaskId] = [earlier_timer].[TaskId]");
+                            procedure.Line("AND [earlier_task].[SuspensionGeneration] = [earlier_timer].[SuspensionGeneration]");
+                        }
+                        procedure.Line("WHERE [earlier_timer].[ExecutionId] = [timer].[ExecutionId]");
+                        procedure.Line("AND [earlier_timer].[State] IN (0, 1, 2)");
+                        procedure.Line("AND [earlier_task].[State] NOT BETWEEN 4 AND 6");
+                        procedure.Line("AND (");
+                        using (procedure.Indent())
+                        {
+                            procedure.Line("[earlier_timer].[DueAtUtc] < [timer].[DueAtUtc]");
+                            procedure.Line("OR ([earlier_timer].[DueAtUtc] = [timer].[DueAtUtc] AND [earlier_timer].[TaskId] < [timer].[TaskId])");
+                        }
+                        procedure.Line(")");
+                    }
+                    procedure.Line(")");
                     procedure.Line("ORDER BY [timer].[DueAtUtc], [timer].[ExecutionId], [timer].[TaskId]");
                 }
                 procedure.Line(")");
                 procedure.Line("UPDATE [timer]");
                 procedure.Line("SET [State] = 1, [ClaimedAtUtc] = @NowUtc");
-                procedure.Line("OUTPUT INSERTED.[ExecutionId], INSERTED.[TaskId], INSERTED.[SuspensionGeneration], CAST(1 AS TINYINT)");
-                procedure.Line("INTO @Candidates ([ExecutionId], [TaskId], [SuspensionGeneration], [Source])");
+                procedure.Line("OUTPUT INSERTED.[ExecutionId], INSERTED.[TaskId], INSERTED.[SuspensionGeneration], CAST(1 AS TINYINT), INSERTED.[DueAtUtc]");
+                procedure.Line("INTO @Candidates ([ExecutionId], [TaskId], [SuspensionGeneration], [Source], [OrderAtUtc])");
                 procedure.Line($"FROM [{SchemaName}].[{TaskTimersTableName}] AS [timer]");
                 procedure.Line("INNER JOIN [Due] AS [due]");
                 using (procedure.Indent())
@@ -1694,10 +1719,10 @@ internal static class ExecutionInfrastructureSqlEmitter
                 }
                 procedure.Line("WHERE [task].[State] = 0;");
                 procedure.Line();
-                procedure.Line("INSERT INTO @Candidates ([ExecutionId], [TaskId], [SuspensionGeneration], [Source])");
+                procedure.Line("INSERT INTO @Candidates ([ExecutionId], [TaskId], [SuspensionGeneration], [Source], [OrderAtUtc])");
                 procedure.Line("SELECT TOP (@BatchSize - (SELECT COUNT(*) FROM @Candidates))");
                 using (procedure.Indent())
-                    procedure.Line("[task].[ExecutionId], [task].[TaskId], [task].[SuspensionGeneration], CAST(0 AS TINYINT)");
+                    procedure.Line("[task].[ExecutionId], [task].[TaskId], [task].[SuspensionGeneration], CAST(0 AS TINYINT), COALESCE([task].[ReadyAtUtc], @NowUtc)");
                 procedure.Line($"FROM [{SchemaName}].[{TasksTableName}] AS [task] WITH (UPDLOCK, READPAST, ROWLOCK)");
                 procedure.Line("WHERE [task].[State] = 1");
                 using (procedure.Indent())
@@ -1714,7 +1739,7 @@ internal static class ExecutionInfrastructureSqlEmitter
                 procedure.Line();
                 procedure.Line("DECLARE [due_cursor] CURSOR LOCAL FAST_FORWARD FOR");
                 procedure.Line("SELECT [ExecutionId], [TaskId], [SuspensionGeneration], [Source]");
-                procedure.Line("FROM @Candidates ORDER BY [Source] DESC, [ExecutionId], [TaskId];");
+                procedure.Line("FROM @Candidates ORDER BY [Source] DESC, [OrderAtUtc], [ExecutionId], [TaskId];");
                 procedure.Line("OPEN [due_cursor];");
                 procedure.Line("FETCH NEXT FROM [due_cursor] INTO @ExecutionId, @TaskId, @SuspensionGeneration, @Source;");
                 procedure.Line("WHILE @@FETCH_STATUS = 0");

@@ -14,7 +14,7 @@ public sealed partial class SharpSqlCompiler
     private const int ServiceBrokerUnhandledDatabaseError = 51923;
     private const int ServiceBrokerCanceledError = 51924;
     private const int ServiceBrokerWorkerTransactionRequiredError = 51927;
-    private const string ServiceBrokerProgramAbi = "1";
+    private const string ServiceBrokerProgramAbi = "2";
 
     private bool _emittingServiceBrokerWorker;
     private bool _serviceBrokerProgramEmitted;
@@ -324,32 +324,45 @@ public sealed partial class SharpSqlCompiler
             var item = _names.Allocate("_async_task_item");
             var childPayload = _names.Allocate("_async_child_payload");
             var childTask = _names.Allocate("_async_child_task");
+            var delayMilliseconds = _names.Allocate("_async_delay_milliseconds");
+            var childErrorNumber = _names.Allocate("_async_child_error_number");
+            var childErrorMessage = _names.Allocate("_async_child_error_message");
             var parameter = creation.Handler.Method.Parameters[0];
+            var methodScope = scope.Child();
+            methodScope.Add(parameter.Symbol, new ScalarVariableBinding(item, parameter.Type));
+            var payloadValues = new List<(IrSymbol Symbol, string Sql)>
+            {
+                (parameter.Symbol, item)
+            };
+            foreach (var capture in creation.Handler.Captures)
+            {
+                if (scope.Find(capture) is not ScalarVariableBinding binding)
+                {
+                    AddDiagnostic(
+                        "SS7004",
+                        $"Captured async variable '{capture.Name}' is not a durable scalar.",
+                        creation.Handler.Method.Source);
+                    continue;
+                }
+                payloadValues.Add((capture, binding.SqlName));
+            }
             _sql.Line($"DECLARE {taskIds} NVARCHAR(MAX) = N'[]';");
             _sql.Line($"DECLARE {index} INT = 0;");
             _sql.Line($"DECLARE {count} INT = {SequenceCountSql(collection)};");
             _sql.Line($"DECLARE {item} {parameter.Type.SqlType()};");
             _sql.Line($"DECLARE {childPayload} NVARCHAR(MAX);");
             _sql.Line($"DECLARE {childTask} BIGINT;");
+            _sql.Line($"DECLARE {delayMilliseconds} INT;");
+            _sql.Line($"DECLARE {childErrorNumber} INT;");
+            _sql.Line($"DECLARE {childErrorMessage} NVARCHAR(2048);");
             _sql.Line($"WHILE {index} < {count}");
             _sql.Line("BEGIN");
             using (_sql.Indent())
             {
                 _sql.Line($"SET {item} = {SequenceElementSql(collection, index, parameter.Type)};");
-                var payloadValues = new List<(IrSymbol Symbol, string Sql)>
-                {
-                    (parameter.Symbol, item)
-                };
-                foreach (var capture in creation.Handler.Captures)
-                {
-                    if (scope.Find(capture) is not ScalarVariableBinding binding)
-                    {
-                        AddDiagnostic("SS7004", $"Captured async variable '{capture.Name}' is not a durable scalar.", capture == parameter.Symbol ? statement.Source : creation.Handler.Method.Source);
-                        continue;
-                    }
-                    payloadValues.Add((capture, binding.SqlName));
-                }
-                _sql.Line($"SET {childPayload} = {PayloadJsonSql(payloadValues)};");
+                // Calling an async method runs synchronously through its first incomplete
+                // await. Allocate its task first so an unhandled prefix error faults only
+                // that task, then evaluate each prefix in source enumeration order.
                 _sql.Line($"SET {childTask} = NULL;");
                 _sql.Line("EXEC [SharpSql].[ScheduleTask]");
                 using (_sql.Indent())
@@ -358,9 +371,55 @@ public sealed partial class SharpSqlCompiler
                     _sql.Line($"@ProgramId = N'{_serviceBrokerProgramId}',");
                     _sql.Line($"@HandlerName = N'{EscapeSqlString(creation.Handler.HandlerName)}',");
                     _sql.Line("@ContinuationState = 0,");
-                    _sql.Line($"@PayloadJson = {childPayload},");
+                    _sql.Line("@StartSuspended = 1,");
                     _sql.Line($"@TaskId = {childTask} OUTPUT;");
                 }
+                _sql.Line("BEGIN TRY");
+                using (_sql.Indent())
+                {
+                    foreach (var beforeDelay in creation.Handler.BeforeDelay)
+                    {
+                        EmitStatement(
+                            beforeDelay,
+                            methodScope,
+                            inlineReturn: null,
+                            loop: null,
+                            namePrefix: $"async_{creation.Handler.Method.Name}_start");
+                    }
+                    var delay = (IrInvocationExpression)creation.Handler.Delay.Operand;
+                    EmitVmExpression(delay.Arguments[0], methodScope, context: null, milliseconds =>
+                    {
+                        _sql.Line($"SET {delayMilliseconds} = {milliseconds};");
+                        _sql.Line($"SET {childPayload} = {PayloadJsonSql(payloadValues)};");
+                        _sql.Line("EXEC [SharpSql].[SuspendTaskForDelay]");
+                        using (_sql.Indent())
+                        {
+                            _sql.Line($"@ExecutionId = {RuntimeExecutionId},");
+                            _sql.Line($"@TaskId = {childTask},");
+                            _sql.Line("@ContinuationState = 1,");
+                            _sql.Line($"@PayloadJson = {childPayload},");
+                            _sql.Line($"@DelayMilliseconds = {delayMilliseconds};");
+                        }
+                    });
+                }
+                _sql.Line("END TRY");
+                _sql.Line("BEGIN CATCH");
+                using (_sql.Indent())
+                {
+                    _sql.Line("IF XACT_STATE() <> 1 THROW;");
+                    _sql.Line($"SET {childErrorNumber} = ERROR_NUMBER();");
+                    _sql.Line($"SET {childErrorMessage} = LEFT(ERROR_MESSAGE(), 2048);");
+                    _sql.Line("EXEC [SharpSql].[CompleteTask]");
+                    using (_sql.Indent())
+                    {
+                        _sql.Line($"@ExecutionId = {RuntimeExecutionId},");
+                        _sql.Line($"@TaskId = {childTask},");
+                        _sql.Line("@State = 5,");
+                        _sql.Line($"@ErrorNumber = {childErrorNumber},");
+                        _sql.Line($"@ErrorMessage = {childErrorMessage};");
+                    }
+                }
+                _sql.Line("END CATCH;");
                 _sql.Line($"SET {taskIds} = JSON_MODIFY({taskIds}, 'append $', {childTask});");
                 _sql.Line($"SET {index} = {index} + 1;");
             }

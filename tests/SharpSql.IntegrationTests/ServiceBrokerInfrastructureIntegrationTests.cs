@@ -338,6 +338,77 @@ public sealed class ServiceBrokerInfrastructureIntegrationTests(SqlServerFixture
     }
 
     [Fact]
+    public async Task DueTimerClaimsWaitForEarlierTimerTaskToComplete()
+    {
+        await using var connection = await OpenBrokerDatabaseAsync("SharpSqlBrokerTimerOrderTests");
+        await ExecuteAsync(connection, ExecutionInfrastructureSqlEmitter.Emit());
+
+        var executionId = Guid.NewGuid();
+        const long laterTaskId = 1;
+        const long earlierTaskId = 2;
+        try
+        {
+            await using (var setup = connection.CreateCommand())
+            {
+                setup.CommandText = """
+                    INSERT INTO [SharpSql].[Executions] ([ExecutionId]) VALUES (@executionId);
+                    INSERT INTO [SharpSql].[Tasks] (
+                        [ExecutionId], [TaskId], [ProgramId], [HandlerName], [ContinuationState],
+                        [SuspensionGeneration], [State], [PayloadJson]
+                    ) VALUES
+                        (@executionId, @laterTaskId, N'timer-program', N'LaterTimer', 0, 1, 0, N'{}'),
+                        (@executionId, @earlierTaskId, N'timer-program', N'EarlierTimer', 0, 1, 0, N'{}');
+                    INSERT INTO [SharpSql].[TaskTimers] (
+                        [ExecutionId], [TaskId], [SuspensionGeneration], [DelayMilliseconds], [DueAtUtc]
+                    ) VALUES
+                        (@executionId, @laterTaskId, 1, 1, DATEADD(SECOND, -1, CONVERT(DATETIME2(3), SYSUTCDATETIME()))),
+                        (@executionId, @earlierTaskId, 1, 1, DATEADD(SECOND, -2, CONVERT(DATETIME2(3), SYSUTCDATETIME())));
+                    """;
+                setup.Parameters.AddWithValue("@executionId", executionId);
+                setup.Parameters.AddWithValue("@laterTaskId", laterTaskId);
+                setup.Parameters.AddWithValue("@earlierTaskId", earlierTaskId);
+                await setup.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+
+            Assert.Equal(1, await ClaimDueContinuationsAsync(connection));
+            Assert.Equal(0, await ClaimDueContinuationsAsync(connection));
+
+            await AssertTimerAndTaskStatesAsync(
+                connection,
+                executionId,
+                earlierTaskId,
+                expectedTimerState: 2,
+                expectedTaskState: 2);
+            await AssertTimerAndTaskStatesAsync(
+                connection,
+                executionId,
+                laterTaskId,
+                expectedTimerState: 0,
+                expectedTaskState: 0);
+
+            await CompleteTaskAsync(connection, executionId, earlierTaskId);
+            await AssertTimerAndTaskStatesAsync(
+                connection,
+                executionId,
+                earlierTaskId,
+                expectedTimerState: 2,
+                expectedTaskState: 4);
+
+            Assert.Equal(1, await ClaimDueContinuationsAsync(connection));
+            await AssertTimerAndTaskStatesAsync(
+                connection,
+                executionId,
+                laterTaskId,
+                expectedTimerState: 2,
+                expectedTaskState: 2);
+        }
+        finally
+        {
+            await DeleteExecutionAsync(connection, executionId);
+        }
+    }
+
+    [Fact]
     public async Task DispatcherReturnsAfterConsumingTheLastEndDialog()
     {
         await using var connection = await OpenBrokerDatabaseAsync("SharpSqlBrokerDispatcherLoopTests");
@@ -476,6 +547,31 @@ public sealed class ServiceBrokerInfrastructureIntegrationTests(SqlServerFixture
             if (reader.GetBoolean(3))
                 count++;
         return count;
+    }
+
+    private static async Task AssertTimerAndTaskStatesAsync(
+        SqlConnection connection,
+        Guid executionId,
+        long taskId,
+        byte expectedTimerState,
+        byte expectedTaskState)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT [timer].[State], [task].[State]
+            FROM [SharpSql].[TaskTimers] AS [timer]
+            INNER JOIN [SharpSql].[Tasks] AS [task]
+                ON [task].[ExecutionId] = [timer].[ExecutionId]
+                AND [task].[TaskId] = [timer].[TaskId]
+            WHERE [timer].[ExecutionId] = @executionId AND [timer].[TaskId] = @taskId;
+            """;
+        command.Parameters.AddWithValue("@executionId", executionId);
+        command.Parameters.AddWithValue("@taskId", taskId);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+        Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(expectedTimerState, reader.GetByte(0));
+        Assert.Equal(expectedTaskState, reader.GetByte(1));
+        Assert.False(await reader.ReadAsync(TestContext.Current.CancellationToken));
     }
 
     private static async Task<TaskRequest?> ReceiveTaskRequestAsync(

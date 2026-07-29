@@ -154,7 +154,7 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
         void OnInfoMessage(object sender, SqlInfoMessageEventArgs args) =>
             messages.AddRange(args.Errors.Cast<SqlError>().Where(error => error.Class == 0).Select(error => error.Message));
         connection.InfoMessage += OnInfoMessage;
-        SqlException exception;
+        SqlError exception;
         try
         {
             exception = await ExecuteForSqlErrorAsync(connection, compilation.Sql);
@@ -167,6 +167,52 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
         Assert.Equal(51923, exception.Number);
         Assert.DoesNotContain("root-before-failure", messages);
         Assert.DoesNotContain("child-ran", messages);
+        await AssertExecutionsCleanedUpAsync(connection);
+    }
+
+    [Fact]
+    public async Task PreAwaitFailureFaultsOnlyItsChildTask()
+    {
+        await using var connection = await OpenBrokerDatabaseAsync();
+        await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
+
+        const string source = """
+            var values = new List<int> { 1, 2 };
+            var tasks = values.Select(Work).ToList();
+            await Task.WhenAll(tasks);
+            Console.WriteLine("after");
+
+            async Task<int> Work(int value)
+            {
+                if (value == 1)
+                    throw new ApplicationException("pre-await");
+                await Task.Delay(10);
+                Console.WriteLine($"completed:{value}");
+                return value;
+            }
+            """;
+        var compilation = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions { RuntimeStorage = RuntimeStorageKind.ServiceBroker });
+        Assert.True(compilation.Success, string.Join(Environment.NewLine, compilation.Diagnostics));
+
+        var messages = new List<string>();
+        void OnInfoMessage(object sender, SqlInfoMessageEventArgs args) =>
+            messages.AddRange(args.Errors.Cast<SqlError>().Where(error => error.Class == 0).Select(error => error.Message));
+        connection.InfoMessage += OnInfoMessage;
+        SqlError exception;
+        try
+        {
+            exception = await ExecuteForSqlErrorAsync(connection, compilation.Sql);
+        }
+        finally
+        {
+            connection.InfoMessage -= OnInfoMessage;
+        }
+
+        Assert.Equal(51012, exception.Number);
+        Assert.Contains("completed:2", messages);
+        Assert.DoesNotContain("after", messages);
         await AssertExecutionsCleanedUpAsync(connection);
     }
 
@@ -303,12 +349,15 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
     }
 
     [Fact]
-    public async Task ExecutesTheCapturedRandomRecordExampleAcrossWorkers()
+    public async Task CapturedRandomRecordExampleMatchesCSharpExactlyAcrossWorkers()
     {
         await using var connection = await OpenBrokerDatabaseAsync();
         await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
 
         const string source = """
+            using System.Linq;
+            using System.Threading.Tasks;
+
             var people = new List<Person>
             {
                 new("Bob", 12),
@@ -350,6 +399,24 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
 
             record Person(string Name, int Age);
             """;
+        var csharp = await ParityHarness.ExecuteCSharpAsync(
+            new ParityCase("service-broker/random-record.cs", source));
+        Assert.Null(csharp.Failure);
+        var expectedOutput = """
+            Person { Name = Epstein, Age = 50 }
+            Person { Name = Jeffery, Age = 40 }
+            Person { Name = Jane, Age = 30 }
+            Person { Name = John, Age = 20 }
+            Person { Name = Bob, Age = 12 }
+            Don't worry, Jane
+            Person { Name = Epstein, Age = 84 }
+            Person { Name = Jeffery, Age = 63 }
+            Person { Name = John, Age = 59 }
+            Person { Name = Jane, Age = 41 }
+            Person { Name = Bob, Age = 31 }
+            """.Split('\n');
+        Assert.Equal(expectedOutput, csharp.StandardOutput.Split('\n'));
+
         var compilation = new SharpSqlCompiler().Transpile(
             source,
             new TranspileOptions { RuntimeStorage = RuntimeStorageKind.ServiceBroker });
@@ -357,13 +424,7 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
 
         var messages = await ExecuteCapturingMessagesAsync(connection, compilation.Sql);
 
-        foreach (var name in new[] { "Bob", "John", "Jane", "Jeffery", "Epstein" })
-        {
-            Assert.True(
-                messages.Count(message => message.Contains($"Name = {name}", StringComparison.Ordinal)) >= 2,
-                $"Expected before/after output for {name}:{Environment.NewLine}{string.Join(Environment.NewLine, messages)}");
-        }
-        Assert.InRange(messages.Count, 10, 15);
+        Assert.Equal(csharp.StandardOutput.Split('\n'), messages);
         await AssertExecutionsCleanedUpAsync(connection);
     }
 
@@ -446,7 +507,10 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
         {
             InitialCatalog = databaseName
         }.ConnectionString;
-        var connection = new SqlConnection(connectionString);
+        var connection = new SqlConnection(connectionString)
+        {
+            FireInfoMessageEventOnUserErrors = true
+        };
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         return connection;
     }
@@ -482,8 +546,13 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
         }
     }
 
-    private static async Task<SqlException> ExecuteForSqlErrorAsync(SqlConnection connection, string sql)
+    private static async Task<SqlError> ExecuteForSqlErrorAsync(SqlConnection connection, string sql)
     {
+        SqlError? reportedError = null;
+        void OnInfoMessage(object sender, SqlInfoMessageEventArgs args) =>
+            reportedError ??= args.Errors.Cast<SqlError>().FirstOrDefault(error => error.Class > 0);
+
+        connection.InfoMessage += OnInfoMessage;
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.CommandTimeout = 30;
@@ -493,9 +562,14 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
         }
         catch (SqlException exception)
         {
-            return exception;
+            return exception.Errors.Cast<SqlError>().FirstOrDefault(error => error.Class > 0)
+                ?? exception.Errors.Cast<SqlError>().First();
         }
-        throw new InvalidOperationException("Expected the SQL batch to fail.");
+        finally
+        {
+            connection.InfoMessage -= OnInfoMessage;
+        }
+        return reportedError ?? throw new InvalidOperationException("Expected the SQL batch to fail.");
     }
 
     private static async Task WaitForSuspendedExecutionAsync(SqlConnection connection)

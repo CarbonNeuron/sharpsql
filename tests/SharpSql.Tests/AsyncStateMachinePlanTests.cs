@@ -267,6 +267,27 @@ public sealed class AsyncStateMachinePlanTests
         Assert.Contains("@LockOwner = ''Transaction''", result.Sql);
         Assert.DoesNotContain("sp_releaseapplock", result.Sql);
         Assert.DoesNotContain("Await expressions require async scheduling", result.Sql);
+
+        var childAllocation = result.Sql.IndexOf("@StartSuspended = 1", StringComparison.Ordinal);
+        Assert.True(childAllocation >= 0);
+        var childSuspension = result.Sql.IndexOf(
+            "EXEC [SharpSql].[SuspendTaskForDelay]",
+            childAllocation,
+            StringComparison.Ordinal);
+        var synchronousRandom = result.Sql.IndexOf(
+            "sys.sp_getapplock",
+            childAllocation,
+            StringComparison.Ordinal);
+        var childContinuation = result.Sql.IndexOf(
+            "@ContinuationState = 1",
+            childAllocation,
+            StringComparison.Ordinal);
+        Assert.True(synchronousRandom > childAllocation && synchronousRandom < childSuspension);
+        Assert.True(childContinuation > childSuspension);
+
+        Assert.DoesNotContain(
+            "SET [DueAtUtc] = DATEADD(MILLISECOND, [timer].[DelayMilliseconds]",
+            result.Sql);
     }
 
     [Fact]
