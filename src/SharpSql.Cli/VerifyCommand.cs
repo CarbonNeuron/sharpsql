@@ -42,6 +42,10 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
         [DefaultValue(60)]
         public int CommandTimeoutSeconds { get; init; } = 60;
 
+        [CommandOption("--keep-container")]
+        [Description("Keep and reuse the SQL Server container across verify runs.")]
+        public bool KeepContainer { get; init; }
+
         public override ValidationResult Validate()
         {
             var isProject = InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
@@ -77,7 +81,8 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
             settings.Configuration,
             settings.TargetFramework,
             settings.SqlServerImage,
-            settings.CommandTimeoutSeconds);
+            settings.CommandTimeoutSeconds,
+            settings.KeepContainer);
         var runner = environment.ParityRunner ?? new TestcontainersParityRunner();
 
         ParityRunResult result;
@@ -132,6 +137,9 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
 
         if (settings.SqlOutputPath is not null)
             await File.WriteAllTextAsync(settings.SqlOutputPath, result.GeneratedSql, cancellationToken);
+
+        if (settings.KeepContainer)
+            environment.Console.MarkupLine("[grey]SQL Server container kept running for reuse.[/]");
 
         if (result.Matches)
         {

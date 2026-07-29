@@ -25,7 +25,8 @@ public sealed record ParityRunRequest(
     string Configuration,
     string? TargetFramework,
     string SqlServerImage,
-    int CommandTimeoutSeconds)
+    int CommandTimeoutSeconds,
+    bool KeepContainer)
 {
     public bool IsProject => Source is null;
 }

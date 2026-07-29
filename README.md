@@ -84,6 +84,12 @@ sharpsql verify path/to/MyProject.csproj \
   --configuration Release
 ```
 
+Add `--keep-container` to retain and reuse the matching SQL Server container on
+later verification runs. Without the option, each run removes its container at
+the end as usual. Retained containers are labeled
+`io.sharpsql.verify.reusable=true` so they can be found or removed with Docker
+Desktop or the Docker CLI.
+
 Compile all C# documents in an MSBuild project by selecting a parameterless static entry method:
 
 ```bash

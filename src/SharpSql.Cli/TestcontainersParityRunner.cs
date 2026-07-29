@@ -59,18 +59,33 @@ public sealed class TestcontainersParityRunner : IParityRunner
         if (csharp.Failure is { Category: ParityFailureCategory.Compilation })
             return new ParityRunResult(csharp, new ParityOutcome(string.Empty, null), transpileResult.Sql);
 
-        await using var container = new MsSqlBuilder(request.SqlServerImage)
-            .WithLogger(NullLogger.Instance)
-            .Build();
-        reportStage?.Invoke(new ParityStageUpdate(ParityStage.StartingSqlServer));
-        await container.StartAsync(cancellationToken);
-        reportStage?.Invoke(new ParityStageUpdate(ParityStage.EvaluatingSqlServer));
-        var sqlServer = await ExecuteSqlAsync(
-            transpileResult.Sql,
-            container.GetConnectionString(),
-            request.CommandTimeoutSeconds,
-            cancellationToken);
-        return new ParityRunResult(csharp, sqlServer, transpileResult.Sql);
+        var containerBuilder = new MsSqlBuilder(request.SqlServerImage)
+            .WithLogger(NullLogger.Instance);
+        if (request.KeepContainer)
+        {
+            containerBuilder = containerBuilder
+                .WithReuse(true)
+                .WithLabel("io.sharpsql.verify.reusable", "true");
+        }
+
+        var container = containerBuilder.Build();
+        try
+        {
+            reportStage?.Invoke(new ParityStageUpdate(ParityStage.StartingSqlServer));
+            await container.StartAsync(cancellationToken);
+            reportStage?.Invoke(new ParityStageUpdate(ParityStage.EvaluatingSqlServer));
+            var sqlServer = await ExecuteSqlAsync(
+                transpileResult.Sql,
+                container.GetConnectionString(),
+                request.CommandTimeoutSeconds,
+                cancellationToken);
+            return new ParityRunResult(csharp, sqlServer, transpileResult.Sql);
+        }
+        finally
+        {
+            if (!request.KeepContainer)
+                await container.DisposeAsync();
+        }
     }
 
     private static async Task<ProjectCompilationResult> LoadCompilationAsync(

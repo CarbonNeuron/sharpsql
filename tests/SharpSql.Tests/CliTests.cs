@@ -180,11 +180,13 @@ public sealed class CliTests
                 ProjectPath,
                 "--entry", "MultiFileProject.SqlJob::Run",
                 "--configuration", "Debug",
-                "--framework", "net10.0"
+                "--framework", "net10.0",
+                "--keep-container"
             ]),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(0, result.ExitCode);
+        Assert.Contains("container kept running for reuse", result.Output);
         var request = Assert.IsType<ParityRunRequest>(runner.LastRequest);
         Assert.True(request.IsProject);
         Assert.Null(request.Source);
@@ -192,6 +194,7 @@ public sealed class CliTests
         Assert.Equal("MultiFileProject.SqlJob::Run", request.EntryPoint);
         Assert.Equal("Debug", request.Configuration);
         Assert.Equal("net10.0", request.TargetFramework);
+        Assert.True(request.KeepContainer);
     }
 
     [Fact]
