@@ -268,6 +268,8 @@ public sealed partial class SharpSqlCompiler
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
+        if (IntrinsicCatalog.IsThreadGetCurrentProcessorId(invocation))
+            return SqlScalarExpression.Primary("CONVERT(INT, @@SPID)", IrType.Int, ScalarNullability.NonNull);
         if (TryEmitLinqInvocation(invocation, scope, substitutions, out var linqExpression))
             return linqExpression;
         if (TryEmitHeapInvocationScalar(invocation, scope, substitutions, out var heapExpression))

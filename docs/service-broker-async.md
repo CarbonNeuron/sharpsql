@@ -39,6 +39,10 @@ Durable task states are `0` waiting, `1` ready, `2` enqueued, `3` running,
 The entry point is itself the root task. The outer generated batch is only its
 launcher, so ordinary entry-point code can suspend and resume on activated sessions.
 
+`Thread.GetCurrentProcessorId()` reports the SQL Server session ID (`@@SPID`) of the
+activated worker executing the current slice. It identifies the worker rather than a
+physical processor; a continuation can report a different ID after another suspension.
+
 ## Console output
 
 Workers do not use `PRINT`, because informational messages are returned only to the

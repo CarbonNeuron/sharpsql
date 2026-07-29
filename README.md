@@ -328,6 +328,7 @@ var result = await new SharpSqlProjectCompiler().TranspileAsync(
 - String length/indexing and `string(char[])` construction
 - `if`/`else`, `while`, `do`, `for`, `foreach`, `break`, and `continue`
 - `Console.WriteLine` and `Console.Write` lowered to `PRINT`
+- `Thread.GetCurrentProcessorId()` lowered to the current SQL session/worker ID (`@@SPID`)
 - Pure-expression and procedural method inlining with hygienic variables and labels
 - Recursive, mutually recursive, and over-budget calls through one generated stack and return trampoline
 - Classes with reference identity, inherited typed-field layouts, base-to-derived initialization, procedural constructor bodies, `this(...)`/`base(...)` chaining, virtual/interface dispatch, object initializers, and instance methods; records use the same typed heap model

@@ -33,6 +33,42 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void TranslatesCurrentProcessorIdToTheSqlSessionId()
+    {
+        const string source = """
+            using System.Threading;
+
+            int workerId = Thread.GetCurrentProcessorId();
+            Console.WriteLine($"worker={workerId}");
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DECLARE @workerId INT = CONVERT(INT, @@SPID);", result.Sql);
+        Assert.Contains("PRINT CONCAT(N'worker=', @workerId);", result.Sql);
+    }
+
+    [Fact]
+    public void DoesNotTreatAUserThreadTypeAsTheRuntimeIntrinsic()
+    {
+        const string source = """
+            int workerId = Thread.GetCurrentProcessorId();
+
+            static class Thread
+            {
+                public static int GetCurrentProcessorId() => 123;
+            }
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DECLARE @workerId INT = 123;", result.Sql);
+        Assert.DoesNotContain("@@SPID", result.Sql);
+    }
+
+    [Fact]
     public void TranslatesVariablesAndLoops()
     {
         const string source = """

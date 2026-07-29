@@ -476,6 +476,51 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
     }
 
     [Fact]
+    public async Task CurrentProcessorIdReportsTheActivatedWorkerSession()
+    {
+        await using var connection = await OpenBrokerDatabaseAsync();
+        await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
+
+        const string source = """
+            using System.Threading;
+
+            var values = new List<int> { 1, 2, 3, 4, 5 };
+            var tasks = values.Select(Work).ToList();
+            await Task.WhenAll(tasks);
+
+            async Task<int> Work(int value)
+            {
+                await Task.Delay(value * 10);
+                Console.WriteLine($"worker:{Thread.GetCurrentProcessorId()}:{value}");
+                return value;
+            }
+            """;
+        var compilation = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions { RuntimeStorage = RuntimeStorageKind.ServiceBroker });
+        Assert.True(compilation.Success, string.Join(Environment.NewLine, compilation.Diagnostics));
+
+        var messages = await ExecuteCapturingMessagesAsync(connection, compilation.Sql);
+
+        var workerMessages = messages
+            .Where(message => message.StartsWith("worker:", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Equal(5, workerMessages.Length);
+        Assert.Equal(
+            Enumerable.Range(1, 5),
+            workerMessages
+                .Select(message => int.Parse(message.Split(':')[2], System.Globalization.CultureInfo.InvariantCulture))
+                .Order());
+        Assert.All(workerMessages, message =>
+        {
+            var workerId = int.Parse(message.Split(':')[1], System.Globalization.CultureInfo.InvariantCulture);
+            Assert.True(workerId > 0);
+            Assert.NotEqual(connection.ServerProcessId, workerId);
+        });
+        await AssertExecutionsCleanedUpAsync(connection);
+    }
+
+    [Fact]
     public async Task ExecutesForkJoinDelaysCatchAndWorkerOutputEndToEnd()
     {
         await using var connection = await OpenBrokerDatabaseAsync();

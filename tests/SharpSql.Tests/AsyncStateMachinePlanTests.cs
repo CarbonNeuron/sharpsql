@@ -237,6 +237,7 @@ public sealed class AsyncStateMachinePlanTests
                 {
                     Console.WriteLine($"Don't worry, {person.Name}");
                 }
+                Console.WriteLine($"[{System.Threading.Thread.GetCurrentProcessorId()}] Aging up {person.Name}");
                 return person with { Age = person.Age + random.Next(0, 50) };
             }
 
@@ -261,6 +262,7 @@ public sealed class AsyncStateMachinePlanTests
         Assert.Contains("EXEC [SharpSql].[RegisterTaskDependency]", result.Sql);
         Assert.Contains("INNER JOIN [SharpSql].[Tasks]", result.Sql);
         Assert.Contains("EXEC [SharpSql].[AppendOutput]", result.Sql);
+        Assert.Contains("CONCAT(N''['', CONVERT(INT, @@SPID), N''] Aging up '',", result.Sql);
         Assert.Contains("IF DATALENGTH(@__sharpsql_output_text) <= 4000", result.Sql);
         Assert.Contains("RAISERROR(N'%s', 0, 1, @__sharpsql_output_text) WITH NOWAIT;", result.Sql);
         Assert.Contains("PRINT @__sharpsql_output_text;", result.Sql);

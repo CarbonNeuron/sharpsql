@@ -9,6 +9,9 @@ internal sealed record IntrinsicDescriptor(
 
 internal static class IntrinsicCatalog
 {
+    private const string ThreadGetCurrentProcessorIdMethodId =
+        "M:System.Threading.Thread.GetCurrentProcessorId";
+
     private static readonly HashSet<string> DeferredLinqOperators = new(StringComparer.Ordinal)
     {
         "AsEnumerable", "AsQueryable", "Where", "Select", "OrderBy", "OrderByDescending",
@@ -36,6 +39,10 @@ internal static class IntrinsicCatalog
 
     public static bool IsMaterializer(string name) => name is "ToList" or "ToArray";
 
+    public static bool IsThreadGetCurrentProcessorId(IrInvocationExpression invocation) =>
+        invocation.Arguments.Count == 0 &&
+        invocation.TargetMethodId.Value == ThreadGetCurrentProcessorIdMethodId;
+
     public static IntrinsicDescriptor Describe(IrInvocationExpression invocation)
     {
         var name = invocation.MethodName ?? string.Empty;
@@ -46,6 +53,10 @@ internal static class IntrinsicCatalog
         if (name is "Write" or "WriteLine" &&
             invocation.Target is IrMemberExpression { Receiver: IrVariableExpression { Symbol.Name: "Console" } })
             return new IntrinsicDescriptor(MethodEffects.PerformsIo);
+
+        if (IsThreadGetCurrentProcessorId(invocation))
+            return new IntrinsicDescriptor(
+                MethodEffects.ReadsMutableState | MethodEffects.Nondeterministic);
 
         if (KnownTypeFacts.IsRandom(receiverType) && name is "Next" or "NextDouble")
             return new IntrinsicDescriptor(
