@@ -33,36 +33,13 @@ jobs:
         uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
-          cache: true
-          cache-dependency-path: |
-            **/*.csproj
-            **/*.props
-            **/*.targets
-            global.json
-            .github/workflows/publish.yml
 
-      - name: Resolve SQL Server image
-        id: sql-server-image
-        run: |
-          digest="$(docker buildx imagetools inspect mcr.microsoft.com/mssql/server:2022-latest --format '{{.Manifest.Digest}}')"
-          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Cache SQL Server image
-        id: sql-server-cache
-        uses: actions/cache@v5
+      - name: Restore formatting verification
+        id: format-cache
+        uses: actions/cache/restore@v5
         with:
-          path: .cache/docker/mssql-server.tar
-          key: sql-server-${{ runner.os }}-${{ runner.arch }}-${{ steps.sql-server-image.outputs.digest }}
-
-      - name: Load SQL Server image
-        run: |
-          if [[ -f .cache/docker/mssql-server.tar ]]; then
-            docker load --input .cache/docker/mssql-server.tar
-          else
-            mkdir -p .cache/docker
-            docker pull mcr.microsoft.com/mssql/server:2022-latest
-            docker save --output .cache/docker/mssql-server.tar mcr.microsoft.com/mssql/server:2022-latest
-          fi
+          path: .cache/format/verified
+          key: format-${{ runner.os }}-${{ hashFiles('global.json', 'SharpSql.slnx', 'Directory.Build.*', '**/*.editorconfig', '**/*.globalconfig', '**/*.csproj', '**/*.props', '**/*.targets', '**/*.cs') }}
 
       - name: Resolve package version
         id: package
@@ -86,7 +63,21 @@ jobs:
         run: dotnet restore SharpSql.slnx
 
       - name: Verify formatting
+        if: steps.format-cache.outputs.cache-hit != 'true'
         run: dotnet format SharpSql.slnx --no-restore --verify-no-changes
+
+      - name: Record formatting verification
+        if: steps.format-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache/format
+          touch .cache/format/verified
+
+      - name: Save formatting verification
+        if: steps.format-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: .cache/format/verified
+          key: ${{ steps.format-cache.outputs.cache-primary-key }}
 
       - name: Build
         run: dotnet build SharpSql.slnx --configuration Release --no-restore
