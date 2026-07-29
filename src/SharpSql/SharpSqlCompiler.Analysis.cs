@@ -5,9 +5,8 @@ public sealed partial class SharpSqlCompiler
     private void AnalyzeMethodBehaviors()
     {
         var summaries = _methods.Values.ToDictionary(
-            method => method.Name,
-            _ => MethodBehaviorSummary.Empty,
-            StringComparer.Ordinal);
+            method => method.Id,
+            _ => MethodBehaviorSummary.Empty);
 
         // Effects and aliases only grow. Recomputing from the preceding fixed-point
         // state handles recursive SCCs without coupling this pass to the SQL backend.
@@ -15,9 +14,8 @@ public sealed partial class SharpSqlCompiler
         for (var pass = 0; pass < maximumPasses; pass++)
         {
             var next = _methods.Values.ToDictionary(
-                method => method.Name,
-                method => AnalyzeMethodBehavior(method, summaries),
-                StringComparer.Ordinal);
+                method => method.Id,
+                method => AnalyzeMethodBehavior(method, summaries));
             if (next.All(item => BehaviorEquals(item.Value, summaries[item.Key])))
             {
                 summaries = next;
@@ -27,12 +25,12 @@ public sealed partial class SharpSqlCompiler
         }
 
         foreach (var method in _methods.Values.ToArray())
-            _methods[method.Name] = method with { Behavior = summaries[method.Name] };
+            _methods.Replace(method with { Behavior = summaries[method.Id] });
     }
 
     private MethodBehaviorSummary AnalyzeMethodBehavior(
         MethodDefinition method,
-        IReadOnlyDictionary<string, MethodBehaviorSummary> summaries)
+        IReadOnlyDictionary<IrMethodId, MethodBehaviorSummary> summaries)
     {
         var analysis = new MethodBehaviorAnalysis(method, summaries, _methods);
         analysis.Analyze();
@@ -49,8 +47,8 @@ public sealed partial class SharpSqlCompiler
 
     private sealed class MethodBehaviorAnalysis(
         MethodDefinition method,
-        IReadOnlyDictionary<string, MethodBehaviorSummary> summaries,
-        IReadOnlyDictionary<string, MethodDefinition> methods)
+        IReadOnlyDictionary<IrMethodId, MethodBehaviorSummary> summaries,
+        MethodCatalog methods)
     {
         private readonly Dictionary<IrSymbolId, AliasValue> _aliases = [];
         private readonly HashSet<int> _mutatedParameters = [];
@@ -233,6 +231,12 @@ public sealed partial class SharpSqlCompiler
                             _effects |= MethodEffects.Nondeterministic;
                     }
                     return creation.Type.IsReference ? AliasValue.Fresh : AliasValue.None;
+                case IrWithExpression withExpression:
+                    AnalyzeExpression(withExpression.Receiver);
+                    foreach (var initializer in withExpression.Initializers)
+                        AnalyzeExpression(initializer);
+                    _effects |= MethodEffects.ReadsMutableState | MethodEffects.Allocates | MethodEffects.MayThrow;
+                    return withExpression.Type.IsReference ? AliasValue.Fresh : AliasValue.None;
                 case IrArrayCreationExpression array:
                     if (array.Length is not null)
                         AnalyzeExpression(array.Length);
@@ -314,15 +318,14 @@ public sealed partial class SharpSqlCompiler
 
         private AliasValue AnalyzeInvocation(IrInvocationExpression invocation)
         {
-            var methodName = invocation.MethodName;
-            if (methodName is not null && methods.TryGetValue(methodName, out var callee))
+            if (methods.TryResolve(invocation, out var callee))
             {
                 var argumentExpressions = new List<IrExpression>();
                 if (callee.IsInstance && invocation.Target is IrMemberExpression member)
                     argumentExpressions.Add(member.Receiver);
                 argumentExpressions.AddRange(invocation.Arguments);
                 var arguments = argumentExpressions.Select(AnalyzeExpression).ToArray();
-                var behavior = summaries[callee.Name];
+                var behavior = summaries[callee.Id];
                 _effects |= behavior.Effects;
                 MapParameters(behavior.MutatedParameters, arguments, _mutatedParameters);
                 MapParameters(behavior.EscapingParameters, arguments, _escapingParameters);
@@ -342,7 +345,7 @@ public sealed partial class SharpSqlCompiler
                 ? AnalyzeExpression(targetMember.Receiver)
                 : AliasValue.None;
             var argumentValues = invocation.Arguments.Select(AnalyzeExpression).ToArray();
-            var intrinsic = IntrinsicBehavior.For(invocation, receiverValue);
+            var intrinsic = IntrinsicCatalog.Describe(invocation);
             _effects |= intrinsic.Effects;
             if (intrinsic.MutatesReceiver)
                 _mutatedParameters.UnionWith(receiverValue.Parameters);
@@ -417,68 +420,6 @@ public sealed partial class SharpSqlCompiler
             foreach (var parameter in parameterIndices)
                 if (parameter < arguments.Count)
                     destination.UnionWith(arguments[parameter].Parameters);
-        }
-    }
-
-    private sealed record IntrinsicBehavior(
-        MethodEffects Effects,
-        bool MutatesReceiver = false,
-        bool MutatesArguments = false,
-        bool ArgumentsEscape = false,
-        bool ReturnsFreshReference = false)
-    {
-        public static IntrinsicBehavior For(IrInvocationExpression invocation, AliasValue receiver)
-        {
-            var name = invocation.MethodName ?? string.Empty;
-            var receiverType = invocation.Target is IrMemberExpression member
-                ? member.Receiver.Type.Name
-                : string.Empty;
-
-            if (name is "Write" or "WriteLine" &&
-                invocation.Target is IrMemberExpression { Receiver: IrVariableExpression { Symbol.Name: "Console" } })
-                return new IntrinsicBehavior(MethodEffects.PerformsIo);
-
-            if (IsRandomType(receiverType) && name is "Next" or "NextDouble")
-                return new IntrinsicBehavior(
-                    MethodEffects.ReadsMutableState |
-                    MethodEffects.WritesMutableState |
-                    MethodEffects.UsesRandom |
-                    MethodEffects.MayThrow,
-                    MutatesReceiver: true);
-
-            if ((IsListType(receiverType) || IsDictionaryType(receiverType)) &&
-                name is "Add" or "Clear" or "Remove")
-                return new IntrinsicBehavior(
-                    MethodEffects.WritesMutableState | MethodEffects.MayThrow,
-                    MutatesReceiver: true,
-                    ArgumentsEscape: name == "Add");
-
-            if (name is "ToList" or "ToArray" or "Range" or "Repeat")
-                return new IntrinsicBehavior(
-                    MethodEffects.ReadsMutableState | MethodEffects.Allocates | MethodEffects.MayThrow,
-                    ReturnsFreshReference: true);
-
-            if (name is "Where" or "Select" or "OrderBy" or "OrderByDescending" or
-                "ThenBy" or "ThenByDescending" or "Distinct" or "Skip" or "Take" or
-                "AsEnumerable" or "AsQueryable")
-                return new IntrinsicBehavior(
-                    MethodEffects.ReadsMutableState,
-                    ArgumentsEscape: true);
-
-            if (name is "Sum" or "Count" or "LongCount" or "Any" or "All" or "Contains" or
-                "First" or "FirstOrDefault" or "Last" or "LastOrDefault" or "Single" or
-                "SingleOrDefault" or "ElementAt" or "ElementAtOrDefault" or "Min" or "Max" or
-                "Average" or "MinBy" or "MaxBy")
-                return new IntrinsicBehavior(MethodEffects.ReadsMutableState | MethodEffects.MayThrow);
-
-            return new IntrinsicBehavior(
-                MethodEffects.ReadsMutableState |
-                MethodEffects.WritesMutableState |
-                MethodEffects.InvokesUnknown |
-                MethodEffects.MayThrow,
-                MutatesReceiver: true,
-                MutatesArguments: true,
-                ArgumentsEscape: receiver.Parameters.Count > 0 || invocation.Arguments.Any(argument => argument.Type.IsReference));
         }
     }
 

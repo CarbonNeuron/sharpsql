@@ -1,0 +1,135 @@
+name: Publish NuGet tool
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to publish (for example, 0.1.0 or 0.2.0-preview.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-nuget
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            **/*.csproj
+            global.json
+
+      - name: Resolve package version
+        id: package
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="$DISPATCH_VERSION"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            printf 'Invalid NuGet semantic version: %s\n' "$version" >&2
+            exit 2
+          fi
+
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore
+        run: dotnet restore SharpSql.slnx
+
+      - name: Verify formatting
+        run: dotnet format SharpSql.slnx --no-restore --verify-no-changes
+
+      - name: Build
+        run: dotnet build SharpSql.slnx --configuration Release --no-restore
+
+      - name: Test C# and SQL Server parity
+        run: dotnet test SharpSql.slnx --configuration Release --no-build
+
+      - name: Pack platform tools
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: >-
+          dotnet pack src/SharpSql.Cli/SharpSql.Cli.csproj
+          --configuration Release
+          --output artifacts/packages
+          -p:Version="$PACKAGE_VERSION"
+          -p:PackageVersion="$PACKAGE_VERSION"
+
+      - name: Validate package set and tool installation
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          package_count="$(find artifacts/packages -maxdepth 1 -name '*.nupkg' -type f | wc -l)"
+          if [[ "$package_count" -ne 7 ]]; then
+            printf 'Expected 7 packages, found %s.\n' "$package_count" >&2
+            exit 1
+          fi
+
+          dotnet tool install SharpSql.Tool \
+            --tool-path artifacts/tool \
+            --source artifacts/packages \
+            --version "$PACKAGE_VERSION" \
+            --no-http-cache
+          test "$(artifacts/tool/sharpsql --version)" = "$PACKAGE_VERSION"
+
+      - name: Upload NuGet packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: sharpsql-tool-${{ steps.package.outputs.version }}
+          path: artifacts/packages/*.nupkg
+          if-no-files-found: error
+
+      - name: Publish to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [[ -z "$NUGET_API_KEY" ]]; then
+            printf 'The NUGET_API_KEY Actions secret is not configured.\n' >&2
+            exit 1
+          fi
+
+          shopt -s nullglob
+          rid_packages=(
+            artifacts/packages/SharpSql.Tool.linux-*.nupkg
+            artifacts/packages/SharpSql.Tool.win-*.nupkg
+            artifacts/packages/SharpSql.Tool.osx-*.nupkg
+          )
+          root_packages=(artifacts/packages/SharpSql.Tool.[0-9]*.nupkg)
+
+          if [[ "${#rid_packages[@]}" -ne 6 || "${#root_packages[@]}" -ne 1 ]]; then
+            printf 'The generated NuGet package set is incomplete.\n' >&2
+            exit 1
+          fi
+
+          for package in "${rid_packages[@]}"; do
+            dotnet nuget push "$package" \
+              --api-key "$NUGET_API_KEY" \
+              --source https://api.nuget.org/v3/index.json \
+              --skip-duplicate
+          done
+
+          dotnet nuget push "${root_packages[0]}" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

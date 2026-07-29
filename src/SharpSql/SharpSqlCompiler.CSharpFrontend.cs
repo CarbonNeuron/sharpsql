@@ -109,7 +109,7 @@ public sealed partial class SharpSqlCompiler
                     SemanticModelFor(identifier)?.GetSymbolInfo(identifier).Symbol,
                     identifier.Identifier.ValueText,
                     facts.Type)),
-            ThisExpressionSyntax => new IrThisExpression(
+            ThisExpressionSyntax or BaseExpressionSyntax => new IrThisExpression(
                 source,
                 facts,
                 GetOrCreateIrSymbol(null, "this", facts.Type)),
@@ -135,27 +135,23 @@ public sealed partial class SharpSqlCompiler
                 BindIrExpression(conditional.Condition, scope),
                 BindIrExpression(conditional.WhenTrue, scope),
                 BindIrExpression(conditional.WhenFalse, scope)),
-            MemberAccessExpressionSyntax member => new IrMemberExpression(
-                source,
-                facts,
-                BindIrExpression(member.Expression, scope),
-                member.Name.Identifier.ValueText),
+            MemberAccessExpressionSyntax member => BindMemberExpression(member, source, facts, scope),
             ElementAccessExpressionSyntax element => new IrElementExpression(
                 source,
                 facts,
                 BindIrExpression(element.Expression, scope),
                 element.ArgumentList.Arguments.Select(argument => BindIrExpression(argument.Expression, scope)).ToArray()),
-            InvocationExpressionSyntax invocation => new IrInvocationExpression(
+            InvocationExpressionSyntax invocation => BindInvocation(invocation, source, facts, scope),
+            ObjectCreationExpressionSyntax creation => BindObjectCreation(creation, source, facts, scope),
+            ImplicitObjectCreationExpressionSyntax creation => BindObjectCreation(creation, source, facts, scope),
+            WithExpressionSyntax withExpression => new IrWithExpression(
                 source,
                 facts,
-                BindIrExpression(invocation.Expression, scope),
-                invocation.ArgumentList.Arguments.Select(argument => BindIrExpression(argument.Expression, scope)).ToArray()),
-            ObjectCreationExpressionSyntax creation => new IrObjectCreationExpression(
-                source,
-                facts,
-                CSharpTypeFactory.From(creation.Type),
-                creation.ArgumentList?.Arguments.Select(argument => BindIrExpression(argument.Expression, scope)).ToArray() ?? [],
-                creation.Initializer?.Expressions.Select(item => BindIrExpression(item, scope)).ToArray() ?? []),
+                BindIrExpression(withExpression.Expression, scope),
+                withExpression.Initializer.Expressions
+                    .Select(item => BindIrExpression(item, scope))
+                    .OfType<IrAssignmentExpression>()
+                    .ToArray()),
             ArrayCreationExpressionSyntax array => BindArrayCreation(array, source, facts, scope),
             ImplicitArrayCreationExpressionSyntax array => new IrArrayCreationExpression(
                 source,
@@ -193,6 +189,317 @@ public sealed partial class SharpSqlCompiler
         };
     }
 
+    private IrMemberExpression BindMemberExpression(
+        MemberAccessExpressionSyntax member,
+        IrSource source,
+        ExpressionFacts facts,
+        VariableScope scope) =>
+        new(
+            source,
+            facts,
+            BindIrExpression(member.Expression, scope),
+            member.Name.Identifier.ValueText)
+        {
+            MemberId = MemberIdentity(SemanticModelFor(member)?.GetSymbolInfo(member).Symbol)
+        };
+
+    private IrInvocationExpression BindInvocation(
+        InvocationExpressionSyntax invocation,
+        IrSource source,
+        ExpressionFacts facts,
+        VariableScope scope)
+    {
+        var method = SemanticModelFor(invocation)?.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+        return new IrInvocationExpression(
+            source,
+            facts,
+            BindIrExpression(invocation.Expression, scope),
+            invocation.ArgumentList.Arguments
+                .Select(argument => BindIrExpression(argument.Expression, scope))
+                .ToArray())
+        {
+            TargetMethodId = MethodIdentity(method),
+            Dispatch = invocation.Expression is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax }
+                ? IrCallDispatch.Direct
+                : CallDispatch(method)
+        };
+    }
+
+    private IrObjectCreationExpression BindObjectCreation(
+        ObjectCreationExpressionSyntax creation,
+        IrSource source,
+        ExpressionFacts facts,
+        VariableScope scope) =>
+        new(
+            source,
+            facts,
+            CSharpTypeFactory.From(creation.Type),
+            creation.ArgumentList?.Arguments
+                .Select(argument => BindIrExpression(argument.Expression, scope))
+                .ToArray() ?? [],
+            creation.Initializer?.Expressions.Select(item => BindIrExpression(item, scope)).ToArray() ?? [])
+        {
+            ConstructorId = ConstructorIdentity(
+                SemanticModelFor(creation)?.GetSymbolInfo(creation).Symbol as IMethodSymbol)
+        };
+
+    private IrObjectCreationExpression BindObjectCreation(
+        ImplicitObjectCreationExpressionSyntax creation,
+        IrSource source,
+        ExpressionFacts facts,
+        VariableScope scope) =>
+        new(
+            source,
+            facts,
+            facts.Type,
+            creation.ArgumentList.Arguments
+                .Select(argument => BindIrExpression(argument.Expression, scope))
+                .ToArray(),
+            creation.Initializer?.Expressions.Select(item => BindIrExpression(item, scope)).ToArray() ?? [])
+        {
+            ConstructorId = ConstructorIdentity(
+                SemanticModelFor(creation)?.GetSymbolInfo(creation).Symbol as IMethodSymbol)
+        };
+
+    private IReadOnlyList<IrHeapTypeDefinition> BindHeapTypeDefinitions(
+        IReadOnlyList<CompilationUnitSyntax> roots,
+        IReadOnlyList<SyntaxNode>? compilationSources)
+    {
+        var usedTypeNames = compilationSources is null
+            ? null
+            : compilationSources
+                .SelectMany(source => source.DescendantNodesAndSelf().OfType<BaseObjectCreationExpressionSyntax>())
+                .Select(creation => SemanticModelFor(creation)?.GetTypeInfo(creation).Type?.Name)
+                .Where(name => !string.IsNullOrEmpty(name))
+                .ToHashSet(StringComparer.Ordinal);
+        var declarations = roots
+            .SelectMany(root => root.DescendantNodes().OfType<TypeDeclarationSyntax>())
+            .Where(declaration => declaration is
+                ClassDeclarationSyntax or RecordDeclarationSyntax or StructDeclarationSyntax)
+            .ToArray();
+        if (usedTypeNames is not null)
+        {
+            var changed = true;
+            while (changed)
+            {
+                changed = false;
+                foreach (var declaration in declarations.Where(candidate =>
+                             usedTypeNames.Contains(candidate.Identifier.ValueText)))
+                {
+                    var baseName = SemanticModelFor(declaration)?
+                        .GetDeclaredSymbol(declaration)?.BaseType?.Name;
+                    if (baseName is not null && usedTypeNames.Add(baseName))
+                        changed = true;
+                }
+            }
+        }
+        var definitions = new List<IrHeapTypeDefinition>();
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var declaration in declarations)
+        {
+            var name = declaration.Identifier.ValueText;
+            if (usedTypeNames is not null && !usedTypeNames.Contains(name))
+                continue;
+            if (!names.Add(name))
+            {
+                AddDiagnostic("SS6001", $"Duplicate heap type '{name}' is not supported.", declaration);
+                continue;
+            }
+            definitions.Add(BindHeapTypeDefinition(declaration));
+        }
+        return definitions;
+    }
+
+    private IrHeapTypeDefinition BindHeapTypeDefinition(TypeDeclarationSyntax declaration)
+    {
+        var semanticModel = SemanticModelFor(declaration);
+        var typeSymbol = semanticModel?.GetDeclaredSymbol(declaration);
+        var fields = new Dictionary<string, IrHeapFieldDefinition>(StringComparer.Ordinal);
+
+        if (declaration is RecordDeclarationSyntax { ParameterList: not null } record)
+        {
+            foreach (var parameter in record.ParameterList.Parameters)
+            {
+                var name = parameter.Identifier.ValueText;
+                var property = typeSymbol?.GetMembers(name).OfType<IPropertySymbol>().FirstOrDefault();
+                if (property is null)
+                    continue;
+                fields.TryAdd(name, new IrHeapFieldDefinition(
+                    name,
+                    parameter.Type is null ? IrType.Unknown : CSharpTypeFactory.From(parameter.Type),
+                    ToIrSource(parameter))
+                {
+                    Id = MemberIdentity(property),
+                    Kind = IrMemberKind.Property,
+                    IsReadOnly = property?.SetMethod is null
+                });
+            }
+        }
+
+        foreach (var property in declaration.Members.OfType<PropertyDeclarationSyntax>())
+        {
+            var propertySymbol = semanticModel?.GetDeclaredSymbol(property);
+            fields.TryAdd(property.Identifier.ValueText, new IrHeapFieldDefinition(
+                property.Identifier.ValueText,
+                CSharpTypeFactory.From(property.Type),
+                ToIrSource(property))
+            {
+                Id = MemberIdentity(propertySymbol),
+                Kind = IrMemberKind.Property,
+                IsStatic = propertySymbol?.IsStatic == true,
+                IsReadOnly = propertySymbol?.SetMethod is null,
+                Initializer = property.Initializer is null
+                    ? null
+                    : BindIrExpression(property.Initializer.Value, new VariableScope())
+            });
+        }
+
+        foreach (var field in declaration.Members.OfType<FieldDeclarationSyntax>())
+        {
+            foreach (var variable in field.Declaration.Variables)
+            {
+                var fieldSymbol = semanticModel?.GetDeclaredSymbol(variable) as IFieldSymbol;
+                fields.TryAdd(variable.Identifier.ValueText, new IrHeapFieldDefinition(
+                    variable.Identifier.ValueText,
+                    CSharpTypeFactory.From(field.Declaration.Type),
+                    ToIrSource(variable))
+                {
+                    Id = MemberIdentity(fieldSymbol),
+                    Kind = IrMemberKind.Field,
+                    IsStatic = fieldSymbol?.IsStatic == true,
+                    IsReadOnly = fieldSymbol?.IsReadOnly == true,
+                    Initializer = variable.Initializer is null
+                        ? null
+                        : BindIrExpression(variable.Initializer.Value, new VariableScope())
+                });
+            }
+        }
+
+        var constructors = new List<IrHeapConstructorDefinition>();
+        if (declaration is RecordDeclarationSyntax { ParameterList: not null } positionalRecord)
+        {
+            var parameters = positionalRecord.ParameterList.Parameters.Select(ToParameter).ToArray();
+            var constructorSymbol = typeSymbol?.InstanceConstructors.FirstOrDefault(constructor =>
+                constructor.Parameters.Length == parameters.Length && !constructor.IsImplicitlyDeclared);
+            var primaryBase = positionalRecord.BaseList?.Types
+                .OfType<PrimaryConstructorBaseTypeSyntax>()
+                .FirstOrDefault();
+            constructors.Add(new IrHeapConstructorDefinition(
+                positionalRecord.ParameterList.Parameters
+                    .Select(parameter => parameter.Identifier.ValueText)
+                    .ToArray())
+            {
+                Id = ConstructorIdentity(constructorSymbol),
+                Parameters = parameters,
+                InitializerKind = primaryBase is null
+                    ? IrConstructorInitializerKind.None
+                    : IrConstructorInitializerKind.Base,
+                InitializerConstructorId = ConstructorIdentity(
+                    primaryBase is null
+                        ? null
+                        : semanticModel?.GetSymbolInfo(primaryBase).Symbol as IMethodSymbol),
+                InitializerArguments = primaryBase?.ArgumentList.Arguments
+                    .Select(argument => BindIrExpression(argument.Expression, new VariableScope()))
+                    .ToArray() ?? []
+            });
+        }
+
+        foreach (var constructor in declaration.Members.OfType<ConstructorDeclarationSyntax>())
+            constructors.Add(BindHeapConstructor(constructor, fields));
+
+        if (constructors.Count == 0)
+        {
+            constructors.Add(new IrHeapConstructorDefinition([])
+            {
+                Id = ConstructorIdentity(typeSymbol?.InstanceConstructors.FirstOrDefault(constructor =>
+                    constructor.Parameters.Length == 0))
+            });
+        }
+
+        var baseSymbol = typeSymbol?.BaseType;
+        var meaningfulBase = baseSymbol is null || baseSymbol.SpecialType is
+            SpecialType.System_Object or SpecialType.System_ValueType
+            ? null
+            : CSharpTypeFactory.From(baseSymbol);
+        return new IrHeapTypeDefinition(
+            declaration.Identifier.ValueText,
+            declaration is StructDeclarationSyntax,
+            declaration is RecordDeclarationSyntax,
+            fields.Values.ToArray(),
+            constructors,
+            ToIrSource(declaration))
+        {
+            Id = TypeIdentity(typeSymbol),
+            BaseType = meaningfulBase,
+            Interfaces = typeSymbol?.Interfaces.Select(CSharpTypeFactory.From).ToArray() ?? [],
+            IsAbstract = typeSymbol?.IsAbstract == true,
+            IsSealed = typeSymbol?.IsSealed == true
+        };
+    }
+
+    private IrHeapConstructorDefinition BindHeapConstructor(
+        ConstructorDeclarationSyntax constructor,
+        IReadOnlyDictionary<string, IrHeapFieldDefinition> fields)
+    {
+        var semanticModel = SemanticModelFor(constructor);
+        var constructorSymbol = semanticModel?.GetDeclaredSymbol(constructor);
+        var parameters = constructor.ParameterList.Parameters.Select(ToParameter).ToArray();
+        var targets = constructor.ParameterList.Parameters.Select(parameter =>
+        {
+            var parameterName = parameter.Identifier.ValueText;
+            var assignment = constructor.Body?.DescendantNodes()
+                .OfType<AssignmentExpressionSyntax>()
+                .FirstOrDefault(candidate =>
+                    candidate.Right is IdentifierNameSyntax identifier &&
+                    identifier.Identifier.ValueText == parameterName);
+            var target = assignment is null ? null : ConstructorAssignmentTarget(assignment.Left);
+            target ??= fields.Values.FirstOrDefault(field =>
+                string.Equals(field.Name, parameterName, StringComparison.OrdinalIgnoreCase))?.Name;
+            return target ?? string.Empty;
+        }).ToArray();
+        var fieldAssignmentOnly = constructor.ExpressionBody?.Expression is AssignmentExpressionSyntax ||
+            constructor.ExpressionBody is null &&
+            (constructor.Body?.Statements.All(statement =>
+                statement is ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax }) ?? true);
+        var body = constructor.Body is not null
+            ? (ProceduralBlock)BindProceduralStatement(constructor.Body, new VariableScope())
+            : constructor.ExpressionBody is not null
+                ? new ProceduralBlock(
+                    ToIrSource(constructor.ExpressionBody),
+                    [new ProceduralExpressionStatement(
+                        ToIrSource(constructor.ExpressionBody.Expression),
+                        BindIrExpression(constructor.ExpressionBody.Expression, new VariableScope()))])
+                : null;
+        var initializerKind = constructor.Initializer?.ThisOrBaseKeyword.Kind() switch
+        {
+            SyntaxKind.ThisKeyword => IrConstructorInitializerKind.This,
+            SyntaxKind.BaseKeyword => IrConstructorInitializerKind.Base,
+            _ => IrConstructorInitializerKind.None
+        };
+        return new IrHeapConstructorDefinition(targets)
+        {
+            Id = ConstructorIdentity(constructorSymbol),
+            Parameters = parameters,
+            Body = body,
+            InitializerKind = initializerKind,
+            InitializerConstructorId = ConstructorIdentity(
+                constructor.Initializer is null
+                    ? null
+                    : semanticModel?.GetSymbolInfo(constructor.Initializer).Symbol as IMethodSymbol),
+            InitializerArguments = constructor.Initializer?.ArgumentList.Arguments
+                .Select(argument => BindIrExpression(argument.Expression, new VariableScope()))
+                .ToArray() ?? [],
+            IsFieldAssignmentOnly = fieldAssignmentOnly
+        };
+    }
+
+    private static string? ConstructorAssignmentTarget(ExpressionSyntax expression) => expression switch
+    {
+        IdentifierNameSyntax identifier => identifier.Identifier.ValueText,
+        MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText,
+        _ => null
+    };
+
     private IrArrayCreationExpression BindArrayCreation(
         ArrayCreationExpressionSyntax array,
         IrSource source,
@@ -205,7 +512,9 @@ public sealed partial class SharpSqlCompiler
             source,
             facts,
             CSharpTypeFactory.From(array.Type.ElementType),
-            lengthSyntax is null ? null : BindIrExpression(lengthSyntax, scope),
+            array.Initializer is not null || lengthSyntax is null or OmittedArraySizeExpressionSyntax
+                ? null
+                : BindIrExpression(lengthSyntax, scope),
             array.Initializer?.Expressions.Select(item => BindIrExpression(item, scope)).ToArray() ?? []);
     }
 
@@ -308,10 +617,75 @@ public sealed partial class SharpSqlCompiler
     {
         if (symbol is not null && _irSymbols.TryGetValue(symbol, out var existing))
             return existing;
-        var created = new IrSymbol(new IrSymbolId(++_nextIrSymbolId), name, type);
+        var created = new IrSymbol(new IrSymbolId(++_nextIrSymbolId), name, type)
+        {
+            ReferencedMemberId = symbol is IFieldSymbol or IPropertySymbol
+                ? MemberIdentity(symbol)
+                : IrMemberId.None
+        };
         if (symbol is not null)
             _irSymbols[symbol] = created;
         return created;
+    }
+
+    private static IrTypeDefinitionId TypeIdentity(INamedTypeSymbol? type) =>
+        type is null
+            ? IrTypeDefinitionId.None
+            : new IrTypeDefinitionId(SemanticIdentity(type));
+
+    private static IrMemberId MemberIdentity(ISymbol? member) =>
+        member is null
+            ? IrMemberId.None
+            : new IrMemberId(SemanticIdentity(member));
+
+    private static IrMethodId MethodIdentity(IMethodSymbol? method) =>
+        method is null
+            ? IrMethodId.None
+            : new IrMethodId(SemanticIdentity(
+                method.ReducedFrom?.OriginalDefinition ?? method.OriginalDefinition));
+
+    private static IrConstructorId ConstructorIdentity(IMethodSymbol? constructor) =>
+        constructor is null
+            ? IrConstructorId.None
+            : new IrConstructorId(SemanticIdentity(constructor.OriginalDefinition));
+
+    private static string SemanticIdentity(ISymbol symbol) =>
+        symbol.GetDocumentationCommentId() ??
+        $"{symbol.Kind}:{symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}";
+
+    private static IrCallDispatch CallDispatch(IMethodSymbol? method)
+    {
+        if (method is null)
+            return IrCallDispatch.Unknown;
+        if (method.MethodKind == MethodKind.DelegateInvoke)
+            return IrCallDispatch.Delegate;
+        if (method.IsStatic)
+            return IrCallDispatch.Static;
+        if (method.ContainingType.TypeKind == TypeKind.Interface)
+            return IrCallDispatch.Interface;
+        return method.IsVirtual || method.IsOverride || method.IsAbstract
+            ? IrCallDispatch.Virtual
+            : IrCallDispatch.Direct;
+    }
+
+    private static IReadOnlyList<IrMethodId> InterfaceMethodIdentities(IMethodSymbol? method)
+    {
+        if (method is null)
+            return [];
+        var identities = method.ExplicitInterfaceImplementations
+            .Select(MethodIdentity)
+            .ToHashSet();
+        foreach (var @interface in method.ContainingType.AllInterfaces)
+        {
+            foreach (var member in @interface.GetMembers().OfType<IMethodSymbol>())
+            {
+                if (SymbolEqualityComparer.Default.Equals(
+                        method.ContainingType.FindImplementationForInterfaceMember(member),
+                        method))
+                    identities.Add(MethodIdentity(member));
+            }
+        }
+        return identities.Where(identity => !identity.IsNone).ToArray();
     }
 
     private IrSource ToIrSource(SyntaxNode node)

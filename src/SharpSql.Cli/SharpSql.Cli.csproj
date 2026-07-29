@@ -19,4 +19,7 @@
     <ProjectReference Include="../SharpSql/SharpSql.csproj" />
     <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpSql.Tests" />
+  </ItemGroup>
 </Project>

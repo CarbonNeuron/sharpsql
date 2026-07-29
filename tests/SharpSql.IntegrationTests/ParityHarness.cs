@@ -118,7 +118,7 @@ public static class ParityHarness
         catch (SqlException exception)
         {
             var error = exception.Errors.Cast<SqlError>()
-                .FirstOrDefault(candidate => candidate.Number is >= 51000 and <= 51999)
+                .FirstOrDefault(candidate => RuntimeErrorCatalog.IsSharpSqlRuntimeError(candidate.Number))
                 ?? exception.Errors.Cast<SqlError>().First();
             executionFailure = NormalizeSqlFailure(new SqlFailure(error.Number, error.Message));
         }
@@ -231,15 +231,7 @@ public static class ParityHarness
 
     private static ExecutionFailure NormalizeSqlFailure(SqlFailure failure)
     {
-        var type = failure.Number switch
-        {
-            51001 => nameof(ArgumentException),
-            51002 or 51004 or 51005 or 51006 or 51009 => nameof(ArgumentOutOfRangeException),
-            51003 => nameof(IndexOutOfRangeException),
-            51007 or 51008 => nameof(InvalidOperationException),
-            51010 => nameof(KeyNotFoundException),
-            _ => nameof(SqlException)
-        };
+        var type = RuntimeErrorCatalog.ExceptionTypeName(failure.Number) ?? nameof(SqlException);
         return new ExecutionFailure(FailureCategory.Runtime, type, failure.Message, failure.Number);
     }
 

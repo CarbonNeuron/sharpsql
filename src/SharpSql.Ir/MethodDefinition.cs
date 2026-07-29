@@ -8,19 +8,11 @@ internal sealed record ParameterDefinition(IrSymbol Symbol)
 
 internal sealed record MethodFlowSummary(
     bool EndPointIsReachable,
-    bool ContainsReturn,
-    int StatementCount,
-    IReadOnlySet<string> ReadVariables,
-    IReadOnlySet<string> WrittenVariables,
-    IReadOnlySet<string> CapturedVariables)
+    int StatementCount)
 {
     public static MethodFlowSummary Empty { get; } = new(
         EndPointIsReachable: true,
-        ContainsReturn: false,
-        StatementCount: 0,
-        new HashSet<string>(StringComparer.Ordinal),
-        new HashSet<string>(StringComparer.Ordinal),
-        new HashSet<string>(StringComparer.Ordinal));
+        StatementCount: 0);
 }
 
 [Flags]
@@ -77,6 +69,13 @@ internal sealed record MethodDefinition(
     string? ContainingType = null,
     bool IsInstance = false)
 {
+    public IrMethodId Id { get; init; } = IrMethodId.None;
+    public bool IsAbstract { get; init; }
+    public bool IsVirtual { get; init; }
+    public bool IsOverride { get; init; }
+    public bool IsSealed { get; init; }
+    public IrMethodId OverriddenMethodId { get; init; } = IrMethodId.None;
+    public IReadOnlyList<IrMethodId> ImplementedInterfaceMethodIds { get; init; } = [];
     public MethodFlowSummary Flow { get; init; } = MethodFlowSummary.Empty;
     public MethodBehaviorSummary Behavior { get; init; } = MethodBehaviorSummary.Empty;
 

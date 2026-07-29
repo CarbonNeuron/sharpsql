@@ -1,4 +1,6 @@
 using SharpSql.Cli;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Spectre.Console.Cli.Testing;
 using Xunit;
 
@@ -39,6 +41,42 @@ public sealed class CliTests
         Assert.Equal("MultiFileProject.SqlJob::Run", settings.EntryPoint);
         Assert.Equal("Release", settings.Configuration);
         Assert.Equal("net10.0", settings.TargetFramework);
+    }
+
+    [Fact]
+    public async Task ExecutesQueryableProjectsWithRuntimeAssemblies()
+    {
+        var loaded = await new SharpSqlProjectCompiler().LoadCompilationAsync(
+            ProjectPath,
+            new ProjectTranspileOptions
+            {
+                EntryPoint = "MultiFileProject.SqlJob::Run",
+                Configuration = "Release",
+                TargetFramework = "net10.0"
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(loaded.Success, string.Join(Environment.NewLine, loaded.Diagnostics));
+        var source = CSharpSyntaxTree.ParseText("""
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+
+            IQueryable<int> values = new List<int> { 42 }.AsQueryable();
+            Console.WriteLine($"project={values.Single()}");
+            """, cancellationToken: TestContext.Current.CancellationToken);
+        var compilation = CSharpCompilation.Create(
+            $"SharpSqlQueryableRuntime_{Guid.NewGuid():N}",
+            [source],
+            loaded.Compilation!.References,
+            new CSharpCompilationOptions(OutputKind.ConsoleApplication));
+        var outcome = await TestcontainersParityRunner.ExecuteProjectCSharpForTestingAsync(
+            compilation,
+            ProjectPath,
+            requestedEntryPoint: null);
+
+        Assert.Null(outcome.Failure);
+        Assert.Equal("project=42", outcome.StandardOutput);
     }
 
     [Fact]

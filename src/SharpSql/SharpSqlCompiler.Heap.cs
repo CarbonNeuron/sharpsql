@@ -7,48 +7,234 @@ namespace SharpSql;
 public sealed partial class SharpSqlCompiler
 {
     private readonly Dictionary<string, HeapType> _heapTypes = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _usedHeapTypes = new(StringComparer.Ordinal);
     private bool _heapRuntimeNeeded;
-    private bool _usesLists;
+    private bool _usesIndexedItems;
     private bool _usesDictionaries;
     private bool _usesScalarDictionaryKeys;
     private bool _usesStringOrBinaryDictionaryKeys;
     private bool _usesReferenceDictionaryKeys;
     private int _nextHeapTypeId;
+    private int _nextHeapAliasId;
 
     private const string HeapObjects = "#__sharpsql_objects";
     private const string HeapIndexedItems = "#__sharpsql_indexed_items";
     private const string HeapDictionaryEntries = "#__sharpsql_dictionary_entries";
+    private const int ListHeapTypeId = 1001;
+    private const int DictionaryHeapTypeId = 1002;
+    private const int ArrayHeapTypeId = 1003;
+    private const int RandomHeapTypeId = 1004;
 
-    private void PrepareHeapRuntime(
-        IReadOnlyList<CompilationUnitSyntax> roots,
-        IReadOnlyList<SyntaxNode>? compilationSources)
+    private void PrepareHeapRuntime(IrProgram program)
     {
-        var sourceNodes = compilationSources ?? roots.Cast<SyntaxNode>().ToArray();
-        var creations = sourceNodes
-            .SelectMany(source => source.DescendantNodesAndSelf().OfType<BaseObjectCreationExpressionSyntax>())
-            .ToArray();
-        var usedHeapTypeNames = creations
-            .Select(CreationTypeName)
-            .Where(name => name.Length > 0)
-            .ToHashSet(StringComparer.Ordinal);
-        foreach (var declaration in roots.SelectMany(root => root.DescendantNodes().OfType<TypeDeclarationSyntax>()))
+        foreach (var definition in program.HeapTypes)
+            AddHeapType(definition);
+
+        VisitStatement(program.EntryPoint);
+        foreach (var method in program.Methods)
         {
-            if (declaration is not (ClassDeclarationSyntax or RecordDeclarationSyntax or StructDeclarationSyntax))
-                continue;
-            if (compilationSources is not null && !usedHeapTypeNames.Contains(declaration.Identifier.ValueText))
-                continue;
-            AddHeapType(declaration);
+            if (method.Body is not null)
+                VisitStatement(method.Body);
+            if (method.ExpressionBody is not null)
+                VisitExpression(method.ExpressionBody);
         }
 
-        foreach (var creation in creations)
+        var preparedTypes = new HashSet<string>(StringComparer.Ordinal);
+        while (true)
         {
-            var name = CreationTypeName(creation);
-            if (IsListType(name))
-                _usesLists = true;
-            else if (IsDictionaryType(name))
+            var pendingTypes = _usedHeapTypes
+                .Where(name => !preparedTypes.Contains(name))
+                .Select(name => _heapTypes[name])
+                .ToArray();
+            if (pendingTypes.Length == 0)
+                break;
+            foreach (var type in pendingTypes)
+            {
+                preparedTypes.Add(type.Name);
+                foreach (var field in type.Fields.Values)
+                    if (!field.IsStatic && field.Initializer is not null)
+                        VisitExpression(field.Initializer);
+                foreach (var constructor in type.Constructors)
+                {
+                    foreach (var argument in constructor.InitializerArguments)
+                        VisitExpression(argument);
+                    if (constructor.Body is not null)
+                        VisitStatement(constructor.Body);
+                }
+            }
+        }
+
+        void VisitStatement(ProceduralStatement statement)
+        {
+            switch (statement)
+            {
+                case ProceduralBlock block:
+                    foreach (var child in block.Statements)
+                        VisitStatement(child);
+                    break;
+                case ProceduralDeclarationStatement declaration:
+                    foreach (var variable in declaration.Declaration.Variables)
+                        if (variable.Initializer is not null)
+                            VisitExpression(variable.Initializer);
+                    break;
+                case ProceduralExpressionStatement expression:
+                    VisitExpression(expression.Expression);
+                    break;
+                case ProceduralIf @if:
+                    VisitExpression(@if.Condition);
+                    VisitStatement(@if.Then);
+                    if (@if.Else is not null)
+                        VisitStatement(@if.Else);
+                    break;
+                case ProceduralWhile @while:
+                    VisitExpression(@while.Condition);
+                    VisitStatement(@while.Body);
+                    break;
+                case ProceduralDo @do:
+                    VisitStatement(@do.Body);
+                    VisitExpression(@do.Condition);
+                    break;
+                case ProceduralFor @for:
+                    if (@for.Declaration is not null)
+                        foreach (var variable in @for.Declaration.Variables)
+                            if (variable.Initializer is not null)
+                                VisitExpression(variable.Initializer);
+                    foreach (var initializer in @for.Initializers)
+                        VisitExpression(initializer);
+                    if (@for.Condition is not null)
+                        VisitExpression(@for.Condition);
+                    foreach (var incrementor in @for.Incrementors)
+                        VisitExpression(incrementor);
+                    VisitStatement(@for.Body);
+                    break;
+                case ProceduralForEach forEach:
+                    VisitExpression(forEach.SourceExpression);
+                    VisitStatement(forEach.Body);
+                    break;
+                case ProceduralReturn { Expression: not null } @return:
+                    VisitExpression(@return.Expression);
+                    break;
+            }
+        }
+
+        void VisitExpression(IrExpression expression)
+        {
+            switch (expression)
+            {
+                case IrArrayCreationExpression array:
+                    if (array.ElementType.Name != "byte")
+                    {
+                        _heapRuntimeNeeded = true;
+                        _usesIndexedItems = true;
+                    }
+                    if (array.Length is not null)
+                        VisitExpression(array.Length);
+                    foreach (var element in array.Elements)
+                        VisitExpression(element);
+                    break;
+                case IrObjectCreationExpression creation:
+                    PrepareObjectCreation(creation.CreatedType);
+                    foreach (var argument in creation.Arguments)
+                        VisitExpression(argument);
+                    foreach (var initializer in creation.Initializers)
+                        VisitExpression(initializer);
+                    break;
+                case IrWithExpression withExpression:
+                    PrepareObjectCreation(withExpression.Type);
+                    VisitExpression(withExpression.Receiver);
+                    foreach (var initializer in withExpression.Initializers)
+                        VisitExpression(initializer);
+                    break;
+                case IrInvocationExpression invocation:
+                    if (invocation.Dispatch is IrCallDispatch.Virtual or IrCallDispatch.Interface &&
+                        !invocation.TargetMethodId.IsNone)
+                        _runtimeDispatchRequests.Add((invocation.TargetMethodId, invocation.Dispatch));
+                    if (IntrinsicCatalog.IsMaterializer(invocation.MethodName ?? string.Empty))
+                    {
+                        _heapRuntimeNeeded = true;
+                        _usesIndexedItems = true;
+                    }
+                    VisitExpression(invocation.Target);
+                    foreach (var argument in invocation.Arguments)
+                        VisitExpression(argument);
+                    break;
+                case IrBinaryExpression binary:
+                    VisitExpression(binary.Left);
+                    VisitExpression(binary.Right);
+                    break;
+                case IrUnaryExpression unary:
+                    VisitExpression(unary.Operand);
+                    break;
+                case IrConversionExpression conversion:
+                    VisitExpression(conversion.Operand);
+                    break;
+                case IrConditionalExpression conditional:
+                    VisitExpression(conditional.Condition);
+                    VisitExpression(conditional.WhenTrue);
+                    VisitExpression(conditional.WhenFalse);
+                    break;
+                case IrMemberExpression member:
+                    if (_heapTypes.ContainsKey(member.Receiver.Type.Name))
+                    {
+                        MarkHeapTypeUsed(member.Receiver.Type.Name);
+                        _heapRuntimeNeeded = true;
+                    }
+                    VisitExpression(member.Receiver);
+                    break;
+                case IrElementExpression element:
+                    VisitExpression(element.Receiver);
+                    foreach (var argument in element.Arguments)
+                        VisitExpression(argument);
+                    break;
+                case IrInterpolatedStringExpression interpolated:
+                    foreach (var item in interpolated.Parts.OfType<IrInterpolation>())
+                        VisitExpression(item.Expression);
+                    break;
+                case IrAssignmentExpression assignment:
+                    VisitExpression(assignment.Target);
+                    VisitExpression(assignment.Value);
+                    break;
+                case IrLambdaExpression lambda:
+                    if (lambda.ExpressionBody is not null)
+                        VisitExpression(lambda.ExpressionBody);
+                    if (lambda.StatementBody is not null)
+                        VisitStatement(lambda.StatementBody);
+                    break;
+                case IrQueryExpression query:
+                    VisitExpression(query.SourceExpression);
+                    foreach (var clause in query.Clauses)
+                    {
+                        switch (clause)
+                        {
+                            case IrWhereClause where:
+                                VisitExpression(where.Predicate);
+                                break;
+                            case IrOrderClause order:
+                                VisitExpression(order.Key);
+                                break;
+                            case IrSelectClause select:
+                                VisitExpression(select.Projection);
+                                break;
+                            case IrGroupClause group:
+                                VisitExpression(group.Element);
+                                VisitExpression(group.Key);
+                                break;
+                        }
+                    }
+                    break;
+            }
+        }
+
+        void PrepareObjectCreation(IrType type)
+        {
+            if (IsListType(type.Name))
+            {
+                _usesIndexedItems = true;
+            }
+            else if (IsDictionaryType(type.Name))
             {
                 _usesDictionaries = true;
-                var keyType = GenericArguments(name).FirstOrDefault();
+                var keyType = GenericArguments(type.Name).FirstOrDefault();
                 if (keyType is not null)
                 {
                     if (keyType.IsString || keyType.Name == "byte[]")
@@ -59,100 +245,67 @@ public sealed partial class SharpSqlCompiler
                         _usesScalarDictionaryKeys = true;
                 }
             }
-            else if (IsRandomType(name))
-                _usesRandom = true;
-            else if (!_heapTypes.ContainsKey(name))
-                continue;
-            _heapRuntimeNeeded = true;
-        }
-
-        if (sourceNodes.SelectMany(source => source.DescendantNodesAndSelf().OfType<ArrayCreationExpressionSyntax>())
-                .Any(creation => creation.Type.ElementType.ToString() != "byte") ||
-            sourceNodes.SelectMany(source => source.DescendantNodesAndSelf().OfType<ImplicitArrayCreationExpressionSyntax>())
-                .Any(creation => InferType(creation, new VariableScope()).Name != "byte[]"))
-        {
-            _usesLists = true;
-            _heapRuntimeNeeded = true;
-        }
-
-        if (sourceNodes.SelectMany(source => source.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>())
-            .Any(IsLinqMaterialization))
-        {
-            _usesLists = true;
+            else if (IsRandomType(type.Name))
+            {
+                _usesIndexedItems = true;
+            }
+            else if (!_heapTypes.ContainsKey(type.Name))
+            {
+                return;
+            }
+            else
+            {
+                MarkHeapTypeUsed(type.Name);
+            }
             _heapRuntimeNeeded = true;
         }
     }
 
-    private void AddHeapType(TypeDeclarationSyntax declaration)
+    private void AddHeapType(IrHeapTypeDefinition definition)
     {
-        var name = declaration.Identifier.ValueText;
-        if (_heapTypes.ContainsKey(name))
-        {
-            AddDiagnostic("SS6001", $"Duplicate heap type '{name}' is not supported.", declaration);
+        if (_heapTypes.ContainsKey(definition.Name))
             return;
-        }
 
         var heapType = new HeapType(
-            name,
+            definition.Name,
             ++_nextHeapTypeId,
             $"#__sharpsql_type_{_nextHeapTypeId}",
-            declaration is StructDeclarationSyntax,
-            declaration);
-
-        if (declaration is RecordDeclarationSyntax { ParameterList: not null } record)
+            definition.IsValueType,
+            definition.IsRecord,
+            definition.Source)
         {
-            var targets = new List<string>();
-            foreach (var parameter in record.ParameterList.Parameters)
-            {
-                var fieldName = parameter.Identifier.ValueText;
-                var fieldType = parameter.Type is null ? IrType.Unknown : CSharpTypeFactory.From(parameter.Type);
-                AddHeapField(heapType, fieldName, fieldType, parameter);
-                targets.Add(fieldName);
-            }
-            heapType.Constructors.Add(new HeapConstructor(targets));
-        }
-
-        foreach (var property in declaration.Members.OfType<PropertyDeclarationSyntax>())
-            AddHeapField(heapType, property.Identifier.ValueText, CSharpTypeFactory.From(property.Type), property);
-
-        foreach (var field in declaration.Members.OfType<FieldDeclarationSyntax>())
-            foreach (var variable in field.Declaration.Variables)
-                AddHeapField(heapType, variable.Identifier.ValueText, CSharpTypeFactory.From(field.Declaration.Type), variable);
-
-        foreach (var constructor in declaration.Members.OfType<ConstructorDeclarationSyntax>())
-        {
-            var targets = new List<string>();
-            foreach (var parameter in constructor.ParameterList.Parameters)
-            {
-                var parameterName = parameter.Identifier.ValueText;
-                var assignment = constructor.Body?.DescendantNodes()
-                    .OfType<AssignmentExpressionSyntax>()
-                    .FirstOrDefault(candidate =>
-                        candidate.Right is IdentifierNameSyntax identifier &&
-                        identifier.Identifier.ValueText == parameterName);
-                var targetName = assignment is null ? null : AssignmentMemberName(assignment.Left);
-                targetName ??= heapType.Fields.Values
-                    .FirstOrDefault(field => string.Equals(field.Name, parameterName, StringComparison.OrdinalIgnoreCase))?.Name;
-                targets.Add(targetName ?? string.Empty);
-            }
-            heapType.Constructors.Add(new HeapConstructor(targets));
-
-            var supportedAssignments = constructor.Body?.Statements
-                .All(statement => statement is ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax }) ?? true;
-            if (!supportedAssignments)
-                AddDiagnostic("SS6002", $"Constructor '{name}' contains behavior beyond field assignment.", constructor);
-        }
-
+            BaseType = definition.BaseType
+        };
+        foreach (var field in definition.Fields)
+            heapType.Fields.Add(
+                field.Name,
+                new HeapField(
+                    field.Id,
+                    field.Name,
+                    field.Type,
+                    QuoteIdentifier(field.Name),
+                    field.Source,
+                    field.IsStatic,
+                    field.Initializer));
+        foreach (var constructor in definition.Constructors)
+            heapType.Constructors.Add(new HeapConstructor(
+                constructor.Id,
+                constructor.TargetFields,
+                constructor.Parameters,
+                constructor.Body,
+                constructor.InitializerKind,
+                constructor.InitializerConstructorId,
+                constructor.InitializerArguments));
         if (heapType.Constructors.Count == 0)
-            heapType.Constructors.Add(new HeapConstructor([]));
-        _heapTypes.Add(name, heapType);
-    }
-
-    private void AddHeapField(HeapType type, string name, IrType fieldType, SyntaxNode node)
-    {
-        if (type.Fields.ContainsKey(name))
-            return; // Positional record properties also appear as declared members in some syntax forms.
-        type.Fields.Add(name, new HeapField(name, fieldType, QuoteIdentifier(name), node));
+            heapType.Constructors.Add(new HeapConstructor(
+                IrConstructorId.None,
+                [],
+                [],
+                null,
+                IrConstructorInitializerKind.None,
+                IrConstructorId.None,
+                []));
+        _heapTypes.Add(heapType.Name, heapType);
     }
 
     private void EmitHeapPreamble()
@@ -161,11 +314,11 @@ public sealed partial class SharpSqlCompiler
             return;
 
         _sql.Line("-- SharpSql ephemeral managed heap");
-        foreach (var type in _heapTypes.Values.Reverse())
+        foreach (var type in UsedHeapTypes().Reverse())
             _sql.Line($"DROP TABLE IF EXISTS {type.TableName};");
         if (_usesDictionaries)
             _sql.Line($"DROP TABLE IF EXISTS {HeapDictionaryEntries};");
-        if (_usesLists || _usesRandom)
+        if (_usesIndexedItems)
             _sql.Line($"DROP TABLE IF EXISTS {HeapIndexedItems};");
         _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
 
@@ -175,14 +328,14 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("__id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
             _sql.Line("__type_id INT NOT NULL,");
             _sql.Line("__count INT NULL,");
-            _sql.Line("__random_inext INT NULL,");
-            _sql.Line("__random_inextp INT NULL");
+            _sql.Line("__state0 INT NULL,");
+            _sql.Line("__state1 INT NULL");
         }
         _sql.Line(");");
 
-        foreach (var type in _heapTypes.Values)
+        foreach (var type in UsedHeapTypes())
         {
-            EmitLeadingComments(type.Syntax);
+            EmitLeadingComments(type.Source);
             _sql.Line($"CREATE TABLE {type.TableName} (");
             using (_sql.Indent())
             {
@@ -190,14 +343,14 @@ public sealed partial class SharpSqlCompiler
                 var fields = type.Fields.Values.ToArray();
                 for (var index = 0; index < fields.Length; index++)
                 {
-                    EmitLeadingComments(fields[index].Syntax);
+                    EmitLeadingComments(fields[index].Source);
                     _sql.Line($"{fields[index].SqlName} {fields[index].Type.SqlType()} NULL{(index + 1 == fields.Length ? string.Empty : ",")}");
                 }
             }
             _sql.Line(");");
         }
 
-        if (_usesLists || _usesRandom)
+        if (_usesIndexedItems)
             EmitIndexedItemsTable();
         if (_usesDictionaries)
             EmitDictionaryTables();
@@ -258,16 +411,90 @@ public sealed partial class SharpSqlCompiler
 
         EmitHeapDiagnostics(
             $"(SELECT COUNT_BIG(*) FROM {HeapObjects})",
-            _usesLists || _usesRandom ? $"(SELECT COUNT_BIG(*) FROM {HeapIndexedItems})" : "0",
+            _usesIndexedItems ? $"(SELECT COUNT_BIG(*) FROM {HeapIndexedItems})" : "0",
             _usesDictionaries ? $"(SELECT COUNT_BIG(*) FROM {HeapDictionaryEntries})" : "0");
 
-        foreach (var type in _heapTypes.Values.Reverse())
+        foreach (var type in UsedHeapTypes().Reverse())
             _sql.Line($"DROP TABLE IF EXISTS {type.TableName};");
         if (_usesDictionaries)
             _sql.Line($"DROP TABLE IF EXISTS {HeapDictionaryEntries};");
-        if (_usesLists || _usesRandom)
+        if (_usesIndexedItems)
             _sql.Line($"DROP TABLE IF EXISTS {HeapIndexedItems};");
         _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
+    }
+
+    private IEnumerable<HeapType> UsedHeapTypes() =>
+        _heapTypes.Values.Where(type => _usedHeapTypes.Contains(type.Name));
+
+    private void MarkHeapTypeUsed(string typeName)
+    {
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        while (_heapTypes.TryGetValue(typeName, out var type) && visited.Add(typeName))
+        {
+            _usedHeapTypes.Add(typeName);
+            if (type.BaseType is null)
+                break;
+            typeName = type.BaseType.Name;
+        }
+    }
+
+    private HeapType? BaseHeapType(HeapType type) =>
+        type.BaseType is not null && _heapTypes.TryGetValue(type.BaseType.Name, out var baseType)
+            ? baseType
+            : null;
+
+    private IReadOnlyList<HeapType> HeapHierarchyBaseFirst(HeapType type)
+    {
+        var hierarchy = new List<HeapType>();
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        for (HeapType? current = type; current is not null && visited.Add(current.Name); current = BaseHeapType(current))
+            hierarchy.Add(current);
+        hierarchy.Reverse();
+        return hierarchy;
+    }
+
+    private bool TryResolveHeapField(
+        IrType receiverType,
+        string name,
+        IrMemberId memberId,
+        out HeapType declaringType,
+        out HeapField field)
+    {
+        if (!_heapTypes.TryGetValue(receiverType.Name, out var receiverHeapType))
+        {
+            declaringType = null!;
+            field = null!;
+            return false;
+        }
+
+        var hierarchy = HeapHierarchyBaseFirst(receiverHeapType);
+        if (!memberId.IsNone)
+        {
+            foreach (var candidateType in hierarchy)
+                foreach (var candidateField in candidateType.Fields.Values)
+                {
+                    if (candidateField.Id == memberId)
+                    {
+                        declaringType = candidateType;
+                        field = candidateField;
+                        return true;
+                    }
+                }
+        }
+
+        for (var index = hierarchy.Count - 1; index >= 0; index--)
+        {
+            var candidateType = hierarchy[index];
+            if (candidateType.Fields.TryGetValue(name, out field!))
+            {
+                declaringType = candidateType;
+                return true;
+            }
+        }
+
+        declaringType = null!;
+        field = null!;
+        return false;
     }
 
     private void EmitHeapDiagnostics(string objects, string indexedItems, string dictionaryEntries)
@@ -290,16 +517,19 @@ public sealed partial class SharpSqlCompiler
         ContainsVmCall(expression) || ContainsHeapEffect(expression) || ContainsGuardedLinqExpression(expression);
 
     private bool ContainsHeapEffect(ExpressionSyntax expression) =>
-        expression.DescendantNodesAndSelf().OfType<BaseObjectCreationExpressionSyntax>().Any(IsHeapCreation) ||
-        expression.DescendantNodesAndSelf().OfType<WithExpressionSyntax>().Any(withExpression =>
-            _heapTypes.ContainsKey(InferType(withExpression.Expression, new VariableScope()).Name)) ||
-        expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsRandomInvocation) ||
-        expression.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().Any(IsLinqMaterialization) ||
-        expression.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>().Any() ||
-        expression.DescendantNodesAndSelf().OfType<ArrayCreationExpressionSyntax>()
-            .Any(creation => creation.Type.ElementType.ToString() != "byte") ||
-        expression.DescendantNodesAndSelf().OfType<ImplicitArrayCreationExpressionSyntax>()
-            .Any(creation => InferType(creation, new VariableScope()).Name != "byte[]");
+        expression.DescendantNodesAndSelf().Any(node => node switch
+        {
+            BaseObjectCreationExpressionSyntax creation => IsHeapCreation(creation),
+            WithExpressionSyntax withExpression =>
+                _heapTypes.ContainsKey(InferType(withExpression.Expression, new VariableScope()).Name),
+            InvocationExpressionSyntax invocation =>
+                IsRandomInvocation(invocation) || IsLinqMaterialization(invocation),
+            ElementAccessExpressionSyntax => true,
+            ArrayCreationExpressionSyntax array => array.Type.ElementType.ToString() != "byte",
+            ImplicitArrayCreationExpressionSyntax array =>
+                InferType(array, new VariableScope()).Name != "byte[]",
+            _ => false
+        });
 
     private bool IsHeapCreation(BaseObjectCreationExpressionSyntax creation)
     {
@@ -334,8 +564,11 @@ public sealed partial class SharpSqlCompiler
         if (TryEmitLinqMaterialization(expression, scope, context, continuation))
             return true;
 
-        if (TryEmitRandomExpression(expression, scope, context, continuation))
+        if (expression is InvocationExpressionSyntax randomInvocation && IsRandomInvocation(randomInvocation))
+        {
+            EmitRandomInvocation(randomInvocation, scope, context, continuation);
             return true;
+        }
 
         if (expression is ArrayCreationExpressionSyntax arrayCreation &&
             arrayCreation.Type.ElementType.ToString() != "byte")
@@ -364,6 +597,613 @@ public sealed partial class SharpSqlCompiler
         else
             EmitNewObject(creation, _heapTypes[typeName], scope, context, continuation);
         return true;
+    }
+
+    private bool TryEmitHeapExpression(
+        IrExpression expression,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        switch (expression)
+        {
+            case IrElementExpression element:
+                return TryEmitHeapElementExpression(element, scope, context, continuation);
+            case IrArrayCreationExpression array when array.ElementType.Name != "byte":
+                EmitNewArray(array, scope, context, continuation);
+                return true;
+            case IrObjectCreationExpression creation when IsListType(creation.CreatedType.Name):
+                EmitNewList(creation, scope, context, continuation);
+                return true;
+            case IrObjectCreationExpression creation when IsDictionaryType(creation.CreatedType.Name):
+                EmitNewDictionary(creation, continuation);
+                return true;
+            case IrObjectCreationExpression creation when IsRandomType(creation.CreatedType.Name):
+                EmitNewRandom(creation, scope, context, continuation);
+                return true;
+            case IrObjectCreationExpression creation when _heapTypes.TryGetValue(creation.CreatedType.Name, out var heapType):
+                EmitNewObject(creation, heapType, scope, context, continuation);
+                return true;
+            case IrWithExpression withExpression when _heapTypes.TryGetValue(withExpression.Type.Name, out var heapType):
+                EmitRecordWith(withExpression, heapType, scope, context, continuation);
+                return true;
+            case IrInvocationExpression
+            {
+                Target: IrMemberExpression member
+            } invocation when
+                IsRandomType(member.Receiver.Type.Name) &&
+                member.MemberName is "Next" or "NextDouble":
+                EmitRandomInvocation(invocation, member, scope, context, continuation);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void EmitNewArray(
+        IrArrayCreationExpression creation,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        if (creation.Length is null)
+        {
+            EmitNewInitializedArray(creation.Elements, creation.ElementType, scope, context, continuation);
+            return;
+        }
+
+        EmitVmExpression(creation.Length, scope, context, size =>
+        {
+            var sizeTemporary = _names.Allocate("_array_size");
+            _sql.Line($"DECLARE {sizeTemporary} INT = {size};");
+            var array = AllocateHeapHeader(ArrayHeapTypeId, "__count", sizeTemporary);
+            InsertDefaultIndexedItems(array, sizeTemporary, creation.ElementType);
+            continuation(array);
+        });
+    }
+
+    private void EmitNewInitializedArray(
+        IReadOnlyList<IrExpression> items,
+        IrType elementType,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        var captured = new List<string>();
+        EvaluateItem(0);
+
+        void EvaluateItem(int index)
+        {
+            if (index == items.Count)
+            {
+                var array = AllocateHeapHeader(ArrayHeapTypeId, "__count", captured.Count.ToString());
+                InsertIndexedItems(array, elementType, captured);
+                continuation(array);
+                return;
+            }
+
+            EmitVmExpression(items[index], scope, context, value =>
+            {
+                if (items[index].Facts.HasConstantValue)
+                {
+                    captured.Add(value);
+                }
+                else
+                {
+                    var storage = AllocateVmTemporary(elementType, context);
+                    StoreVmTemporary(storage, value);
+                    captured.Add(ReadVmTemporary(storage));
+                }
+                EvaluateItem(index + 1);
+            });
+        }
+    }
+
+    private void EmitNewObject(
+        IrObjectCreationExpression creation,
+        HeapType heapType,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        var constructor = creation.ConstructorId.IsNone
+            ? heapType.Constructors.FirstOrDefault(candidate =>
+                (candidate.Parameters.Count > 0 ? candidate.Parameters.Count : candidate.TargetFields.Count) ==
+                creation.Arguments.Count)
+            : heapType.Constructors.FirstOrDefault(candidate => candidate.Id == creation.ConstructorId);
+        if (constructor is null)
+        {
+            AddDiagnostic(
+                "SS6003",
+                $"No constructor for '{heapType.Name}' with {creation.Arguments.Count} arguments.",
+                creation.Source);
+            continuation("NULL");
+            return;
+        }
+
+        var initializers = new List<(string Name, IrExpression Value)>();
+        foreach (var initializer in creation.Initializers)
+        {
+            if (initializer is not IrAssignmentExpression assignment ||
+                AssignmentMemberName(assignment.Target) is not { } name)
+            {
+                AddDiagnostic("SS6004", $"Unsupported initializer on '{heapType.Name}'.", initializer.Source);
+                continue;
+            }
+            initializers.Add((name, assignment.Value));
+        }
+
+        var capturedArguments = new List<string>();
+        EvaluateConstructorArgument(0);
+
+        void EvaluateConstructorArgument(int index)
+        {
+            if (index == creation.Arguments.Count)
+            {
+                Allocate();
+                return;
+            }
+
+            var argument = creation.Arguments[index];
+            var parameterType = index < constructor.Parameters.Count
+                ? constructor.Parameters[index].Type
+                : argument.Type;
+            EmitVmExpression(argument, scope, context, value =>
+            {
+                capturedArguments.Add(CaptureHeapValue(argument, parameterType, value, context));
+                EvaluateConstructorArgument(index + 1);
+            });
+        }
+
+        void Allocate()
+        {
+            string objectSql;
+            VmTemporary? objectStorage = null;
+            if (context is null)
+            {
+                objectSql = _names.Allocate("_object");
+                _sql.Line($"DECLARE {objectSql} INT;");
+            }
+            else
+            {
+                objectStorage = AllocateVmTemporary(
+                    new IrType(heapType.Name, IsReference: true),
+                    context);
+                objectSql = ReadVmTemporary(objectStorage);
+            }
+            _sql.Line($"INSERT INTO {HeapObjects} (__type_id) VALUES ({heapType.Id});");
+            if (objectStorage is null)
+                _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
+            else
+                StoreVmTemporary(objectStorage, "CONVERT(INT, SCOPE_IDENTITY())");
+            foreach (var allocatedType in HeapHierarchyBaseFirst(heapType))
+            {
+                var columns = new List<string> { "__object_id" };
+                var values = new List<string> { objectSql };
+                foreach (var field in allocatedType.Fields.Values)
+                {
+                    columns.Add(field.SqlName);
+                    values.Add(DefaultSql(field.Type));
+                }
+                _sql.Line($"INSERT INTO {allocatedType.TableName} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", values)});");
+            }
+
+            var objectScope = scope.Child();
+            objectScope.Add("this", new ScalarVariableBinding(
+                objectSql,
+                new IrType(heapType.Name, IsReference: true)));
+            ExecuteConstructor(heapType, constructor, capturedArguments, objectScope, objectSql, [],
+                () => EvaluateObjectInitializer(0));
+
+            void EvaluateObjectInitializer(int index)
+            {
+                if (index == initializers.Count)
+                {
+                    continuation(objectSql);
+                    return;
+                }
+
+                var initializer = initializers[index];
+                if (!TryResolveHeapField(
+                        new IrType(heapType.Name, IsReference: true),
+                        initializer.Name,
+                        IrMemberId.None,
+                        out var declaringType,
+                        out var field))
+                {
+                    AddDiagnostic(
+                        "SS6004",
+                        $"Unknown member '{initializer.Name}' on '{heapType.Name}'.",
+                        initializer.Value.Source);
+                    EvaluateObjectInitializer(index + 1);
+                    return;
+                }
+
+                EmitVmExpression(initializer.Value, scope, context, value =>
+                {
+                    _sql.Line($"UPDATE {declaringType.TableName} SET {field.SqlName} = {value} WHERE __object_id = {objectSql};");
+                    EvaluateObjectInitializer(index + 1);
+                });
+            }
+        }
+
+        void ExecuteConstructor(
+            HeapType declaringType,
+            HeapConstructor current,
+            IReadOnlyList<string> arguments,
+            VariableScope objectScope,
+            string objectSql,
+            HashSet<IrConstructorId> active,
+            Action completed)
+        {
+            if (!current.Id.IsNone && !active.Add(current.Id))
+            {
+                AddDiagnostic("SS6006", $"Constructor cycle detected on '{declaringType.Name}'.", creation.Source);
+                completed();
+                return;
+            }
+
+            var typeScope = objectScope.Child();
+            typeScope.Add("this", new ScalarVariableBinding(
+                objectSql,
+                new IrType(declaringType.Name, IsReference: true)));
+            var constructorScope = typeScope.Child();
+            for (var index = 0; index < current.Parameters.Count; index++)
+            {
+                var parameter = current.Parameters[index];
+                var parameterSql = _names.Allocate($"_ctor_{declaringType.Name}_{parameter.Name}");
+                var value = index < arguments.Count ? arguments[index] : DefaultSql(parameter.Type);
+                _sql.Line($"DECLARE {parameterSql} {parameter.Type.SqlType()} = {value};");
+                constructorScope.Add(parameter.Symbol, new ScalarVariableBinding(parameterSql, parameter.Type));
+            }
+
+            if (current.InitializerKind == IrConstructorInitializerKind.This)
+            {
+                var target = declaringType.Constructors.FirstOrDefault(candidate =>
+                    candidate.Id == current.InitializerConstructorId);
+                if (target is null)
+                {
+                    AddDiagnostic("SS6006", $"The chained constructor for '{declaringType.Name}' could not be resolved.", creation.Source);
+                    EmitBody();
+                    return;
+                }
+                var initializerArguments = new List<string>();
+                EvaluateChainedArgument(0);
+
+                void EvaluateChainedArgument(int index)
+                {
+                    if (index == current.InitializerArguments.Count)
+                    {
+                        ExecuteConstructor(declaringType, target, initializerArguments, objectScope, objectSql, active, EmitBody);
+                        return;
+                    }
+                    var argument = current.InitializerArguments[index];
+                    var parameterType = index < target.Parameters.Count
+                        ? target.Parameters[index].Type
+                        : argument.Type;
+                    EmitVmExpression(argument, constructorScope, context, value =>
+                    {
+                        initializerArguments.Add(CaptureHeapValue(argument, parameterType, value, context));
+                        EvaluateChainedArgument(index + 1);
+                    });
+                }
+                return;
+            }
+
+            var baseType = BaseHeapType(declaringType);
+            if (declaringType.BaseType is not null && baseType is null)
+            {
+                AddDiagnostic(
+                    "SS6006",
+                    $"The base type '{declaringType.BaseType.Name}' for '{declaringType.Name}' is not available in the heap model.",
+                    creation.Source);
+            }
+            if (baseType is null)
+            {
+                EvaluateInstanceInitializer(0);
+                return;
+            }
+
+            var baseConstructor = current.InitializerKind == IrConstructorInitializerKind.Base &&
+                                  !current.InitializerConstructorId.IsNone
+                ? baseType.Constructors.FirstOrDefault(candidate =>
+                    candidate.Id == current.InitializerConstructorId)
+                : baseType.Constructors.FirstOrDefault(candidate =>
+                    (candidate.Parameters.Count > 0 ? candidate.Parameters.Count : candidate.TargetFields.Count) ==
+                    (current.InitializerKind == IrConstructorInitializerKind.Base
+                        ? current.InitializerArguments.Count
+                        : 0));
+            if (baseConstructor is null)
+            {
+                AddDiagnostic(
+                    "SS6006",
+                    $"The base constructor for '{declaringType.Name}' could not be resolved on '{baseType.Name}'.",
+                    creation.Source);
+                EvaluateInstanceInitializer(0);
+                return;
+            }
+
+            var baseArguments = new List<string>();
+            EvaluateBaseArgument(0);
+
+            void EvaluateBaseArgument(int index)
+            {
+                if (index == current.InitializerArguments.Count)
+                {
+                    ExecuteConstructor(
+                        baseType,
+                        baseConstructor,
+                        baseArguments,
+                        objectScope,
+                        objectSql,
+                        active,
+                        () => EvaluateInstanceInitializer(0));
+                    return;
+                }
+                var argument = current.InitializerArguments[index];
+                var parameterType = index < baseConstructor.Parameters.Count
+                    ? baseConstructor.Parameters[index].Type
+                    : argument.Type;
+                EmitVmExpression(argument, constructorScope, context, value =>
+                {
+                    baseArguments.Add(CaptureHeapValue(argument, parameterType, value, context));
+                    EvaluateBaseArgument(index + 1);
+                });
+            }
+
+            void EvaluateInstanceInitializer(int index)
+            {
+                var fields = declaringType.Fields.Values
+                    .Where(field => !field.IsStatic && field.Initializer is not null)
+                    .OrderBy(field => field.Source.Span.Start)
+                    .ToArray();
+                if (index == fields.Length)
+                {
+                    EmitBody();
+                    return;
+                }
+
+                var field = fields[index];
+                EmitVmExpression(field.Initializer!, typeScope, context, value =>
+                {
+                    _sql.Line($"UPDATE {declaringType.TableName} SET {field.SqlName} = {value} WHERE __object_id = {objectSql};");
+                    EvaluateInstanceInitializer(index + 1);
+                });
+            }
+
+            void EmitBody()
+            {
+                if (current.Body is null)
+                {
+                    EmitMappedAssignments();
+                    Finish();
+                    return;
+                }
+
+                var endLabel = _names.AllocateLabel($"ctor_{declaringType.Name}_end");
+                var previousContext = _proceduralVmContext;
+                _proceduralVmContext = context;
+                try
+                {
+                    EmitProceduralStatementSequence(
+                        current.Body.Statements,
+                        constructorScope,
+                        new InlineReturn(null, endLabel),
+                        loop: null,
+                        namePrefix: $"_ctor_{declaringType.Name}_{++_inlineId}");
+                }
+                finally
+                {
+                    _proceduralVmContext = previousContext;
+                }
+                EmitLabel(endLabel);
+                Finish();
+            }
+
+            void EmitMappedAssignments()
+            {
+                for (var index = 0; index < current.TargetFields.Count && index < arguments.Count; index++)
+                {
+                    var name = current.TargetFields[index];
+                    if (string.IsNullOrEmpty(name) || !declaringType.Fields.TryGetValue(name, out var field))
+                        continue;
+                    _sql.Line($"UPDATE {declaringType.TableName} SET {field.SqlName} = {arguments[index]} WHERE __object_id = {objectSql};");
+                }
+            }
+
+            void Finish()
+            {
+                if (!current.Id.IsNone)
+                    active.Remove(current.Id);
+                completed();
+            }
+        }
+    }
+
+    private void EmitNewList(
+        IrObjectCreationExpression creation,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        if (creation.Arguments.Count != 0)
+        {
+            AddDiagnostic("SS6102", "List construction currently expects no arguments.", creation.Source);
+            continuation("NULL");
+            return;
+        }
+
+        var elementType = GenericArguments(creation.CreatedType.Name)[0];
+        var captured = new List<string>();
+        EvaluateItem(0);
+
+        void EvaluateItem(int index)
+        {
+            if (index == creation.Initializers.Count)
+            {
+                var list = AllocateHeapHeader(ListHeapTypeId, "__count", "0");
+                InsertIndexedItems(list, elementType, captured);
+                if (captured.Count > 0)
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = {captured.Count} WHERE __id = {list};");
+                continuation(list);
+                return;
+            }
+
+            var item = creation.Initializers[index];
+            EmitVmExpression(item, scope, context, value =>
+            {
+                captured.Add(item is IrObjectCreationExpression
+                    ? value
+                    : CaptureHeapValue(item, elementType, value, context));
+                EvaluateItem(index + 1);
+            });
+        }
+    }
+
+    private void EmitRecordWith(
+        IrWithExpression expression,
+        HeapType heapType,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        var initializers = expression.Initializers
+            .Select(initializer =>
+            {
+                var name = AssignmentMemberName(initializer.Target);
+                var memberId = initializer.Target switch
+                {
+                    IrMemberExpression member => member.MemberId,
+                    IrVariableExpression variable => variable.Symbol.ReferencedMemberId,
+                    _ => IrMemberId.None
+                };
+                HeapType? declaringType = null;
+                HeapField? field = null;
+                if (name is not null)
+                    TryResolveHeapField(
+                        new IrType(heapType.Name, IsReference: true),
+                        name,
+                        memberId,
+                        out declaringType,
+                        out field);
+                return (Name: name, DeclaringType: declaringType, Field: field, initializer.Value);
+            })
+            .ToArray();
+        var invalid = initializers.FirstOrDefault(initializer => initializer.Field is null);
+        if (invalid != default)
+        {
+            AddDiagnostic(
+                "SS6004",
+                $"Unknown member '{invalid.Name}' on '{heapType.Name}'.",
+                invalid.Value.Source);
+            continuation("NULL");
+            return;
+        }
+
+        var hierarchy = HeapHierarchyBaseFirst(heapType);
+        var fields = hierarchy
+            .SelectMany(type => type.Fields.Values.Select(field => (DeclaringType: type, Field: field)))
+            .ToArray();
+        EmitVmExpression(expression.Receiver, scope, context, receiver =>
+        {
+            var receiverStorage = AllocateVmTemporary(expression.Receiver.Type, context);
+            StoreVmTemporary(receiverStorage, receiver);
+            var savedReceiver = ReadVmTemporary(receiverStorage);
+            var assignments = new List<(HeapType DeclaringType, HeapField Field, string ValueSql)>();
+            CaptureField(0);
+
+            void CaptureField(int index)
+            {
+                if (index == fields.Length)
+                {
+                    EvaluateInitializer(0);
+                    return;
+                }
+                var (declaringType, field) = fields[index];
+                if (!initializers.Any(initializer =>
+                        ReferenceEquals(initializer.DeclaringType, declaringType) &&
+                        ReferenceEquals(initializer.Field, field)))
+                {
+                    var storage = AllocateVmTemporary(field.Type, context);
+                    StoreVmTemporary(
+                        storage,
+                        $"(SELECT {field.SqlName} FROM {declaringType.TableName} WHERE __object_id = {savedReceiver})");
+                    assignments.Add((declaringType, field, ReadVmTemporary(storage)));
+                }
+                CaptureField(index + 1);
+            }
+
+            void EvaluateInitializer(int index)
+            {
+                if (index == initializers.Length)
+                {
+                    AllocateClone();
+                    return;
+                }
+                var initializer = initializers[index];
+                var declaringType = initializer.DeclaringType!;
+                var field = initializer.Field!;
+                EmitVmExpression(initializer.Value, scope, context, value =>
+                {
+                    assignments.Add((
+                        declaringType,
+                        field,
+                        CaptureHeapValue(initializer.Value, field.Type, value, context)));
+                    EvaluateInitializer(index + 1);
+                });
+            }
+
+            void AllocateClone()
+            {
+                var objectSql = _names.Allocate("_object");
+                _sql.Line($"DECLARE {objectSql} INT;");
+                _sql.Line($"INSERT INTO {HeapObjects} (__type_id) VALUES ({heapType.Id});");
+                _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
+                foreach (var allocatedType in hierarchy)
+                {
+                    var columns = new[] { "__object_id" }
+                        .Concat(allocatedType.Fields.Values.Select(field => field.SqlName));
+                    var values = new[] { objectSql }.Concat(
+                        allocatedType.Fields.Values.Select(field =>
+                            assignments.Single(item =>
+                                ReferenceEquals(item.DeclaringType, allocatedType) &&
+                                ReferenceEquals(item.Field, field)).ValueSql));
+                    _sql.Line($"INSERT INTO {allocatedType.TableName} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", values)});");
+                }
+                continuation(objectSql);
+            }
+        });
+    }
+
+    private void EmitNewDictionary(
+        IrObjectCreationExpression creation,
+        Action<string> continuation)
+    {
+        if (creation.Arguments.Count != 0)
+            AddDiagnostic("SS6202", "Dictionary construction currently expects no arguments.", creation.Source);
+        if (creation.Initializers.Count > 0)
+            AddDiagnostic("SS6005", "Dictionary collection initializers are not supported yet; use Add calls.", creation.Source);
+        continuation(AllocateHeapHeader(DictionaryHeapTypeId, "__count", "0"));
+    }
+
+    private static string? AssignmentMemberName(IrExpression expression) => expression switch
+    {
+        IrMemberExpression member => member.MemberName,
+        IrVariableExpression variable => variable.Symbol.Name,
+        _ => null
+    };
+
+    private string CaptureHeapValue(
+        IrExpression expression,
+        IrType type,
+        string value,
+        VmMethod? context)
+    {
+        if (expression.Facts.HasConstantValue)
+            return value;
+        var storage = AllocateVmTemporary(type, context);
+        StoreVmTemporary(storage, value);
+        return ReadVmTemporary(storage);
     }
 
     private void EmitNewArray(
@@ -395,18 +1235,9 @@ public sealed partial class SharpSqlCompiler
         EmitVmExpression(sizeExpression, scope, context, size =>
         {
             var sizeTemporary = _names.Allocate("_array_size");
-            var indexTemporary = _names.Allocate("_array_index");
             _sql.Line($"DECLARE {sizeTemporary} INT = {size};");
-            var array = AllocateHeapHeader(1003, "__count", sizeTemporary);
-            _sql.Line($"DECLARE {indexTemporary} INT = 0;");
-            _sql.Line($"WHILE {indexTemporary} < {sizeTemporary}");
-            _sql.Line("BEGIN");
-            using (_sql.Indent())
-            {
-                InsertListItem(array, indexTemporary, elementType, DefaultSql(elementType));
-                _sql.Line($"SET {indexTemporary} = {indexTemporary} + 1;");
-            }
-            _sql.Line("END;");
+            var array = AllocateHeapHeader(ArrayHeapTypeId, "__count", sizeTemporary);
+            InsertDefaultIndexedItems(array, sizeTemporary, elementType);
             continuation(array);
         });
     }
@@ -447,8 +1278,8 @@ public sealed partial class SharpSqlCompiler
         {
             if (index == items.Count)
             {
-                var array = AllocateHeapHeader(1003, "__count", captured.Count.ToString());
-                InsertListItems(array, elementType, captured);
+                var array = AllocateHeapHeader(ArrayHeapTypeId, "__count", captured.Count.ToString());
+                InsertIndexedItems(array, elementType, captured);
                 continuation(array);
                 return;
             }
@@ -688,8 +1519,8 @@ public sealed partial class SharpSqlCompiler
 
         void Allocate()
         {
-            var listSql = AllocateHeapHeader(1001, "__count", "0");
-            InsertListItems(
+            var listSql = AllocateHeapHeader(ListHeapTypeId, "__count", "0");
+            InsertIndexedItems(
                 listSql,
                 elementType,
                 captured);
@@ -708,14 +1539,21 @@ public sealed partial class SharpSqlCompiler
     {
         if (creation.Initializer is { Expressions.Count: > 0 })
             AddDiagnostic("SS6005", "Dictionary collection initializers are not supported yet; use Add calls.", creation.Initializer);
-        continuation(AllocateHeapHeader(1002, "__count", "0"));
+        continuation(AllocateHeapHeader(DictionaryHeapTypeId, "__count", "0"));
     }
 
     private string AllocateHeapHeader(int typeId, string column, string value)
+        => AllocateHeapHeader(typeId, [(column, value)]);
+
+    private string AllocateHeapHeader(
+        int typeId,
+        IReadOnlyList<(string Column, string Value)> state)
     {
         var objectSql = _names.Allocate("_object");
         _sql.Line($"DECLARE {objectSql} INT;");
-        _sql.Line($"INSERT INTO {HeapObjects} (__type_id, {column}) VALUES ({typeId}, {value});");
+        var columns = new[] { "__type_id" }.Concat(state.Select(item => item.Column));
+        var values = new[] { typeId.ToString() }.Concat(state.Select(item => item.Value));
+        _sql.Line($"INSERT INTO {HeapObjects} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", values)});");
         _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
         return objectSql;
     }
@@ -781,13 +1619,11 @@ public sealed partial class SharpSqlCompiler
                 {
                     var receiver = EmitScalar(collectionMember.Expression, scope);
                     var predicate = DictionaryKeyPredicate(types[0], key);
-                    _sql.Line($"IF EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver} AND {predicate})");
+                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver} AND {predicate};");
+                    _sql.Line("IF @@ROWCOUNT > 0");
                     _sql.Line("BEGIN");
                     using (_sql.Indent())
-                    {
-                        _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver} AND {predicate};");
                         _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE __id = {receiver};");
-                    }
                     _sql.Line("END;");
                 });
                 return true;
@@ -841,6 +1677,192 @@ public sealed partial class SharpSqlCompiler
         return false;
     }
 
+    private bool TryEmitHeapStatement(IrExpression expression, VariableScope scope, VmMethod? context = null)
+    {
+        if (expression is IrInvocationExpression { Target: IrMemberExpression member } invocation)
+        {
+            var receiverType = member.Receiver.Type;
+            if (member.MemberName == "Add")
+            {
+                if (IsListType(receiverType.Name))
+                {
+                    EmitListAdd(member.Receiver, invocation.Arguments, receiverType, scope, context, invocation.Source);
+                    return true;
+                }
+                if (IsDictionaryType(receiverType.Name))
+                {
+                    EmitDictionaryAdd(member.Receiver, invocation.Arguments, receiverType, scope, context, invocation.Source);
+                    return true;
+                }
+            }
+
+            if (member.MemberName == "Clear" && invocation.Arguments.Count == 0)
+            {
+                var receiver = EmitScalar(member.Receiver, scope);
+                if (IsListType(receiverType.Name))
+                {
+                    _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE __owner_id = {receiver};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE __id = {receiver};");
+                    return true;
+                }
+                if (IsDictionaryType(receiverType.Name))
+                {
+                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE __id = {receiver};");
+                    return true;
+                }
+            }
+
+            if (member.MemberName == "RemoveAt" && IsListType(receiverType.Name) && invocation.Arguments.Count == 1)
+            {
+                EmitVmExpression(invocation.Arguments[0], scope, context, index =>
+                {
+                    var receiver = EmitScalar(member.Receiver, scope);
+                    _sql.Line($"IF {index} < 0 OR {index} >= {SequenceCountSql(receiver)} THROW 51002, 'List index was out of range.', 1;");
+                    _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE __owner_id = {receiver} AND __index = {index};");
+                    _sql.Line($"UPDATE {HeapIndexedItems} SET __index = __index - 1 WHERE __owner_id = {receiver} AND __index > {index};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE __id = {receiver};");
+                });
+                return true;
+            }
+
+            if (member.MemberName == "Remove" && IsDictionaryType(receiverType.Name) && invocation.Arguments.Count == 1)
+            {
+                var types = GenericArguments(receiverType.Name);
+                EmitVmExpression(invocation.Arguments[0], scope, context, key =>
+                {
+                    var receiver = EmitScalar(member.Receiver, scope);
+                    var predicate = DictionaryKeyPredicate(types[0], key);
+                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver} AND {predicate};");
+                    _sql.Line("IF @@ROWCOUNT > 0");
+                    _sql.Line("BEGIN");
+                    using (_sql.Indent())
+                        _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE __id = {receiver};");
+                    _sql.Line("END;");
+                });
+                return true;
+            }
+        }
+
+        if (expression is IrUnaryExpression
+            {
+                Operator: IrUnaryOperator.PreIncrement or IrUnaryOperator.PostIncrement or
+                    IrUnaryOperator.PreDecrement or IrUnaryOperator.PostDecrement
+            } mutation)
+        {
+            HeapType? mutationType = null;
+            HeapField? mutationField = null;
+            string? mutationReceiver = null;
+            if (mutation.Operand is IrMemberExpression memberTarget &&
+                TryResolveHeapField(
+                    memberTarget.Receiver.Type,
+                    memberTarget.MemberName,
+                    memberTarget.MemberId,
+                    out mutationType,
+                    out mutationField))
+            {
+                mutationReceiver = EmitScalar(memberTarget.Receiver, scope);
+            }
+            else if (mutation.Operand is IrVariableExpression implicitTarget &&
+                     scope.Find(implicitTarget.Symbol) is null &&
+                     TryResolveImplicitHeapField(
+                         implicitTarget.Symbol.Name,
+                         implicitTarget.Symbol.ReferencedMemberId,
+                         scope,
+                         substitutions: null,
+                         out mutationType,
+                         out mutationField,
+                         out mutationReceiver))
+            {
+            }
+
+            if (mutationType is not null && mutationField is not null && mutationReceiver is not null)
+            {
+                var operation = mutation.Operator is IrUnaryOperator.PreIncrement or IrUnaryOperator.PostIncrement
+                    ? "+ 1"
+                    : "- 1";
+                _sql.Line($"UPDATE {mutationType.TableName} SET {mutationField.SqlName} = {mutationField.SqlName} {operation} WHERE __object_id = {mutationReceiver};");
+                return true;
+            }
+        }
+
+        if (expression is not IrAssignmentExpression assignment)
+            return false;
+
+        if (assignment.Target is IrMemberExpression fieldAccess &&
+            TryResolveHeapField(
+                fieldAccess.Receiver.Type,
+                fieldAccess.MemberName,
+                fieldAccess.MemberId,
+                out var heapType,
+                out var field))
+        {
+            var receiver = EmitScalar(fieldAccess.Receiver, scope);
+            var currentValue = $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE __object_id = {receiver})";
+            EmitVmExpression(assignment.Value, scope, context, value =>
+                _sql.Line($"UPDATE {heapType.TableName} SET {field.SqlName} = {HeapAssignmentValue(assignment.Operator, field.Type, currentValue, value)} WHERE __object_id = {receiver};"));
+            return true;
+        }
+
+        if (assignment.Target is IrVariableExpression implicitField &&
+            scope.Find(implicitField.Symbol) is null &&
+            TryResolveImplicitHeapField(
+                implicitField.Symbol.Name,
+                implicitField.Symbol.ReferencedMemberId,
+                scope,
+                substitutions: null,
+                out var implicitType,
+                out var implicitMember,
+                out var implicitReceiver))
+        {
+            var currentValue = $"(SELECT {implicitMember.SqlName} FROM {implicitType.TableName} WHERE __object_id = {implicitReceiver})";
+            EmitVmExpression(assignment.Value, scope, context, value =>
+                _sql.Line($"UPDATE {implicitType.TableName} SET {implicitMember.SqlName} = {HeapAssignmentValue(assignment.Operator, implicitMember.Type, currentValue, value)} WHERE __object_id = {implicitReceiver};"));
+            return true;
+        }
+
+        if (assignment.Target is IrElementExpression { Arguments.Count: 1 } element)
+        {
+            var receiverType = element.Receiver.Type;
+            if (IsSequenceType(receiverType.Name))
+            {
+                EmitListSet(element, assignment.Value, receiverType, scope, context);
+                return true;
+            }
+            if (IsDictionaryType(receiverType.Name))
+            {
+                EmitDictionarySet(element, assignment.Value, receiverType, scope, context);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static string HeapAssignmentValue(
+        IrAssignmentOperator assignmentOperator,
+        IrType targetType,
+        string currentValue,
+        string value)
+    {
+        if (assignmentOperator == IrAssignmentOperator.Assign)
+            return value;
+        var operation = assignmentOperator switch
+        {
+            IrAssignmentOperator.Add => "+",
+            IrAssignmentOperator.Subtract => "-",
+            IrAssignmentOperator.Multiply => "*",
+            IrAssignmentOperator.Divide => "/",
+            IrAssignmentOperator.Remainder => "%",
+            IrAssignmentOperator.BitwiseAnd => "&",
+            IrAssignmentOperator.BitwiseOr => "|",
+            IrAssignmentOperator.ExclusiveOr => "^",
+            _ => string.Empty
+        };
+        return targetType.IsString && operation == "+"
+            ? $"CONCAT({currentValue}, {value})"
+            : $"{currentValue} {operation} ({value})";
+    }
+
     private static string HeapAssignmentValue(
         AssignmentExpressionSyntax assignment,
         IrType targetType,
@@ -886,7 +1908,30 @@ public sealed partial class SharpSqlCompiler
         {
             var list = EmitScalar(receiver, scope);
             var index = $"(SELECT __count FROM {HeapObjects} WHERE __id = {list})";
-            InsertListItem(list, index, elementType, value);
+            InsertIndexedItem(list, index, elementType, value);
+            _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE __id = {list};");
+        });
+    }
+
+    private void EmitListAdd(
+        IrExpression receiver,
+        IReadOnlyList<IrExpression> arguments,
+        IrType listType,
+        VariableScope scope,
+        VmMethod? context,
+        IrSource source)
+    {
+        if (arguments.Count != 1)
+        {
+            AddDiagnostic("SS6101", "List.Add expects one argument.", source);
+            return;
+        }
+        var elementType = SequenceElementType(listType.Name);
+        EmitVmExpression(arguments[0], scope, context, value =>
+        {
+            var list = EmitScalar(receiver, scope);
+            var index = $"(SELECT __count FROM {HeapObjects} WHERE __id = {list})";
+            InsertIndexedItem(list, index, elementType, value);
             _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE __id = {list};");
         });
     }
@@ -909,10 +1954,39 @@ public sealed partial class SharpSqlCompiler
             }));
     }
 
-    private void InsertListItem(string list, string index, IrType type, string value) =>
+    private void EmitListSet(
+        IrElementExpression element,
+        IrExpression valueExpression,
+        IrType listType,
+        VariableScope scope,
+        VmMethod? context)
+    {
+        var elementType = SequenceElementType(listType.Name);
+        EmitVmExpression(element.Arguments[0], scope, context, index =>
+            EmitVmExpression(valueExpression, scope, context, value =>
+            {
+                var list = EmitScalar(element.Receiver, scope);
+                EmitSequenceIndexGuard(listType, list, index);
+                _sql.Line($"UPDATE {HeapIndexedItems} SET {CollectionValueColumn(elementType, false)} = {CollectionStoredValue(elementType, value)} WHERE __owner_id = {list} AND __index = {index};");
+            }));
+    }
+
+    private void InsertIndexedItem(string list, string index, IrType type, string value) =>
         _sql.Line($"INSERT INTO {HeapIndexedItems} (__owner_id, __index, {CollectionValueColumn(type, false)}) VALUES ({list}, {index}, {CollectionStoredValue(type, value)});");
 
-    private void InsertListItems(string list, IrType type, IReadOnlyList<string> values)
+    private void InsertDefaultIndexedItems(string owner, string count, IrType type)
+    {
+        var generated = $"__array_generated_{++_nextHeapAliasId}";
+        var column = CollectionValueColumn(type, false);
+        var value = CollectionStoredValue(type, DefaultSql(type));
+        _sql.Line(
+            $"INSERT INTO {HeapIndexedItems} (__owner_id, __index, {column}) " +
+            $"SELECT {owner}, CONVERT(INT, {generated}.[value]), {value} " +
+            $"FROM GENERATE_SERIES(CONVERT(BIGINT, 0), CONVERT(BIGINT, {count}) - 1, CONVERT(BIGINT, 1)) AS {generated} " +
+            $"WHERE {count} > 0;");
+    }
+
+    private void InsertIndexedItems(string list, IrType type, IReadOnlyList<string> values)
     {
         const int maximumRowsPerValuesClause = 1000;
         var column = CollectionValueColumn(type, key: false);
@@ -960,6 +2034,35 @@ public sealed partial class SharpSqlCompiler
         });
     }
 
+    private void EmitDictionaryAdd(
+        IrExpression receiver,
+        IReadOnlyList<IrExpression> arguments,
+        IrType dictionaryType,
+        VariableScope scope,
+        VmMethod? context,
+        IrSource source)
+    {
+        if (arguments.Count != 2)
+        {
+            AddDiagnostic("SS6201", "Dictionary.Add expects two arguments.", source);
+            return;
+        }
+        var types = GenericArguments(dictionaryType.Name);
+        EmitVmExpression(arguments[0], scope, context, key =>
+        {
+            var keyStore = AllocateVmTemporary(types[0], context);
+            StoreVmTemporary(keyStore, key);
+            EmitVmExpression(arguments[1], scope, context, value =>
+            {
+                var dictionary = EmitScalar(receiver, scope);
+                var savedKey = ReadVmTemporary(keyStore);
+                _sql.Line($"IF EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE __dictionary_id = {dictionary} AND {DictionaryKeyPredicate(types[0], savedKey)}) THROW 51001, 'Duplicate dictionary key.', 1;");
+                InsertDictionaryEntry(dictionary, types[0], savedKey, types[1], value);
+                _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE __id = {dictionary};");
+            });
+        });
+    }
+
     private void EmitDictionarySet(
         ElementAccessExpressionSyntax element,
         ExpressionSyntax valueExpression,
@@ -978,9 +2081,38 @@ public sealed partial class SharpSqlCompiler
                 var dictionary = EmitScalar(element.Expression, scope);
                 var savedKey = ReadVmTemporary(keyStore);
                 var predicate = DictionaryKeyPredicate(types[0], savedKey);
-                _sql.Line($"IF EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE __dictionary_id = {dictionary} AND {predicate})");
-                _sql.Line($"    UPDATE {HeapDictionaryEntries} SET {CollectionValueColumn(types[1], false)} = {CollectionStoredValue(types[1], value)} WHERE __dictionary_id = {dictionary} AND {predicate};");
-                _sql.Line("ELSE");
+                _sql.Line($"UPDATE {HeapDictionaryEntries} SET {CollectionValueColumn(types[1], false)} = {CollectionStoredValue(types[1], value)} WHERE __dictionary_id = {dictionary} AND {predicate};");
+                _sql.Line("IF @@ROWCOUNT = 0");
+                _sql.Line("BEGIN");
+                using (_sql.Indent())
+                {
+                    InsertDictionaryEntry(dictionary, types[0], savedKey, types[1], value);
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE __id = {dictionary};");
+                }
+                _sql.Line("END;");
+            });
+        });
+    }
+
+    private void EmitDictionarySet(
+        IrElementExpression element,
+        IrExpression valueExpression,
+        IrType dictionaryType,
+        VariableScope scope,
+        VmMethod? context)
+    {
+        var types = GenericArguments(dictionaryType.Name);
+        EmitVmExpression(element.Arguments[0], scope, context, key =>
+        {
+            var keyStore = AllocateVmTemporary(types[0], context);
+            StoreVmTemporary(keyStore, key);
+            EmitVmExpression(valueExpression, scope, context, value =>
+            {
+                var dictionary = EmitScalar(element.Receiver, scope);
+                var savedKey = ReadVmTemporary(keyStore);
+                var predicate = DictionaryKeyPredicate(types[0], savedKey);
+                _sql.Line($"UPDATE {HeapDictionaryEntries} SET {CollectionValueColumn(types[1], false)} = {CollectionStoredValue(types[1], value)} WHERE __dictionary_id = {dictionary} AND {predicate};");
+                _sql.Line("IF @@ROWCOUNT = 0");
                 _sql.Line("BEGIN");
                 using (_sql.Indent())
                 {
@@ -1084,6 +2216,40 @@ public sealed partial class SharpSqlCompiler
         return true;
     }
 
+    private bool TryEmitHeapElementExpression(
+        IrElementExpression element,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        if (element.Arguments.Count != 1)
+            return false;
+
+        var receiverType = element.Receiver.Type;
+        if (!receiverType.IsString && !IsSequenceType(receiverType.Name) && !IsDictionaryType(receiverType.Name))
+            return false;
+
+        EmitVmExpression(element.Receiver, scope, context, receiver =>
+            EmitVmExpression(element.Arguments[0], scope, context, key =>
+            {
+                if (receiverType.IsString)
+                    _sql.Line($"IF {key} < 0 OR {key} >= CONVERT(INT, DATALENGTH({receiver}) / 2) THROW 51003, 'String index was out of range.', 1;");
+                else if (IsSequenceType(receiverType.Name))
+                    EmitSequenceIndexGuard(receiverType, receiver, key);
+                else
+                {
+                    var keyType = GenericArguments(receiverType.Name)[0];
+                    _sql.Line($"IF NOT EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver} AND {DictionaryKeyPredicate(keyType, key)}) THROW 51010, 'The given key was not present in the dictionary.', 1;");
+                }
+
+                if (TryGetHeapElementSql(receiverType, receiver, key, out var value))
+                    continuation(value);
+                else
+                    continuation(UnsupportedExpression(element.Source));
+            }));
+        return true;
+    }
+
     private void EmitSequenceIndexGuard(IrType receiverType, string receiver, string index)
     {
         var (code, message) = IsListType(receiverType.Name)
@@ -1159,6 +2325,47 @@ public sealed partial class SharpSqlCompiler
         return false;
     }
 
+    private bool TryEmitHeapInvocationScalar(
+        IrInvocationExpression invocation,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out SqlScalarExpression expression)
+    {
+        if (invocation.Target is IrMemberExpression member)
+        {
+            var receiverType = member.Receiver.Type;
+            if (IsDictionaryType(receiverType.Name) && member.MemberName == "ContainsKey" &&
+                invocation.Arguments.Count == 1)
+            {
+                var receiver = EmitScalar(member.Receiver, scope, substitutions);
+                var keyType = GenericArguments(receiverType.Name)[0];
+                var key = EmitScalar(invocation.Arguments[0], scope, substitutions);
+                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver} AND {DictionaryKeyPredicate(keyType, key)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                return true;
+            }
+            if (IsListType(receiverType.Name) && member.MemberName == "Contains" &&
+                invocation.Arguments.Count == 1)
+            {
+                var receiver = EmitScalar(member.Receiver, scope, substitutions);
+                var itemType = SequenceElementType(receiverType.Name);
+                var value = EmitScalar(invocation.Arguments[0], scope, substitutions);
+                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapIndexedItems} WHERE __owner_id = {receiver} AND {CollectionValuePredicate(itemType, value, false)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                return true;
+            }
+            if (IsDictionaryType(receiverType.Name) && member.MemberName == "ContainsValue" &&
+                invocation.Arguments.Count == 1)
+            {
+                var receiver = EmitScalar(member.Receiver, scope, substitutions);
+                var valueType = GenericArguments(receiverType.Name)[1];
+                var value = EmitScalar(invocation.Arguments[0], scope, substitutions);
+                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE __dictionary_id = {receiver} AND {CollectionValuePredicate(valueType, value, false)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                return true;
+            }
+        }
+        expression = null!;
+        return false;
+    }
+
     private IrType InferHeapMemberType(MemberAccessExpressionSyntax member, VariableScope scope)
     {
         var receiver = InferType(member.Expression, scope);
@@ -1166,8 +2373,12 @@ public sealed partial class SharpSqlCompiler
             return IrType.Int;
         if (IsArrayType(receiver.Name) && member.Name.Identifier.ValueText == "Length")
             return IrType.Int;
-        if (_heapTypes.TryGetValue(receiver.Name, out var heapType) &&
-            heapType.Fields.TryGetValue(member.Name.Identifier.ValueText, out var field))
+        if (TryResolveHeapField(
+                receiver,
+                member.Name.Identifier.ValueText,
+                MemberIdentity(SemanticModelFor(member)?.GetSymbolInfo(member).Symbol),
+                out _,
+                out var field))
             return field.Type;
         return IrType.Unknown;
     }
@@ -1190,12 +2401,12 @@ public sealed partial class SharpSqlCompiler
         out HeapField field)
     {
         var receiverType = InferType(member.Expression, scope, substitutions);
-        if (_heapTypes.TryGetValue(receiverType.Name, out type!) &&
-            type.Fields.TryGetValue(member.Name.Identifier.ValueText, out field!))
-            return true;
-        type = null!;
-        field = null!;
-        return false;
+        return TryResolveHeapField(
+            receiverType,
+            member.Name.Identifier.ValueText,
+            MemberIdentity(SemanticModelFor(member)?.GetSymbolInfo(member).Symbol),
+            out type,
+            out field);
     }
 
     private bool TryResolveHeapField(
@@ -1233,6 +2444,23 @@ public sealed partial class SharpSqlCompiler
         IReadOnlyDictionary<string, Substitution>? substitutions,
         out HeapType type,
         out HeapField field,
+        out string receiver) =>
+        TryResolveImplicitHeapField(
+            name,
+            IrMemberId.None,
+            scope,
+            substitutions,
+            out type,
+            out field,
+            out receiver);
+
+    private bool TryResolveImplicitHeapField(
+        string name,
+        IrMemberId memberId,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out HeapType type,
+        out HeapField field,
         out string receiver)
     {
         IrType? receiverType = null;
@@ -1242,15 +2470,13 @@ public sealed partial class SharpSqlCompiler
             receiverType = replacement.Type;
             receiver = replacement.Expression.Sql;
         }
-        else if (scope.Find("this") is { } binding)
+        else if (scope.Find("this") is ScalarVariableBinding binding)
         {
             receiverType = binding.Type;
             receiver = binding.SqlName;
         }
 
-        if (receiverType is not null &&
-            _heapTypes.TryGetValue(receiverType.Name, out type!) &&
-            type.Fields.TryGetValue(name, out field!))
+        if (receiverType is not null && TryResolveHeapField(receiverType, name, memberId, out type, out field))
             return true;
         type = null!;
         field = null!;
@@ -1335,7 +2561,7 @@ public sealed partial class SharpSqlCompiler
             return $"CASE {value} WHEN CAST(1 AS BIT) THEN N'True' " +
                    "WHEN CAST(0 AS BIT) THEN N'False' ELSE N'' END";
         return _heapTypes.TryGetValue(type.Name, out var heapType) &&
-               heapType.Syntax is RecordDeclarationSyntax
+               heapType.IsRecord
             ? FormatRecordText(heapType, value)
             : value;
     }
@@ -1343,14 +2569,16 @@ public sealed partial class SharpSqlCompiler
     private string FormatRecordText(HeapType type, string reference)
     {
         var parts = new List<string> { $"N'{EscapeSqlString(type.Name)} {{ '" };
-        var fields = type.Fields.Values.ToArray();
+        var fields = HeapHierarchyBaseFirst(type)
+            .SelectMany(declaringType => declaringType.Fields.Values.Select(field => (DeclaringType: declaringType, Field: field)))
+            .ToArray();
         for (var index = 0; index < fields.Length; index++)
         {
-            var field = fields[index];
+            var (declaringType, field) = fields[index];
             if (index > 0)
                 parts.Add("N', '");
             parts.Add($"N'{EscapeSqlString(field.Name)} = '");
-            var fieldValue = $"(SELECT {field.SqlName} FROM {type.TableName} WHERE __object_id = {reference})";
+            var fieldValue = $"(SELECT {field.SqlName} FROM {declaringType.TableName} WHERE __object_id = {reference})";
             parts.Add(FormatTextValue(field.Type, fieldValue));
         }
         parts.Add("N' }'");
@@ -1375,15 +2603,14 @@ public sealed partial class SharpSqlCompiler
     }
 
     private static bool IsListType(string name) =>
-        name.StartsWith("List<", StringComparison.Ordinal) ||
-        name.StartsWith("System.Collections.Generic.List<", StringComparison.Ordinal);
+        KnownTypeFacts.IsList(name);
 
     private static bool IsArrayType(string name) => name.EndsWith("[]", StringComparison.Ordinal) && name != "byte[]";
 
     private static bool IsSequenceType(string name) => IsListType(name) || IsArrayType(name);
 
     private static IrType SequenceElementType(string name) => IsArrayType(name)
-        ? CSharpTypeFactory.From(SyntaxFactory.ParseTypeName(name[..^2]))
+        ? KnownTypeFacts.TypeFromName(name[..^2])
         : GenericArguments(name)[0];
 
     private static string SequenceCountSql(string collection) =>
@@ -1393,8 +2620,7 @@ public sealed partial class SharpSqlCompiler
         $"(SELECT {CollectionReadValue(itemType, false)} FROM {HeapIndexedItems} WHERE __owner_id = {collection} AND __index = {index})";
 
     private static bool IsDictionaryType(string name) =>
-        name.StartsWith("Dictionary<", StringComparison.Ordinal) ||
-        name.StartsWith("System.Collections.Generic.Dictionary<", StringComparison.Ordinal);
+        KnownTypeFacts.IsDictionary(name);
 
     private static IrType[] GenericArguments(string name)
     {
@@ -1417,7 +2643,7 @@ public sealed partial class SharpSqlCompiler
             }
         }
         arguments.Add(content[start..].Trim());
-        return arguments.Select(argument => CSharpTypeFactory.From(SyntaxFactory.ParseTypeName(argument))).ToArray();
+        return arguments.Select(KnownTypeFacts.TypeFromName).ToArray();
     }
 
     private static string NormalizeTypeName(string name) =>
@@ -1431,18 +2657,35 @@ public sealed partial class SharpSqlCompiler
         int id,
         string tableName,
         bool isValueType,
-        TypeDeclarationSyntax syntax)
+        bool isRecord,
+        IrSource source)
     {
         public string Name { get; } = name;
         public int Id { get; } = id;
         public string TableName { get; } = tableName;
         public bool IsValueType { get; } = isValueType;
-        public TypeDeclarationSyntax Syntax { get; } = syntax;
+        public bool IsRecord { get; } = isRecord;
+        public IrType? BaseType { get; init; }
+        public IrSource Source { get; } = source;
         public Dictionary<string, HeapField> Fields { get; } = new(StringComparer.Ordinal);
         public List<HeapConstructor> Constructors { get; } = [];
     }
 
-    private sealed record HeapField(string Name, IrType Type, string SqlName, SyntaxNode Syntax);
-    private sealed record HeapConstructor(IReadOnlyList<string> TargetFields);
+    private sealed record HeapField(
+        IrMemberId Id,
+        string Name,
+        IrType Type,
+        string SqlName,
+        IrSource Source,
+        bool IsStatic,
+        IrExpression? Initializer);
+    private sealed record HeapConstructor(
+        IrConstructorId Id,
+        IReadOnlyList<string> TargetFields,
+        IReadOnlyList<ParameterDefinition> Parameters,
+        ProceduralBlock? Body,
+        IrConstructorInitializerKind InitializerKind,
+        IrConstructorId InitializerConstructorId,
+        IReadOnlyList<IrExpression> InitializerArguments);
     private sealed record HeapValueAssignment(HeapField Field, string ValueSql);
 }

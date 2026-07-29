@@ -64,6 +64,10 @@ internal sealed record SqlLinqRangeQuerySource(
     string StartSql,
     string CountSql) : SqlLinqQuerySource;
 
+internal sealed record SqlLinqRepeatQuerySource(
+    string ValueSql,
+    string CountSql) : SqlLinqQuerySource;
+
 internal sealed record SqlLinqQueryPlan(
     SqlLinqQuerySource Source,
     IrType SourceElementType,
@@ -76,6 +80,262 @@ public sealed partial class SharpSqlCompiler
     private readonly Stack<IReadOnlyDictionary<string, SqlLinqQueryPlan>> _linqPlanSubstitutions = [];
     private readonly Stack<IReadOnlyDictionary<string, SqlLinqLambdaPlan>> _linqLambdaSubstitutions = [];
 
+    private bool TryEmitLinqDelegateDeclaration(IrExpression initializer, string sourceName, IrType type, VariableScope scope)
+    {
+        if (!TryBuildLinqLambda(initializer, scope, null, out var lambda)) return false;
+        scope.Add(sourceName, new LambdaVariableBinding(type, lambda));
+        return true;
+    }
+
+    private bool TryEmitLinqQueryDeclaration(IrExpression initializer, string sourceName, string sqlName, IrType type, VariableScope scope)
+    {
+        if (!IsLinqQueryExpression(initializer, scope)) return false;
+        if (!TryBuildLinqQuery(initializer, scope, null, out var query))
+        {
+            if (HasCSharpSource(initializer.Source))
+                return false;
+            scope.Add(sourceName, new UnavailableVariableBinding(type));
+            return true;
+        }
+        var stored = query;
+        if (query.Source is SqlLinqHeapQuerySource heap)
+        {
+            _sql.Line($"DECLARE {sqlName} INT = {heap.OwnerSql};");
+            stored = query with { Source = heap with { OwnerSql = sqlName } };
+        }
+        scope.Add(sourceName, new QueryVariableBinding(type, stored));
+        return true;
+    }
+
+    private bool IsLinqQueryExpression(IrExpression expression, VariableScope scope) => expression switch
+    {
+        IrQueryExpression => true,
+        IrVariableExpression variable when scope.Find(variable.Symbol) is QueryVariableBinding => true,
+        IrInvocationExpression invocation when
+            invocation.MethodName is "Range" or "Repeat" => true,
+        IrInvocationExpression invocation when invocation.MethodName is
+            "AsEnumerable" or "AsQueryable" or "Where" or "Select" or
+            "OrderBy" or "OrderByDescending" or "ThenBy" or "ThenByDescending" or
+            "Distinct" or "Skip" or "Take" or "GroupBy" or "Join" => true,
+        IrInvocationExpression invocation when TryGetMethod(invocation, out var method) &&
+            method.PureExpression is not null &&
+            KnownTypeFacts.IsLinqSequence(method.ReturnType.Name) => true,
+        _ => false
+    };
+
+    private bool TryBuildLinqQuery(
+        IrExpression expression,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out SqlLinqQueryPlan query)
+    {
+        if (expression is IrVariableExpression variable)
+        {
+            if (TryGetLinqPlanSubstitution(variable.Symbol.Name, out query!)) return true;
+            if (scope.Find(variable.Symbol) is QueryVariableBinding { Query: var stored })
+            {
+                query = stored;
+                return true;
+            }
+        }
+        if (expression is IrQueryExpression queryExpression)
+            return TryBuildQueryExpression(queryExpression, scope, substitutions, out query);
+        if (expression is IrInvocationExpression invocation && TryBuildVirtualLinqSource(invocation, scope, substitutions, out query))
+            return true;
+        if (expression is IrInvocationExpression
+            {
+                Target: IrMemberExpression materializationMember,
+                Arguments.Count: 0
+            } materialization && IntrinsicCatalog.IsMaterializer(materializationMember.MemberName))
+        {
+            string? collection = null;
+            if (!TryEmitLinqMaterialization(
+                    materialization,
+                    scope,
+                    context: null,
+                    value => collection = value,
+                    substitutions) || collection is null)
+            {
+                query = null!;
+                return false;
+            }
+            var itemType = SequenceElementType(materialization.Type.Name);
+            query = new SqlLinqQueryPlan(
+                new SqlLinqHeapQuerySource(collection),
+                itemType,
+                itemType,
+                []);
+            return true;
+        }
+
+        if (expression is IrInvocationExpression userInvocation &&
+            TryGetMethod(userInvocation, out var userMethod) &&
+            userMethod.PureExpression is not null &&
+            KnownTypeFacts.IsLinqSequence(userMethod.ReturnType.Name))
+        {
+            var arguments = InvocationArgumentExpressions(userInvocation, userMethod);
+            if (arguments.Count != userMethod.Parameters.Count)
+            {
+                AddDiagnostic("SS3001", $"Method '{userMethod.Name}' expects {userMethod.Parameters.Count} arguments.", userInvocation.Source);
+                query = null!;
+                return false;
+            }
+            var scalarReplacements = substitutions is null
+                ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
+                : new Dictionary<string, Substitution>(substitutions, StringComparer.Ordinal);
+            var planReplacements = new Dictionary<string, SqlLinqQueryPlan>(StringComparer.Ordinal);
+            var lambdaReplacements = new Dictionary<string, SqlLinqLambdaPlan>(StringComparer.Ordinal);
+            for (var index = 0; index < arguments.Count; index++)
+            {
+                var parameter = userMethod.Parameters[index];
+                var argument = arguments[index];
+                if (TryBuildLinqLambda(argument, scope, substitutions, out var lambdaArgument))
+                    lambdaReplacements[parameter.Name] = lambdaArgument;
+                else if ((IsSequenceType(parameter.Type.Name) || KnownTypeFacts.IsLinqSequence(parameter.Type.Name)) &&
+                         TryBuildLinqQuery(argument, scope, substitutions, out var argumentQuery))
+                    planReplacements[parameter.Name] = argumentQuery;
+                else
+                    scalarReplacements[parameter.Name] = CaptureLinqMethodArgument(argument, scope, substitutions);
+            }
+            _linqPlanSubstitutions.Push(planReplacements);
+            _linqLambdaSubstitutions.Push(lambdaReplacements);
+            try
+            {
+                return TryBuildLinqQuery(userMethod.PureExpression, scope, scalarReplacements, out query);
+            }
+            finally
+            {
+                _linqLambdaSubstitutions.Pop();
+                _linqPlanSubstitutions.Pop();
+            }
+        }
+
+        if (expression is IrInvocationExpression { Target: IrMemberExpression member } chained)
+        {
+            var method = member.MemberName;
+            if (method is "AsEnumerable" or "AsQueryable")
+            {
+                if (chained.Arguments.Count == 0)
+                    return TryBuildLinqQuery(member.Receiver, scope, substitutions, out query);
+                query = null!;
+                return false;
+            }
+            if (method is "Where" or "Select" or "OrderBy" or "OrderByDescending" or "ThenBy" or "ThenByDescending")
+            {
+                if (!TryBuildLinqQuery(member.Receiver, scope, substitutions, out query) || chained.Arguments.Count != 1) return false;
+                var kind = method switch
+                {
+                    "Where" => LinqQueryStepKind.Where,
+                    "Select" => LinqQueryStepKind.Select,
+                    "OrderBy" or "OrderByDescending" => LinqQueryStepKind.OrderBy,
+                    _ => LinqQueryStepKind.ThenBy
+                };
+                return TryAppendLinqLambda(query, chained.Arguments[0], kind, scope, substitutions, false,
+                    method.EndsWith("Descending", StringComparison.Ordinal), out query);
+            }
+            if (method == "Distinct" && chained.Arguments.Count == 0 && TryBuildLinqQuery(member.Receiver, scope, substitutions, out query))
+            {
+                query = query with { Steps = query.Steps.Append<SqlLinqQueryStep>(new SqlLinqDistinctQueryStep()).ToArray() };
+                return true;
+            }
+            if (method is "Skip" or "Take" && chained.Arguments.Count == 1 && TryBuildLinqQuery(member.Receiver, scope, substitutions, out query))
+            {
+                query = query with
+                {
+                    Steps = query.Steps.Append<SqlLinqQueryStep>(new SqlLinqPagingQueryStep(
+                        method == "Skip",
+                        EmitScalar(chained.Arguments[0], scope, substitutions))).ToArray()
+                };
+                return true;
+            }
+            if (method == "GroupBy" && chained.Arguments.Count == 1 &&
+                TryBuildLinqQuery(member.Receiver, scope, substitutions, out query) &&
+                TryGetSingleParameterLambda(
+                    chained.Arguments[0], scope, substitutions,
+                    out var parameterName, out var keyBody, out var captures))
+            {
+                var keyType = keyBody.Type;
+                var elementType = query.ElementType;
+                query = query with
+                {
+                    ElementType = GroupingType(keyType, elementType),
+                    Steps = query.Steps.Append<SqlLinqQueryStep>(new SqlLinqGroupQueryStep(
+                        parameterName,
+                        keyBody,
+                        keyType,
+                        elementType,
+                        CaptureLinqSubstitutions(MergeLinqSubstitutions(captures, substitutions)))).ToArray()
+                };
+                return true;
+            }
+            if (method == "Join" && chained.Arguments.Count == 4 &&
+                TryBuildLinqQuery(member.Receiver, scope, substitutions, out query) &&
+                TryBuildLinqQuery(chained.Arguments[0], scope, substitutions, out var innerQuery) &&
+                TryGetSingleParameterLambda(chained.Arguments[1], scope, substitutions, out var outerParameter, out var outerKey, out var outerCaptures) &&
+                TryGetSingleParameterLambda(chained.Arguments[2], scope, substitutions, out var innerParameter, out var innerKey, out var innerCaptures) &&
+                TryGetTwoParameterLambda(chained.Arguments[3], scope, substitutions, out var resultOuter, out var resultInner, out var resultBody, out var resultCaptures))
+            {
+                var resultType = resultBody.Type;
+                query = query with
+                {
+                    ElementType = resultType,
+                    Steps = query.Steps.Append<SqlLinqQueryStep>(new SqlLinqJoinQueryStep(
+                        innerQuery,
+                        outerParameter,
+                        outerKey,
+                        innerParameter,
+                        innerKey,
+                        outerKey.Type,
+                        resultOuter,
+                        resultInner,
+                        resultBody,
+                        resultType,
+                        CaptureLinqSubstitutions(MergeLinqSubstitutions(outerCaptures, substitutions)),
+                        CaptureLinqSubstitutions(MergeLinqSubstitutions(innerCaptures, substitutions)),
+                        CaptureLinqSubstitutions(MergeLinqSubstitutions(resultCaptures, substitutions)))).ToArray()
+                };
+                return true;
+            }
+        }
+        if (IsSequenceType(expression.Type.Name))
+        {
+            var itemType = SequenceElementType(expression.Type.Name);
+            query = new SqlLinqQueryPlan(new SqlLinqHeapQuerySource(EmitScalar(expression, scope, substitutions)), itemType, itemType, []);
+            return true;
+        }
+        query = null!;
+        return false;
+    }
+
+    private bool TryBuildVirtualLinqSource(
+        IrInvocationExpression invocation,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out SqlLinqQueryPlan query)
+    {
+        if (invocation.Target is not IrMemberExpression
+            {
+                Receiver: IrVariableExpression { Symbol.Name: "Enumerable" },
+                MemberName: ("Range" or "Repeat") and var method
+            } || invocation.Arguments.Count != 2)
+        {
+            query = null!;
+            return false;
+        }
+        var first = _names.Allocate(method == "Range" ? "_range_start" : "_repeat_value");
+        var count = _names.Allocate(method == "Range" ? "_range_count" : "_repeat_count");
+        _sql.Line($"DECLARE {first} {invocation.Arguments[0].Type.SqlType()} = {EmitScalar(invocation.Arguments[0], scope, substitutions)};");
+        _sql.Line($"DECLARE {count} INT = {EmitScalar(invocation.Arguments[1], scope, substitutions)};");
+        if (method == "Range")
+            _sql.Line($"IF {count} < 0 OR ({count} > 0 AND CONVERT(BIGINT, {first}) + CONVERT(BIGINT, {count}) - 1 > 2147483647) THROW 51006, 'Enumerable.Range arguments are out of range.', 1;");
+        else
+            _sql.Line($"IF {count} < 0 THROW 51006, 'Enumerable.Repeat count must be non-negative.', 1;");
+        query = method == "Range"
+            ? new SqlLinqQueryPlan(new SqlLinqRangeQuerySource(first, count), IrType.Int, IrType.Int, [])
+            : new SqlLinqQueryPlan(new SqlLinqRepeatQuerySource(first, count), invocation.Arguments[0].Type, invocation.Arguments[0].Type, []);
+        return true;
+    }
+
     private bool TryEmitLinqDelegateDeclaration(
         ExpressionSyntax initializer,
         string sourceName,
@@ -85,8 +345,7 @@ public sealed partial class SharpSqlCompiler
     {
         if (!TryBuildLinqLambda(initializer, scope, substitutions: null, out var lambda))
             return false;
-        _sql.Line($"DECLARE {sqlName} INT = NULL;");
-        scope.Add(sourceName, new VariableBinding(sqlName, type, Lambda: lambda));
+        scope.Add(sourceName, new LambdaVariableBinding(type, lambda));
         return true;
     }
 
@@ -102,8 +361,7 @@ public sealed partial class SharpSqlCompiler
 
         if (!TryBuildLinqQuery(initializer, scope, substitutions: null, out var query))
         {
-            _sql.Line($"DECLARE {sqlName} INT = NULL;");
-            scope.Add(sourceName, new VariableBinding(sqlName, type));
+            scope.Add(sourceName, new UnavailableVariableBinding(type));
             return true;
         }
 
@@ -113,16 +371,7 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"DECLARE {sqlName} INT = {heap.OwnerSql};");
             storedQuery = query with { Source = heap with { OwnerSql = sqlName } };
         }
-        else
-        {
-            // Virtual sources carry their captured scalar inputs in the plan. The
-            // placeholder keeps ordinary variable bindings uniform without allocating a heap object.
-            _sql.Line($"DECLARE {sqlName} INT = NULL;");
-        }
-        scope.Add(sourceName, new VariableBinding(
-            sqlName,
-            type,
-            storedQuery));
+        scope.Add(sourceName, new QueryVariableBinding(type, storedQuery));
         return true;
     }
 
@@ -132,24 +381,20 @@ public sealed partial class SharpSqlCompiler
         if (expression is QueryExpressionSyntax)
             return true;
         if (expression is IdentifierNameSyntax identifier &&
-            scope.Find(identifier.Identifier.ValueText)?.Query is not null)
+            scope.Find(identifier.Identifier.ValueText) is QueryVariableBinding)
             return true;
         if (expression is InvocationExpressionSyntax userInvocation &&
-            _methods.TryGetValue(InvocationName(userInvocation.Expression) ?? string.Empty, out var userMethod) &&
+            TryGetMethod(userInvocation, out var userMethod) &&
             userMethod.PureExpression is not null &&
             IsLinqSequenceType(userMethod.ReturnType.Name))
             return true;
-        if (expression is InvocationExpressionSyntax invocation && IsEnumerableRangeInvocation(invocation))
+        if (expression is InvocationExpressionSyntax invocation &&
+            (IsEnumerableRangeInvocation(invocation) || IsEnumerableRepeatInvocation(invocation)))
             return true;
         return expression is InvocationExpressionSyntax
         {
-            Expression: MemberAccessExpressionSyntax
-            {
-                Name.Identifier.ValueText: "AsEnumerable" or "AsQueryable" or "Where" or "Select" or
-                    "OrderBy" or "OrderByDescending" or "ThenBy" or "ThenByDescending" or
-                    "Distinct" or "Skip" or "Take" or "GroupBy" or "Join"
-            }
-        };
+            Expression: MemberAccessExpressionSyntax member
+        } && IntrinsicCatalog.IsDeferredLinqOperator(member.Name.Identifier.ValueText);
     }
 
     private bool TryBuildLinqQuery(
@@ -166,7 +411,7 @@ public sealed partial class SharpSqlCompiler
             return true;
         }
         if (expression is IdentifierNameSyntax identifier &&
-            scope.Find(identifier.Identifier.ValueText)?.Query is { } storedQuery)
+            scope.Find(identifier.Identifier.ValueText) is QueryVariableBinding { Query: var storedQuery })
         {
             query = storedQuery;
             return true;
@@ -179,8 +424,12 @@ public sealed partial class SharpSqlCompiler
             TryBuildEnumerableRangeQuery(rangeInvocation, scope, substitutions, out query))
             return true;
 
+        if (expression is InvocationExpressionSyntax repeatInvocation &&
+            TryBuildEnumerableRepeatQuery(repeatInvocation, scope, substitutions, out query))
+            return true;
+
         if (expression is InvocationExpressionSyntax userInvocation &&
-            _methods.TryGetValue(InvocationName(userInvocation.Expression) ?? string.Empty, out var userMethod) &&
+            TryGetMethod(userInvocation, out var userMethod) &&
             userMethod.PureExpression is not null &&
             IsLinqSequenceType(userMethod.ReturnType.Name))
         {
@@ -457,6 +706,47 @@ public sealed partial class SharpSqlCompiler
         };
     }
 
+    private bool TryBuildEnumerableRepeatQuery(
+        InvocationExpressionSyntax invocation,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out SqlLinqQueryPlan query)
+    {
+        if (!IsEnumerableRepeatInvocation(invocation))
+        {
+            query = null!;
+            return false;
+        }
+
+        var arguments = invocation.ArgumentList.Arguments;
+        var elementType = InferType(arguments[0].Expression, scope, substitutions);
+        var value = _names.Allocate("_repeat_value");
+        var count = _names.Allocate("_repeat_count");
+        _sql.Line($"DECLARE {value} {elementType.SqlType()} = {EmitScalar(arguments[0].Expression, scope, substitutions)};");
+        _sql.Line($"DECLARE {count} INT = {EmitScalar(arguments[1].Expression, scope, substitutions)};");
+        _sql.Line($"IF {count} < 0 THROW 51006, 'Enumerable.Repeat count must be non-negative.', 1;");
+
+        query = new SqlLinqQueryPlan(
+            new SqlLinqRepeatQuerySource(value, count),
+            elementType,
+            elementType,
+            []);
+        return true;
+    }
+
+    private bool IsEnumerableRepeatInvocation(InvocationExpressionSyntax invocation)
+    {
+        if (invocation.ArgumentList.Arguments.Count != 2)
+            return false;
+        var method = SemanticModelFor(invocation)?.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+        return method is
+        {
+            Name: "Repeat",
+            ContainingType.Name: "Enumerable",
+            ContainingType.ContainingNamespace.Name: "Linq"
+        };
+    }
+
     private bool TryBuildQueryExpression(
         QueryExpressionSyntax expression,
         VariableScope scope,
@@ -551,6 +841,64 @@ public sealed partial class SharpSqlCompiler
         return true;
     }
 
+    private bool TryBuildQueryExpression(
+        IrQueryExpression expression,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out SqlLinqQueryPlan query)
+    {
+        if (!TryBuildLinqQuery(expression.SourceExpression, scope, substitutions, out query))
+            return false;
+        var rangeName = expression.RangeVariable.Name;
+        foreach (var clause in expression.Clauses)
+        {
+            switch (clause)
+            {
+                case IrWhereClause where:
+                    query = AppendLinqStep(
+                        query, LinqQueryStepKind.Where, rangeName, where.Predicate,
+                        IrType.Bool, false, captures: substitutions);
+                    break;
+                case IrOrderClause order:
+                    query = AppendLinqStep(
+                        query,
+                        order.IsThenBy ? LinqQueryStepKind.ThenBy : LinqQueryStepKind.OrderBy,
+                        rangeName,
+                        order.Key,
+                        order.Key.Type,
+                        false,
+                        order.Descending,
+                        substitutions);
+                    break;
+                case IrSelectClause select:
+                    query = AppendLinqStep(
+                        query, LinqQueryStepKind.Select, rangeName, select.Projection,
+                        select.Projection.Type, false, captures: substitutions);
+                    break;
+                case IrGroupClause group when
+                    group.Element is IrVariableExpression grouped &&
+                    (grouped.Symbol.Id == expression.RangeVariable.Id || grouped.Symbol.Name == rangeName):
+                    var elementType = query.ElementType;
+                    query = query with
+                    {
+                        ElementType = GroupingType(group.Key.Type, elementType),
+                        Steps = query.Steps.Append<SqlLinqQueryStep>(new SqlLinqGroupQueryStep(
+                            rangeName,
+                            group.Key,
+                            group.Key.Type,
+                            elementType,
+                            CaptureLinqSubstitutions(substitutions))).ToArray()
+                    };
+                    break;
+                default:
+                    AddDiagnostic("SS6410", "Unsupported IR query clause.", clause.Source);
+                    query = null!;
+                    return false;
+            }
+        }
+        return true;
+    }
+
     private bool TryAppendLinqLambda(
         SqlLinqQueryPlan query,
         ExpressionSyntax lambda,
@@ -578,6 +926,30 @@ public sealed partial class SharpSqlCompiler
             negated,
             descending,
             MergeLinqSubstitutions(lambdaCaptures, substitutions));
+        return true;
+    }
+
+    private bool TryAppendLinqLambda(
+        SqlLinqQueryPlan query,
+        IrExpression lambdaExpression,
+        LinqQueryStepKind kind,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        bool negated,
+        bool descending,
+        out SqlLinqQueryPlan result)
+    {
+        if (!TryBuildLinqLambda(lambdaExpression, scope, substitutions, out var lambda) ||
+            lambda.Expression is not IrLambdaExpression { Parameters.Count: 1, ExpressionBody: not null } body)
+        {
+            AddDiagnostic("SS6402", "LINQ operators currently require an expression lambda with one parameter.", lambdaExpression.Source);
+            result = query;
+            return false;
+        }
+        var resultType = kind == LinqQueryStepKind.Where ? query.ElementType : body.ExpressionBody.Type;
+        result = AppendLinqStep(
+            query, kind, body.Parameters[0].Name, body.ExpressionBody, resultType, negated, descending,
+            MergeLinqSubstitutions(RestoreLinqSubstitutions(lambda.Captures), substitutions));
         return true;
     }
 
@@ -612,7 +984,7 @@ public sealed partial class SharpSqlCompiler
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
-        var sql = RenderLinqSource(query, LeadingRangeTakeCount(query));
+        var sql = RenderLinqSource(query, LeadingVirtualSourceTakeCount(query));
 
         var currentType = query.SourceElementType;
         for (var stepIndex = 0; stepIndex < query.Steps.Count; stepIndex++)
@@ -769,9 +1141,9 @@ public sealed partial class SharpSqlCompiler
         return sql;
     }
 
-    private static string? LeadingRangeTakeCount(SqlLinqQueryPlan query)
+    private static string? LeadingVirtualSourceTakeCount(SqlLinqQueryPlan query)
     {
-        if (query.Source is not SqlLinqRangeQuerySource)
+        if (query.Source is not (SqlLinqRangeQuerySource or SqlLinqRepeatQuerySource))
             return null;
 
         foreach (var step in query.Steps)
@@ -810,7 +1182,53 @@ public sealed partial class SharpSqlCompiler
                 $"FROM GENERATE_SERIES({start}, {start} + ({generatedCount}) - 1, CONVERT(BIGINT, 1)) AS {rangeAlias}";
         }
 
+        if (query.Source is SqlLinqRepeatQuerySource repeat)
+        {
+            var repeatAlias = NextLinqAlias("repeat");
+            var count = $"CONVERT(BIGINT, {repeat.CountSql})";
+            var generatedCount = count;
+            if (takeCount is not null)
+            {
+                var normalizedTake = $"CONVERT(BIGINT, CASE WHEN {takeCount} < 0 THEN 0 ELSE {takeCount} END)";
+                generatedCount = $"CASE WHEN {normalizedTake} < {count} THEN {normalizedTake} ELSE {count} END";
+            }
+            return $"SELECT CONVERT(INT, {repeatAlias}.[value]) AS __index, " +
+                $"{repeat.ValueSql} AS __value " +
+                $"FROM GENERATE_SERIES(CONVERT(BIGINT, 0), ({generatedCount}) - 1, CONVERT(BIGINT, 1)) AS {repeatAlias}";
+        }
+
         throw new InvalidOperationException($"Unknown LINQ source '{query.Source.GetType().Name}'.");
+    }
+
+    private bool TryEmitRawLinqCardinality(
+        SqlLinqQueryPlan query,
+        string method,
+        out SqlScalarExpression expression)
+    {
+        expression = null!;
+        if (query.Steps.Count != 0 || method is not ("Count" or "LongCount" or "Any"))
+            return false;
+
+        var count = query.Source switch
+        {
+            SqlLinqHeapQuerySource heap =>
+                $"(SELECT __count FROM {HeapObjects} WHERE __id = {heap.OwnerSql})",
+            SqlLinqRangeQuerySource range => range.CountSql,
+            SqlLinqRepeatQuerySource repeat => repeat.CountSql,
+            _ => null
+        };
+        if (count is null)
+            return false;
+
+        expression = method switch
+        {
+            "Count" => SqlScalarExpression.Primary($"CONVERT(INT, {count})"),
+            "LongCount" => SqlScalarExpression.Primary($"CONVERT(BIGINT, {count})"),
+            "Any" => SqlScalarExpression.Primary(
+                $"CASE WHEN {count} > 0 THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END"),
+            _ => null!
+        };
+        return true;
     }
 
     private bool TryEmitLinqInvocation(
@@ -939,6 +1357,9 @@ public sealed partial class SharpSqlCompiler
             return true;
         }
 
+        if (arguments.Count == 0 && TryEmitRawLinqCardinality(query, method, out expression))
+            return true;
+
         var querySql = RenderLinqQuery(query, scope, substitutions);
         var terminalAlias = NextLinqAlias("terminal");
         switch (method)
@@ -986,6 +1407,82 @@ public sealed partial class SharpSqlCompiler
         }
     }
 
+    private bool TryEmitLinqInvocation(
+        IrInvocationExpression invocation,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out SqlScalarExpression expression)
+    {
+        expression = null!;
+        if (invocation.Target is not IrMemberExpression member ||
+            member.MemberName is not ("Sum" or "Count" or "LongCount" or "Any" or "All" or "Contains" or
+                "FirstOrDefault" or "LastOrDefault" or "ElementAtOrDefault"))
+            return false;
+        var method = member.MemberName;
+        if (!TryBuildLinqQuery(member.Receiver, scope, substitutions, out var query)) return false;
+        var arguments = invocation.Arguments;
+        if (method is "Count" or "LongCount" or "Any" or "FirstOrDefault" or "LastOrDefault")
+        {
+            if (arguments.Count > 1 || arguments.Count == 1 &&
+                !TryAppendLinqLambda(query, arguments[0], LinqQueryStepKind.Where, scope, substitutions, false, false, out query))
+            {
+                AddDiagnostic("SS6401", $"Enumerable.{method} expects zero arguments or one predicate.", invocation.Source);
+                expression = SqlScalarExpression.Primary("NULL");
+                return true;
+            }
+        }
+        else if (method == "All")
+        {
+            if (arguments.Count != 1 || !TryAppendLinqLambda(
+                    query, arguments[0], LinqQueryStepKind.Where, scope, substitutions, true, false, out query))
+            {
+                AddDiagnostic("SS6401", "Enumerable.All expects one predicate.", invocation.Source);
+                expression = SqlScalarExpression.Primary("NULL");
+                return true;
+            }
+        }
+        else if (method == "Sum")
+        {
+            if (arguments.Count > 1 || arguments.Count == 1 &&
+                !TryAppendLinqLambda(query, arguments[0], LinqQueryStepKind.Select, scope, substitutions, false, false, out query))
+            {
+                AddDiagnostic("SS6401", "Enumerable.Sum expects zero arguments or one selector.", invocation.Source);
+                expression = SqlScalarExpression.Primary("NULL");
+                return true;
+            }
+        }
+        else if (method is "Contains" or "ElementAtOrDefault" && arguments.Count != 1)
+        {
+            AddDiagnostic("SS6401", $"Enumerable.{method} expects one argument.", invocation.Source);
+            expression = SqlScalarExpression.Primary("NULL");
+            return true;
+        }
+
+        if (arguments.Count == 0 && TryEmitRawLinqCardinality(query, method, out expression))
+            return true;
+
+        var querySql = RenderLinqQuery(query, scope, substitutions);
+        var alias = NextLinqAlias("terminal");
+        expression = method switch
+        {
+            "Count" => SqlScalarExpression.Primary($"(SELECT COUNT(*) FROM ({querySql}) AS {alias})"),
+            "LongCount" => SqlScalarExpression.Primary($"(SELECT COUNT_BIG(*) FROM ({querySql}) AS {alias})"),
+            "Any" => SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM ({querySql}) AS {alias}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END"),
+            "All" => SqlScalarExpression.Primary($"CASE WHEN NOT EXISTS (SELECT 1 FROM ({querySql}) AS {alias}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END"),
+            "Sum" => SqlScalarExpression.Primary($"COALESCE((SELECT SUM({alias}.__value) FROM ({querySql}) AS {alias}), CAST(0 AS {invocation.Type.SqlType()}))"),
+            "Contains" => SqlScalarExpression.Primary(
+                $"CASE WHEN EXISTS (SELECT 1 FROM ({querySql}) AS {alias} WHERE {LinqValueEquality($"{alias}.__value", EmitScalar(arguments[0], scope, substitutions), query.ElementType)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END"),
+            "FirstOrDefault" => SqlScalarExpression.Primary(
+                $"COALESCE((SELECT TOP (1) {alias}.__value FROM ({querySql}) AS {alias} ORDER BY {alias}.__index), {DefaultSql(query.ElementType)})"),
+            "LastOrDefault" => SqlScalarExpression.Primary(
+                $"COALESCE((SELECT TOP (1) {alias}.__value FROM ({querySql}) AS {alias} ORDER BY {alias}.__index DESC), {DefaultSql(query.ElementType)})"),
+            "ElementAtOrDefault" => SqlScalarExpression.Primary(
+                $"COALESCE({LinqElementAtSql(querySql, alias, EmitScalar(arguments[0], scope, substitutions))}, {DefaultSql(query.ElementType)})"),
+            _ => null!
+        };
+        return true;
+    }
+
     private bool ContainsGuardedLinqExpression(ExpressionSyntax expression) =>
         expression.DescendantNodesAndSelf()
             .OfType<InvocationExpressionSyntax>()
@@ -994,10 +1491,7 @@ public sealed partial class SharpSqlCompiler
     private bool IsGuardedLinqInvocation(InvocationExpressionSyntax invocation)
     {
         if (invocation.Expression is not MemberAccessExpressionSyntax member ||
-            member.Name.Identifier.ValueText is not (
-                "First" or "Last" or "Single" or "SingleOrDefault" or
-                "ElementAt" or "ElementAtOrDefault" or "Min" or "Max" or "Average" or
-                "MinBy" or "MaxBy"))
+            !IntrinsicCatalog.IsGuardedLinqOperator(member.Name.Identifier.ValueText))
             return false;
         return SemanticModelFor(invocation)?.GetSymbolInfo(invocation).Symbol is IMethodSymbol method &&
             method.ContainingType.Name is "Enumerable" or "Queryable";
@@ -1088,52 +1582,174 @@ public sealed partial class SharpSqlCompiler
         }
 
         var querySql = RenderLinqQuery(query, scope, substitutions: null);
-        var sourceAlias = NextLinqAlias("guarded");
         if (method is "ElementAt" or "ElementAtOrDefault")
         {
             EmitVmExpression(arguments[0].Expression, scope, context, index =>
-            {
-                var indexStorage = AllocateVmTemporary(IrType.Int, context);
-                StoreVmTemporary(indexStorage, index);
-                var savedIndex = ReadVmTemporary(indexStorage);
-                if (method == "ElementAt")
-                    _sql.Line($"IF {savedIndex} < 0 OR {savedIndex} >= (SELECT COUNT(*) FROM ({querySql}) AS {sourceAlias}) THROW 51009, 'LINQ index was out of range.', 1;");
-                var element = LinqElementAtSql(querySql, sourceAlias, savedIndex);
-                continuation(method == "ElementAt"
-                    ? element
-                    : $"COALESCE({element}, {DefaultSql(query.ElementType)})");
-            });
+                EmitGuardedLinqElementAt(querySql, query.ElementType, method, index, continuation));
             return true;
         }
 
-        var countSql = $"(SELECT COUNT(*) FROM ({querySql}) AS {sourceAlias})";
-        if (method is "First" or "Last" or "Single")
-            _sql.Line($"IF {countSql} = 0 THROW 51007, 'LINQ sequence contains no elements.', 1;");
-        if (method is "Single" or "SingleOrDefault")
-            _sql.Line($"IF {countSql} > 1 THROW 51008, 'LINQ sequence contains more than one element.', 1;");
-        if (method is "Min" or "Max" or "Average" or "MinBy" or "MaxBy" &&
-            LinqResultThrowsOnEmpty(invocation))
-            _sql.Line($"IF {countSql} = 0 THROW 51007, 'LINQ sequence contains no elements.', 1;");
-
-        var terminalAlias = NextLinqAlias("guarded_value");
         var resultType = InferType(invocation, scope);
-        var value = method switch
-        {
-            "First" or "Single" =>
-                $"(SELECT TOP (1) {terminalAlias}.__value FROM ({querySql}) AS {terminalAlias} ORDER BY {terminalAlias}.__index)",
-            "Last" =>
-                $"(SELECT TOP (1) {terminalAlias}.__value FROM ({querySql}) AS {terminalAlias} ORDER BY {terminalAlias}.__index DESC)",
-            "SingleOrDefault" =>
-                $"COALESCE((SELECT TOP (1) {terminalAlias}.__value FROM ({querySql}) AS {terminalAlias}), {DefaultSql(query.ElementType)})",
-            "Min" => $"(SELECT MIN({terminalAlias}.__value) FROM ({querySql}) AS {terminalAlias})",
-            "Max" => $"(SELECT MAX({terminalAlias}.__value) FROM ({querySql}) AS {terminalAlias})",
-            "Average" => $"(SELECT AVG(CONVERT({resultType.SqlType()}, {terminalAlias}.__value)) FROM ({querySql}) AS {terminalAlias})",
-            "MinBy" or "MaxBy" =>
-                $"(SELECT TOP (1) {terminalAlias}.__value FROM ({querySql}) AS {terminalAlias} ORDER BY {terminalAlias}.__index)",
-            _ => "NULL"
-        };
-        continuation(value);
+        EmitGuardedLinqTerminal(
+            querySql,
+            query.ElementType,
+            resultType,
+            method,
+            method is "First" or "Last" or "Single" ||
+                method is "Min" or "Max" or "Average" or "MinBy" or "MaxBy" &&
+                LinqResultThrowsOnEmpty(invocation),
+            continuation);
         return true;
+    }
+
+    private bool TryEmitGuardedLinqExpression(
+        IrExpression expression,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        if (expression is not IrInvocationExpression
+            {
+                Target: IrMemberExpression member
+            } invocation ||
+            !IntrinsicCatalog.IsGuardedLinqOperator(member.MemberName) ||
+            !TryBuildLinqQuery(member.Receiver, scope, substitutions: null, out var query))
+            return false;
+        if (IsGroupingType(query.ElementType.Name))
+        {
+            AddDiagnostic(
+                "SS6411",
+                "This LINQ terminal requires full IGrouping values; project group.Key before consuming the sequence.",
+                invocation.Source);
+            continuation("NULL");
+            return true;
+        }
+
+        var method = member.MemberName;
+        var arguments = invocation.Arguments;
+        if (method is "First" or "Last" or "Single" or "SingleOrDefault")
+        {
+            if (arguments.Count > 1 ||
+                arguments.Count == 1 && !TryAppendLinqLambda(
+                    query, arguments[0], LinqQueryStepKind.Where, scope, null, false, false, out query))
+            {
+                AddDiagnostic("SS6401", $"Enumerable.{method} expects zero arguments or one predicate.", invocation.Source);
+                continuation("NULL");
+                return true;
+            }
+        }
+        else if (method is "MinBy" or "MaxBy")
+        {
+            if (arguments.Count != 1 || !TryAppendLinqLambda(
+                    query, arguments[0], LinqQueryStepKind.OrderBy, scope, null, false,
+                    method == "MaxBy", out query))
+            {
+                AddDiagnostic("SS6401", $"Enumerable.{method} expects one key selector.", invocation.Source);
+                continuation("NULL");
+                return true;
+            }
+        }
+        else if (method is "Min" or "Max" or "Average")
+        {
+            if (arguments.Count > 1 ||
+                arguments.Count == 1 && !TryAppendLinqLambda(
+                    query, arguments[0], LinqQueryStepKind.Select, scope, null, false, false, out query))
+            {
+                AddDiagnostic("SS6401", $"Enumerable.{method} expects zero arguments or one selector.", invocation.Source);
+                continuation("NULL");
+                return true;
+            }
+        }
+        else if (method is "ElementAt" or "ElementAtOrDefault" && arguments.Count != 1)
+        {
+            AddDiagnostic("SS6401", $"Enumerable.{method} expects one index.", invocation.Source);
+            continuation("NULL");
+            return true;
+        }
+
+        var querySql = RenderLinqQuery(query, scope, null);
+        if (method is "ElementAt" or "ElementAtOrDefault")
+        {
+            EmitVmExpression(arguments[0], scope, context, index =>
+                EmitGuardedLinqElementAt(querySql, query.ElementType, method, index, continuation));
+            return true;
+        }
+
+        EmitGuardedLinqTerminal(
+            querySql,
+            query.ElementType,
+            invocation.Type,
+            method,
+            method is "First" or "Last" or "Single" ||
+                method is "Min" or "Max" or "Average" or "MinBy" or "MaxBy" &&
+                !invocation.Type.IsReference && invocation.Type != IrType.Unknown,
+            continuation);
+        return true;
+    }
+
+    private void EmitGuardedLinqElementAt(
+        string querySql,
+        IrType elementType,
+        string method,
+        string index,
+        Action<string> continuation)
+    {
+        var sourceAlias = NextLinqAlias("guarded_element");
+        var numberedAlias = NextLinqAlias("guarded_numbered");
+        var value = _names.Allocate("_linq_element");
+        var found = _names.Allocate("_linq_found");
+        var numbered = $"SELECT ROW_NUMBER() OVER (ORDER BY {sourceAlias}.__index) - 1 AS __ordinal, {sourceAlias}.__value FROM ({querySql}) AS {sourceAlias}";
+
+        _sql.Line($"DECLARE {value} {elementType.SqlType()};");
+        _sql.Line($"DECLARE {found} BIT = 0;");
+        _sql.Line($"SELECT {value} = {numberedAlias}.__value, {found} = 1 FROM ({numbered}) AS {numberedAlias} WHERE {numberedAlias}.__ordinal = {index};");
+        if (method == "ElementAt")
+            _sql.Line($"IF {found} = 0 THROW 51009, 'LINQ index was out of range.', 1;");
+        continuation(method == "ElementAt" ? value : $"COALESCE({value}, {DefaultSql(elementType)})");
+    }
+
+    private void EmitGuardedLinqTerminal(
+        string querySql,
+        IrType elementType,
+        IrType resultType,
+        string method,
+        bool throwsOnEmpty,
+        Action<string> continuation)
+    {
+        var alias = NextLinqAlias("guarded_value");
+        var value = _names.Allocate("_linq_value");
+        var count = _names.Allocate("_linq_count");
+        var valueType = resultType == IrType.Unknown ? elementType : resultType;
+        _sql.Line($"DECLARE {value} {valueType.SqlType()};");
+
+        if (method is "Single" or "SingleOrDefault")
+        {
+            _sql.Line($"SELECT TOP (2) {value} = {alias}.__value FROM ({querySql}) AS {alias} ORDER BY {alias}.__index;");
+            _sql.Line($"DECLARE {count} INT = @@ROWCOUNT;");
+        }
+        else if (method is "Min" or "Max" or "Average")
+        {
+            _sql.Line($"DECLARE {count} BIGINT;");
+            var aggregate = method == "Average"
+                ? $"AVG(CONVERT({valueType.SqlType()}, {alias}.__value))"
+                : $"{method.ToUpperInvariant()}({alias}.__value)";
+            _sql.Line($"SELECT {count} = COUNT_BIG(*), {value} = {aggregate} FROM ({querySql}) AS {alias};");
+        }
+        else
+        {
+            var descending = method == "Last" ? " DESC" : string.Empty;
+            _sql.Line($"SELECT TOP (1) {value} = {alias}.__value FROM ({querySql}) AS {alias} ORDER BY {alias}.__index{descending};");
+            _sql.Line($"DECLARE {count} INT = @@ROWCOUNT;");
+        }
+
+        if (throwsOnEmpty)
+            _sql.Line($"IF {count} = 0 THROW 51007, 'LINQ sequence contains no elements.', 1;");
+        if (method is "Single" or "SingleOrDefault")
+            _sql.Line($"IF {count} > 1 THROW 51008, 'LINQ sequence contains more than one element.', 1;");
+
+        continuation(method == "SingleOrDefault"
+            ? $"COALESCE({value}, {DefaultSql(elementType)})"
+            : value);
     }
 
     private bool LinqResultThrowsOnEmpty(InvocationExpressionSyntax invocation)
@@ -1179,12 +1795,22 @@ public sealed partial class SharpSqlCompiler
         var continueLabel = _names.AllocateLabel("linq_foreach_continue");
         var breakLabel = _names.AllocateLabel("linq_foreach_break");
         var querySql = RenderLinqQuery(query, parentScope, substitutions: null);
+        string? bufferedTable = null;
+        if (LinqPlanRequiresBuffering(query))
+        {
+            bufferedTable = $"#__sharpsql_linq_foreach_{++_linqId}";
+            var bufferAlias = NextLinqAlias("foreach_buffer");
+            _sql.Line($"DROP TABLE IF EXISTS {bufferedTable};");
+            _sql.Line($"SELECT {bufferAlias}.__index, {bufferAlias}.__value INTO {bufferedTable} FROM ({querySql}) AS {bufferAlias};");
+            _sql.Line($"CREATE UNIQUE CLUSTERED INDEX IX_linq_index ON {bufferedTable} (__index);");
+            querySql = $"SELECT __index, __value FROM {bufferedTable}";
+        }
         var sourceAlias = NextLinqAlias("foreach");
 
         _sql.Line($"DECLARE {lastIndex} INT = -1;");
         _sql.Line($"DECLARE {nextIndex} INT;");
         _sql.Line($"DECLARE {itemSql} {itemType.SqlType()};");
-        scope.Add(statement.Element, new VariableBinding(itemSql, itemType));
+        scope.Add(statement.Element, new ScalarVariableBinding(itemSql, itemType));
         EmitLabel(conditionLabel);
         _sql.Line($"SET {nextIndex} = NULL;");
         _sql.Line($"SELECT TOP (1) {nextIndex} = {sourceAlias}.__index, {itemSql} = {sourceAlias}.__value FROM ({querySql}) AS {sourceAlias} WHERE {sourceAlias}.__index > {lastIndex} ORDER BY {sourceAlias}.__index;");
@@ -1199,7 +1825,16 @@ public sealed partial class SharpSqlCompiler
         EmitLabel(continueLabel);
         _sql.Line($"GOTO {conditionLabel};");
         EmitLabel(breakLabel);
+        if (bufferedTable is not null)
+            _sql.Line($"DROP TABLE IF EXISTS {bufferedTable};");
     }
+
+    private static bool LinqPlanRequiresBuffering(SqlLinqQueryPlan query) =>
+        query.Steps.Any(step => step is
+            SqlLinqDistinctQueryStep or
+            SqlLinqGroupQueryStep or
+            SqlLinqJoinQueryStep or
+            SqlLinqLambdaQueryStep { Kind: LinqQueryStepKind.OrderBy or LinqQueryStepKind.ThenBy });
 
     private bool TryEmitLinqMaterialization(
         ExpressionSyntax expression,
@@ -1213,7 +1848,7 @@ public sealed partial class SharpSqlCompiler
                 Expression: MemberAccessExpressionSyntax member,
                 ArgumentList.Arguments.Count: 0
             } invocation ||
-            member.Name.Identifier.ValueText is not ("ToList" or "ToArray"))
+            !IntrinsicCatalog.IsMaterializer(member.Name.Identifier.ValueText))
             return false;
 
         if (TryEmitRepeatSelectMaterialization(member, scope, context, continuation))
@@ -1234,7 +1869,7 @@ public sealed partial class SharpSqlCompiler
         var querySql = RenderLinqQuery(query, scope, substitutions);
         var sourceAlias = NextLinqAlias("materialize");
         var collection = AllocateHeapHeader(
-            member.Name.Identifier.ValueText == "ToList" ? 1001 : 1003,
+            member.Name.Identifier.ValueText == "ToList" ? ListHeapTypeId : ArrayHeapTypeId,
             "__count",
             "0");
         var column = CollectionValueColumn(query.ElementType, key: false);
@@ -1248,6 +1883,171 @@ public sealed partial class SharpSqlCompiler
         _sql.Line($"UPDATE {HeapObjects} SET __count = {materializedCount} WHERE __id = {collection};");
         continuation(collection);
         return true;
+    }
+
+    private bool TryEmitLinqMaterialization(
+        IrExpression expression,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation,
+        IReadOnlyDictionary<string, Substitution>? substitutions = null)
+    {
+        if (expression is not IrInvocationExpression
+            {
+                Target: IrMemberExpression member,
+                Arguments.Count: 0
+            } invocation || !IntrinsicCatalog.IsMaterializer(member.MemberName))
+            return false;
+        if (TryEmitRepeatSelectMaterialization(member, scope, context, continuation, substitutions))
+            return true;
+        if (!TryBuildLinqQuery(member.Receiver, scope, substitutions, out var query))
+            return false;
+        if (IsGroupingType(query.ElementType.Name))
+        {
+            AddDiagnostic("SS6411", "Materializing full IGrouping values is not supported; project group.Key first.", invocation.Source);
+            continuation("NULL");
+            return true;
+        }
+        var querySql = RenderLinqQuery(query, scope, substitutions);
+        var alias = NextLinqAlias("materialize");
+        var collection = AllocateHeapHeader(
+            member.MemberName == "ToList" ? ListHeapTypeId : ArrayHeapTypeId,
+            "__count",
+            "0");
+        var column = CollectionValueColumn(query.ElementType, false);
+        var value = CollectionStoredValue(query.ElementType, $"{alias}.__value");
+        _sql.Line(
+            $"INSERT INTO {HeapIndexedItems} (__owner_id, __index, {column}) " +
+            $"SELECT {collection}, CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {alias}.__index) - 1), {value} " +
+            $"FROM ({querySql}) AS {alias};");
+        var count = _names.Allocate("_linq_materialized_count");
+        _sql.Line($"DECLARE {count} INT = @@ROWCOUNT;");
+        _sql.Line($"UPDATE {HeapObjects} SET __count = {count} WHERE __id = {collection};");
+        continuation(collection);
+        return true;
+    }
+
+    private bool TryEmitRepeatSelectMaterialization(
+        IrMemberExpression materializationMember,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation,
+        IReadOnlyDictionary<string, Substitution>? substitutions)
+    {
+        if (materializationMember.Receiver is not IrInvocationExpression
+            {
+                Target: IrMemberExpression { MemberName: "Select" } selectMember,
+                Arguments.Count: 1
+            } select ||
+            selectMember.Receiver is not IrInvocationExpression
+            {
+                Target: IrMemberExpression
+                {
+                    Receiver: IrVariableExpression { Symbol.Name: "Enumerable" },
+                    MemberName: "Repeat"
+                },
+                Arguments.Count: 2
+            } repeat ||
+            !TryGetSingleParameterLambda(
+                select.Arguments[0],
+                scope,
+                substitutions,
+                out var parameterName,
+                out var selectorBody,
+                out var captures))
+            return false;
+
+        var repeatedExpression = repeat.Arguments[0];
+        var countExpression = repeat.Arguments[1];
+        var repeatedType = repeatedExpression.Type;
+        var resultType = selectorBody.Type;
+
+        EmitVmExpression(repeatedExpression, scope, context, repeatedValue =>
+        {
+            var repeatedStorage = AllocateVmTemporary(repeatedType, context);
+            StoreVmTemporary(repeatedStorage, repeatedValue);
+            EmitVmExpression(countExpression, scope, context, count =>
+            {
+                var countStorage = AllocateVmTemporary(IrType.Int, context);
+                StoreVmTemporary(countStorage, count);
+                var savedCount = ReadVmTemporary(countStorage);
+                _sql.Line($"IF {savedCount} < 0 THROW 51006, 'Enumerable.Repeat count must be non-negative.', 1;");
+
+                var collection = AllocateHeapHeader(
+                    materializationMember.MemberName == "ToList" ? ListHeapTypeId : ArrayHeapTypeId,
+                    "__count",
+                    savedCount);
+                var index = _names.Allocate("_repeat_index");
+                var selectorScope = scope.Child();
+                selectorScope.Add(parameterName, new ScalarVariableBinding(
+                    ReadVmTemporary(repeatedStorage),
+                    repeatedType));
+                AddLinqCaptureBindings(selectorBody, captures, selectorScope);
+
+                _sql.Line($"DECLARE {index} INT = 0;");
+                _sql.Line($"WHILE {index} < {savedCount}");
+                _sql.Line("BEGIN");
+                using (_sql.Indent())
+                {
+                    EmitVmExpression(selectorBody, selectorScope, context, value =>
+                    {
+                        InsertIndexedItem(collection, index, resultType, value);
+                        _sql.Line($"SET {index} = {index} + 1;");
+                    });
+                }
+                _sql.Line("END;");
+                continuation(collection);
+            });
+        });
+        return true;
+    }
+
+    private static void AddLinqCaptureBindings(
+        IrExpression expression,
+        IReadOnlyDictionary<string, Substitution>? captures,
+        VariableScope scope)
+    {
+        if (captures is null)
+            return;
+        Visit(expression);
+
+        void Visit(IrExpression current)
+        {
+            if (current is IrVariableExpression variable &&
+                captures.TryGetValue(variable.Symbol.Name, out var capture))
+            {
+                scope.Add(variable.Symbol, new ScalarVariableBinding(
+                    capture.Expression.Sql,
+                    capture.Type));
+                return;
+            }
+            switch (current)
+            {
+                case IrBinaryExpression binary: Visit(binary.Left); Visit(binary.Right); break;
+                case IrUnaryExpression unary: Visit(unary.Operand); break;
+                case IrConversionExpression conversion: Visit(conversion.Operand); break;
+                case IrConditionalExpression conditional:
+                    Visit(conditional.Condition); Visit(conditional.WhenTrue); Visit(conditional.WhenFalse); break;
+                case IrMemberExpression member: Visit(member.Receiver); break;
+                case IrElementExpression element:
+                    Visit(element.Receiver); foreach (var argument in element.Arguments) Visit(argument); break;
+                case IrInvocationExpression invocation:
+                    Visit(invocation.Target); foreach (var argument in invocation.Arguments) Visit(argument); break;
+                case IrObjectCreationExpression creation:
+                    foreach (var argument in creation.Arguments) Visit(argument);
+                    foreach (var initializer in creation.Initializers) Visit(initializer);
+                    break;
+                case IrWithExpression with:
+                    Visit(with.Receiver); foreach (var initializer in with.Initializers) Visit(initializer); break;
+                case IrArrayCreationExpression array:
+                    if (array.Length is not null) Visit(array.Length);
+                    foreach (var element in array.Elements) Visit(element);
+                    break;
+                case IrInterpolatedStringExpression interpolated:
+                    foreach (var part in interpolated.Parts.OfType<IrInterpolation>()) Visit(part.Expression); break;
+                case IrAssignmentExpression assignment: Visit(assignment.Target); Visit(assignment.Value); break;
+            }
+        }
     }
 
     private bool TryEmitRepeatSelectMaterialization(
@@ -1298,12 +2098,12 @@ public sealed partial class SharpSqlCompiler
                 _sql.Line($"IF {savedCount} < 0 THROW 51006, 'Enumerable.Repeat count must be non-negative.', 1;");
 
                 var collection = AllocateHeapHeader(
-                    materializationMember.Name.Identifier.ValueText == "ToList" ? 1001 : 1003,
+                    materializationMember.Name.Identifier.ValueText == "ToList" ? ListHeapTypeId : ArrayHeapTypeId,
                     "__count",
                     savedCount);
                 var index = _names.Allocate("_repeat_index");
                 var selectorScope = scope.Child();
-                selectorScope.Add(parameterName, new VariableBinding(
+                selectorScope.Add(parameterName, new ScalarVariableBinding(
                     ReadVmTemporary(repeatedStorage),
                     repeatedType));
 
@@ -1314,7 +2114,7 @@ public sealed partial class SharpSqlCompiler
                 {
                     EmitVmExpression(selectorBody, selectorScope, context, value =>
                     {
-                        InsertListItem(collection, index, resultType, value);
+                        InsertIndexedItem(collection, index, resultType, value);
                         _sql.Line($"SET {index} = {index} + 1;");
                     });
                 }
@@ -1328,7 +2128,7 @@ public sealed partial class SharpSqlCompiler
     private bool IsLinqMaterialization(InvocationExpressionSyntax invocation)
     {
         if (invocation.Expression is not MemberAccessExpressionSyntax member ||
-            member.Name.Identifier.ValueText is not ("ToList" or "ToArray"))
+            !IntrinsicCatalog.IsMaterializer(member.Name.Identifier.ValueText))
             return false;
         var receiverType = SemanticModelFor(member)?.GetTypeInfo(member.Expression).Type;
         if (receiverType is null)
@@ -1374,6 +2174,17 @@ public sealed partial class SharpSqlCompiler
         var sqlName = _names.Allocate("_linq_capture");
         _sql.Line($"DECLARE {sqlName} {type.SqlType()} = {value.Sql};");
         return new Substitution(SqlScalarExpression.Primary(sqlName, type));
+    }
+
+    private Substitution CaptureLinqMethodArgument(
+        IrExpression argument,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions)
+    {
+        var value = EmitScalarExpression(argument, scope, substitutions);
+        var sqlName = _names.Allocate("_linq_capture");
+        _sql.Line($"DECLARE {sqlName} {argument.Type.SqlType()} = {value.Sql};");
+        return new Substitution(SqlScalarExpression.Primary(sqlName, argument.Type));
     }
 
     private static IReadOnlyDictionary<string, Substitution>? RestoreLinqSubstitutions(
@@ -1433,6 +2244,111 @@ public sealed partial class SharpSqlCompiler
     }
 
     private bool TryBuildLinqLambda(
+        IrExpression expression,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out SqlLinqLambdaPlan lambda)
+    {
+        if (expression is IrLambdaExpression lambdaExpression)
+        {
+            lambda = new SqlLinqLambdaPlan(
+                lambdaExpression,
+                CaptureLinqLambdaBindings(lambdaExpression, scope, substitutions));
+            return true;
+        }
+        if (expression is IrVariableExpression variable)
+        {
+            foreach (var lambdaSubstitutions in _linqLambdaSubstitutions)
+                if (lambdaSubstitutions.TryGetValue(variable.Symbol.Name, out lambda!))
+                    return true;
+            if (scope.Find(variable.Symbol) is LambdaVariableBinding { Lambda: var stored })
+            {
+                lambda = stored;
+                return true;
+            }
+        }
+        if (expression is IrInvocationExpression invocation &&
+            TryGetMethod(invocation, out var method) &&
+            method.PureExpression is not null && IsDelegateType(method.ReturnType.Name))
+        {
+            var arguments = InvocationArgumentExpressions(invocation, method);
+            if (arguments.Count == method.Parameters.Count && CanInline(method, arguments.Count))
+            {
+                var scalarReplacements = substitutions is null
+                    ? new Dictionary<string, Substitution>(StringComparer.Ordinal)
+                    : new Dictionary<string, Substitution>(substitutions, StringComparer.Ordinal);
+                var planReplacements = new Dictionary<string, SqlLinqQueryPlan>(StringComparer.Ordinal);
+                var lambdaReplacements = new Dictionary<string, SqlLinqLambdaPlan>(StringComparer.Ordinal);
+                for (var index = 0; index < arguments.Count; index++)
+                {
+                    var parameter = method.Parameters[index];
+                    var argument = arguments[index];
+                    if (TryBuildLinqLambda(argument, scope, substitutions, out var lambdaArgument))
+                        lambdaReplacements[parameter.Name] = lambdaArgument;
+                    else if ((IsSequenceType(parameter.Type.Name) || KnownTypeFacts.IsLinqSequence(parameter.Type.Name)) &&
+                             TryBuildLinqQuery(argument, scope, substitutions, out var argumentQuery))
+                        planReplacements[parameter.Name] = argumentQuery;
+                    else
+                        scalarReplacements[parameter.Name] = CaptureLinqMethodArgument(argument, scope, substitutions);
+                }
+                _linqPlanSubstitutions.Push(planReplacements);
+                _linqLambdaSubstitutions.Push(lambdaReplacements);
+                try
+                {
+                    return TryBuildLinqLambda(method.PureExpression, scope, scalarReplacements, out lambda);
+                }
+                finally
+                {
+                    _linqLambdaSubstitutions.Pop();
+                    _linqPlanSubstitutions.Pop();
+                }
+            }
+        }
+        lambda = null!;
+        return false;
+    }
+
+    private static IReadOnlyDictionary<string, SqlLinqScalarCapture>? CaptureLinqLambdaBindings(
+        IrLambdaExpression lambda,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions)
+    {
+        var captures = CaptureLinqSubstitutions(substitutions) is { } existing
+            ? new Dictionary<string, SqlLinqScalarCapture>(existing, StringComparer.Ordinal)
+            : new Dictionary<string, SqlLinqScalarCapture>(StringComparer.Ordinal);
+        var parameters = lambda.Parameters.Select(parameter => parameter.Name).ToHashSet(StringComparer.Ordinal);
+        if (lambda.ExpressionBody is not null) Visit(lambda.ExpressionBody);
+        return captures.Count == 0 ? null : captures;
+
+        void Visit(IrExpression expression)
+        {
+            if (expression is IrVariableExpression variable)
+            {
+                var name = variable.Symbol.Name;
+                if (!parameters.Contains(name) && !captures.ContainsKey(name) &&
+                    scope.Find(variable.Symbol) is ScalarVariableBinding binding)
+                    captures[name] = new SqlLinqScalarCapture(binding.Scalar);
+                return;
+            }
+            switch (expression)
+            {
+                case IrBinaryExpression binary: Visit(binary.Left); Visit(binary.Right); break;
+                case IrUnaryExpression unary: Visit(unary.Operand); break;
+                case IrConversionExpression conversion: Visit(conversion.Operand); break;
+                case IrConditionalExpression conditional:
+                    Visit(conditional.Condition); Visit(conditional.WhenTrue); Visit(conditional.WhenFalse); break;
+                case IrMemberExpression member: Visit(member.Receiver); break;
+                case IrElementExpression element:
+                    Visit(element.Receiver); foreach (var argument in element.Arguments) Visit(argument); break;
+                case IrInvocationExpression invocation:
+                    Visit(invocation.Target); foreach (var argument in invocation.Arguments) Visit(argument); break;
+                case IrInterpolatedStringExpression interpolated:
+                    foreach (var part in interpolated.Parts.OfType<IrInterpolation>()) Visit(part.Expression); break;
+            }
+        }
+    }
+
+    private bool TryBuildLinqLambda(
         ExpressionSyntax expression,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions,
@@ -1454,7 +2370,7 @@ public sealed partial class SharpSqlCompiler
                 if (lambdaSubstitutions.TryGetValue(identifier.Identifier.ValueText, out lambda!))
                     return true;
             }
-            if (scope.Find(identifier.Identifier.ValueText)?.Lambda is { } storedLambda)
+            if (scope.Find(identifier.Identifier.ValueText) is LambdaVariableBinding { Lambda: var storedLambda })
             {
                 lambda = storedLambda;
                 return true;
@@ -1462,7 +2378,7 @@ public sealed partial class SharpSqlCompiler
         }
 
         if (expression is InvocationExpressionSyntax invocation &&
-            _methods.TryGetValue(InvocationName(invocation.Expression) ?? string.Empty, out var method) &&
+            TryGetMethod(invocation, out var method) &&
             method.PureExpression is not null &&
             IsDelegateType(method.ReturnType.Name))
         {
@@ -1535,7 +2451,7 @@ public sealed partial class SharpSqlCompiler
             var name = identifier.Identifier.ValueText;
             if (parameters.Contains(name) || captures.ContainsKey(name))
                 continue;
-            if (scope.Find(name) is { } binding)
+            if (scope.Find(name) is ScalarVariableBinding binding)
                 captures[name] = new SqlLinqScalarCapture(binding.Scalar);
         }
         return captures.Count == 0 ? null : captures;
@@ -1567,6 +2483,28 @@ public sealed partial class SharpSqlCompiler
             return true;
         }
 
+        parameterName = string.Empty;
+        body = null!;
+        captures = null;
+        return false;
+    }
+
+    private bool TryGetSingleParameterLambda(
+        IrExpression expression,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out string parameterName,
+        out IrExpression body,
+        out IReadOnlyDictionary<string, Substitution>? captures)
+    {
+        if (TryBuildLinqLambda(expression, scope, substitutions, out var lambda) &&
+            lambda.Expression is IrLambdaExpression { Parameters.Count: 1, ExpressionBody: not null } single)
+        {
+            parameterName = single.Parameters[0].Name;
+            body = single.ExpressionBody;
+            captures = RestoreLinqSubstitutions(lambda.Captures);
+            return true;
+        }
         parameterName = string.Empty;
         body = null!;
         captures = null;
@@ -1609,6 +2547,31 @@ public sealed partial class SharpSqlCompiler
         return false;
     }
 
+    private bool TryGetTwoParameterLambda(
+        IrExpression expression,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions,
+        out string firstParameterName,
+        out string secondParameterName,
+        out IrExpression body,
+        out IReadOnlyDictionary<string, Substitution>? captures)
+    {
+        if (TryBuildLinqLambda(expression, scope, substitutions, out var lambda) &&
+            lambda.Expression is IrLambdaExpression { Parameters.Count: 2, ExpressionBody: not null } pair)
+        {
+            firstParameterName = pair.Parameters[0].Name;
+            secondParameterName = pair.Parameters[1].Name;
+            body = pair.ExpressionBody;
+            captures = RestoreLinqSubstitutions(lambda.Captures);
+            return true;
+        }
+        firstParameterName = string.Empty;
+        secondParameterName = string.Empty;
+        body = null!;
+        captures = null;
+        return false;
+    }
+
     private static bool IsDelegateType(string name) =>
         name.StartsWith("Func<", StringComparison.Ordinal) ||
         name.StartsWith("Action<", StringComparison.Ordinal) ||
@@ -1625,10 +2588,7 @@ public sealed partial class SharpSqlCompiler
         name.StartsWith("IGrouping<", StringComparison.Ordinal);
 
     private static bool IsLinqSequenceType(string name) =>
-        name.StartsWith("IEnumerable<", StringComparison.Ordinal) ||
-        name.StartsWith("IQueryable<", StringComparison.Ordinal) ||
-        name.StartsWith("IOrderedEnumerable<", StringComparison.Ordinal) ||
-        name.StartsWith("IOrderedQueryable<", StringComparison.Ordinal);
+        KnownTypeFacts.IsLinqSequence(name);
 
     private static bool IsSumType(IrType type) => type.Name is
         "int" or "long" or "float" or "double" or "decimal";

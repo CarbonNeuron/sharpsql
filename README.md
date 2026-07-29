@@ -52,6 +52,13 @@ Requirements:
 
 No preinstalled database is required. Testcontainers starts and removes SQL Server automatically.
 
+Install the latest published command-line tool from NuGet:
+
+```bash
+dotnet tool install --global SharpSql.Tool
+sharpsql --help
+```
+
 From the repository root:
 
 ```bash
@@ -157,7 +164,7 @@ var result = await new SharpSqlProjectCompiler().TranspileAsync(
 - `Console.WriteLine` and `Console.Write` lowered to `PRINT`
 - Pure-expression and procedural method inlining with hygienic variables and labels
 - Recursive, mutually recursive, and over-budget calls through one generated stack and return trampoline
-- Classes and records with reference identity, typed fields, object initializers, mapped constructors, and instance methods
+- Classes with reference identity, inherited typed-field layouts, base-to-derived initialization, procedural constructor bodies, `this(...)`/`base(...)` chaining, virtual/interface dispatch, object initializers, and instance methods; records use the same typed heap model
 - One-dimensional arrays and `List<T>` with indexing, mutation, iteration, and common operations
 - `Dictionary<TKey,TValue>` with indexing and common mutation/query operations
 - Relational LINQ over arrays, `List<T>`, and lazy virtual `Enumerable.Range` sources: filtering/projection, ordering/paging, distinct values, joins, grouped-key pipelines, aggregates, and element operators, plus ordered `ToList`/`ToArray` and `Enumerable.Repeat` materialization
@@ -273,6 +280,7 @@ The first typed-IR and data-flow phase is complete:
 
 - A typed scalar SQL IR carrying C# type, SQL precedence, and nullable flow state
 - A backend-neutral `SharpSql.Ir` assembly with typed programs, symbols, expressions, query clauses, source spans, and procedural control flow
+- Frontend-bound type hierarchies and constructor bodies with stable type/member/method/constructor identities
 - Separate C# type binding and SQL Server type mapping
 - Independent C#-to-IR and hand-built-IR-to-SQL test seams
 - Centralized scalar casts and rendering
@@ -280,12 +288,16 @@ The first typed-IR and data-flow phase is complete:
 - One procedural lowering boundary shared by direct/inlined code and the stack-machine backend
 - Roslyn constant-flow facts used during predicate lowering
 - Definite-assignment, use-before-declaration, missing-return, and out-parameter preflight diagnostics
-- Reusable method summaries for endpoint reachability, statement cost, reads, writes, and captures
+- An overload-aware, semantic-ID method catalog and IR graph for resolved calls, caller/callee edges, recursion, effects, and VM closure
+- Focused method flow summaries for endpoint reachability and statement cost
 - Conservative fixed-point method effects with parameter mutation, escape, returned-alias, and fresh-reference summaries
+- Shared intrinsic metadata for LINQ, collections, console output, and `Random`
+- Distinct scalar, lazy-query, and delegate bindings without placeholder SQL variables
+- IR-native user-method calls, managed heap operations, seeded `Random`, and managed-source LINQ planning/materialization—including advanced and stateful paths—without attached Roslyn source
 
 ### Broader missing layers
 
-- Constructor bodies, inheritance, interfaces, and virtual dispatch
+- Struct instance semantics, boxing, and unboxing
 - General-purpose delegate invocation outside LINQ, iterators, and async-state-machine diagnostics
 - Exceptions and structured unwinding across VM frames
 - More of the base class library through explicit compiler intrinsics
@@ -297,6 +309,18 @@ The first typed-IR and data-flow phase is complete:
 dotnet restore SharpSql.slnx
 dotnet build SharpSql.slnx --configuration Release --no-restore
 dotnet test SharpSql.slnx --configuration Release --no-build
+```
+
+Rebuild, validate, and replace the globally installed tool from the current source tree with one command:
+
+```bash
+./scripts/install-local-tool.sh
+```
+
+The script generates a cache-safe local version automatically. Pass a semantic version when an exact version is useful:
+
+```bash
+./scripts/install-local-tool.sh 0.1.15-local
 ```
 
 The full test command starts one shared SQL Server 2022 container. Every file in `examples/` is reported as an independent C#/SQL parity test, and the integration corpus also checks expected runtime exceptions and exact compiler diagnostic codes under [`tests/SharpSql.IntegrationTests/cases`](tests/SharpSql.IntegrationTests/cases). CLI parsing, help, validation, standard input, output files, and project options are exercised through `Spectre.Console.Cli.Testing`. To run only the compiler unit tests without Docker:

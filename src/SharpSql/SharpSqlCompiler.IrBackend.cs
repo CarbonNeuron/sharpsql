@@ -4,8 +4,88 @@ namespace SharpSql;
 
 public sealed partial class SharpSqlCompiler
 {
-    private bool ContainsRuntimeExpression(IrExpression expression) =>
-        HasCSharpSource(expression.Source) && ContainsRuntimeExpression(CSharpExpression(expression));
+    private bool ContainsRuntimeExpression(IrExpression expression)
+    {
+        if (IsRuntimeNode(expression))
+            return true;
+        return expression switch
+        {
+            IrBinaryExpression binary =>
+                ContainsRuntimeExpression(binary.Left) || ContainsRuntimeExpression(binary.Right),
+            IrUnaryExpression unary => ContainsRuntimeExpression(unary.Operand),
+            IrConversionExpression conversion => ContainsRuntimeExpression(conversion.Operand),
+            IrConditionalExpression conditional =>
+                ContainsRuntimeExpression(conditional.Condition) ||
+                ContainsRuntimeExpression(conditional.WhenTrue) ||
+                ContainsRuntimeExpression(conditional.WhenFalse),
+            IrMemberExpression member => ContainsRuntimeExpression(member.Receiver),
+            IrElementExpression element =>
+                ContainsRuntimeExpression(element.Receiver) || element.Arguments.Any(ContainsRuntimeExpression),
+            IrInvocationExpression invocation =>
+                ContainsRuntimeExpression(invocation.Target) || invocation.Arguments.Any(ContainsRuntimeExpression),
+            IrObjectCreationExpression creation =>
+                creation.Arguments.Any(ContainsRuntimeExpression) || creation.Initializers.Any(ContainsRuntimeExpression),
+            IrWithExpression withExpression =>
+                ContainsRuntimeExpression(withExpression.Receiver) ||
+                withExpression.Initializers.Any(ContainsRuntimeExpression),
+            IrArrayCreationExpression array =>
+                array.Length is not null && ContainsRuntimeExpression(array.Length) ||
+                array.Elements.Any(ContainsRuntimeExpression),
+            IrInterpolatedStringExpression interpolated => interpolated.Parts
+                .OfType<IrInterpolation>()
+                .Any(item => ContainsRuntimeExpression(item.Expression)),
+            IrAssignmentExpression assignment =>
+                ContainsRuntimeExpression(assignment.Target) || ContainsRuntimeExpression(assignment.Value),
+            IrLambdaExpression lambda => LambdaContainsRuntimeExpression(lambda),
+            IrQueryExpression query => ContainsRuntimeExpression(query.SourceExpression),
+            IrUnsupportedExpression when HasCSharpSource(expression.Source) =>
+                ContainsRuntimeExpression(CSharpExpression(expression)),
+            _ => false
+        };
+    }
+
+    private bool LambdaContainsRuntimeExpression(IrLambdaExpression lambda)
+    {
+        if (lambda.ExpressionBody is null)
+            return false;
+        if (lambda.ExpressionBody is IrInvocationExpression invocation &&
+            CanEmitRuntimeDispatchScalar(invocation))
+            return false;
+        return ContainsRuntimeExpression(lambda.ExpressionBody);
+    }
+
+    private bool IsRuntimeNode(IrExpression expression)
+    {
+        switch (expression)
+        {
+            case IrElementExpression:
+                return true;
+            case IrArrayCreationExpression array:
+                return array.ElementType.Name != "byte";
+            case IrObjectCreationExpression creation:
+                return _heapTypes.ContainsKey(creation.CreatedType.Name) ||
+                    KnownTypeFacts.IsList(creation.CreatedType.Name) ||
+                    KnownTypeFacts.IsDictionary(creation.CreatedType.Name) ||
+                    KnownTypeFacts.IsRandom(creation.CreatedType.Name);
+            case IrWithExpression withExpression:
+                return _heapTypes.ContainsKey(withExpression.Type.Name);
+            case IrInvocationExpression invocation when TryGetRuntimeDispatch(invocation, out _):
+                return true;
+            case IrInvocationExpression invocation when
+                TryGetMethod(invocation, out var vmMethod) && _vmMethods.ContainsKey(vmMethod.Id):
+                return true;
+            case IrInvocationExpression invocation when invocation.Target is IrMemberExpression member:
+                var method = invocation.MethodName ?? string.Empty;
+                var receiverType = member.Receiver.Type.Name;
+                return KnownTypeFacts.IsRandom(receiverType) && method is "Next" or "NextDouble" ||
+                    IntrinsicCatalog.IsMaterializer(method) &&
+                    (IsSequenceType(receiverType) || KnownTypeFacts.IsLinqSequence(receiverType)) ||
+                    IntrinsicCatalog.IsGuardedLinqOperator(method) &&
+                    (IsSequenceType(receiverType) || KnownTypeFacts.IsLinqSequence(receiverType));
+            default:
+                return false;
+        }
+    }
 
     private void EmitExpressionStatement(
         IrExpression expression,
@@ -15,9 +95,11 @@ public sealed partial class SharpSqlCompiler
     {
         if (expression is IrAssignmentExpression assignment)
         {
+            if (TryEmitHeapStatement(assignment, scope, _proceduralVmContext))
+                return;
             if ((assignment.Target is not IrVariableExpression variableTarget || scope.Find(variableTarget.Symbol) is null) &&
                 HasCSharpSource(expression.Source) &&
-                TryEmitHeapStatement(CSharpExpression(expression), scope))
+                TryEmitHeapStatement(CSharpExpression(expression), scope, _proceduralVmContext))
                 return;
             if (ContainsRuntimeExpression(assignment.Value))
             {
@@ -25,20 +107,16 @@ public sealed partial class SharpSqlCompiler
                 EmitVmExpression(
                     assignment.Value,
                     scope,
-                    null,
+                    _proceduralVmContext,
                     value => _sql.Line(IrAssignmentLine(assignment, target, assignment.Target.Type, value, parenthesizeValue: true)));
                 return;
             }
             if (assignment.Value is IrInvocationExpression invocation &&
-                HasCSharpSource(invocation.Source) &&
-                TryGetComplexMethod(
-                    CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>(invocation.Source),
-                    out var method))
+                TryGetComplexMethod(invocation, out var method))
             {
-                var invocationSyntax = CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>(invocation.Source);
                 EmitComplexInline(
                     method,
-                    InvocationArgumentExpressions(invocationSyntax, method),
+                    InvocationArgumentExpressions(invocation, method),
                     scope,
                     EmitIrAssignable(assignment.Target, scope),
                     assignment.Target.Type,
@@ -58,7 +136,7 @@ public sealed partial class SharpSqlCompiler
                 EmitVmExpression(
                     invocationExpression.Arguments[0],
                     scope,
-                    null,
+                    _proceduralVmContext,
                     value => EmitPrintSql(FormatTextValue(invocationExpression.Arguments[0].Type, value)));
             else
                 EmitPrintSql(FormatTextValue(
@@ -69,34 +147,32 @@ public sealed partial class SharpSqlCompiler
 
         // Heap and stateful runtime intrinsics are backend operations whose
         // recognizers currently share the C# frontend adapter.
-        if (HasCSharpSource(expression.Source) && TryEmitHeapStatement(CSharpExpression(expression), scope))
+        if (TryEmitHeapStatement(expression, scope, _proceduralVmContext))
+            return;
+        if (HasCSharpSource(expression.Source) && TryEmitHeapStatement(CSharpExpression(expression), scope, _proceduralVmContext))
             return;
 
-        if (!HasCSharpSource(expression.Source))
-        {
-            Unsupported(expression.Source, "expression statement");
-            return;
-        }
-        var legacy = CSharpExpression(expression);
         if (expression is IrInvocationExpression call &&
-            TryGetComplexMethod(
-                CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>(call.Source),
-                out var complexMethod))
+            TryGetComplexMethod(call, out var complexMethod))
         {
-            var invocation = CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>(call.Source);
-            EmitComplexInline(complexMethod, InvocationArgumentExpressions(invocation, complexMethod), scope, null, IrType.Unknown, false);
+            EmitComplexInline(
+                complexMethod,
+                InvocationArgumentExpressions(call, complexMethod),
+                scope,
+                null,
+                IrType.Unknown,
+                false);
             return;
         }
         if (ContainsRuntimeExpression(expression))
         {
-            EmitVmExpression(expression, scope, null, _ => { });
+            EmitVmExpression(expression, scope, _proceduralVmContext, _ => { });
             return;
         }
         if (expression is IrInvocationExpression discardedCall &&
-            _methods.TryGetValue(discardedCall.MethodName ?? string.Empty, out var discardedMethod))
+            TryGetMethod(discardedCall, out var discardedMethod))
         {
-            var invocation = CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>(discardedCall.Source);
-            if (discardedMethod.Behavior.IsSideEffectFree && InvocationInputsAreDiscardable(invocation))
+            if (discardedMethod.Behavior.IsSideEffectFree && InvocationInputsAreDiscardable(discardedCall))
                 return;
 
             if (discardedMethod.ReturnType.Name != "void" && discardedMethod.PureExpression is not null)
@@ -154,21 +230,17 @@ public sealed partial class SharpSqlCompiler
             IrVariableExpression variable => EmitIrVariable(variable, scope, substitutions),
             IrThisExpression @this => substitutions is not null && substitutions.TryGetValue("this", out var thisValue)
                 ? thisValue.Expression
-                : scope.Find(@this.Symbol)?.Scalar ?? SqlScalarExpression.Primary("NULL"),
+                : scope.Find(@this.Symbol) is ScalarVariableBinding thisBinding
+                    ? thisBinding.Scalar
+                    : SqlScalarExpression.Primary("NULL"),
             IrBinaryExpression binary => EmitIrBinary(binary, scope, substitutions),
             IrUnaryExpression unary => EmitIrUnary(unary, scope, substitutions),
             IrConversionExpression conversion => EmitScalarExpression(conversion.Operand, scope, substitutions).CastTo(conversion.TargetType),
             IrConditionalExpression conditional => SqlScalarExpression.Primary(
                 $"CASE WHEN {EmitPredicate(conditional.Condition, scope, substitutions)} THEN {EmitScalar(conditional.WhenTrue, scope, substitutions)} ELSE {EmitScalar(conditional.WhenFalse, scope, substitutions)} END"),
             IrInterpolatedStringExpression interpolated => EmitIrInterpolatedString(interpolated, scope, substitutions),
-            IrInvocationExpression invocation when HasCSharpSource(invocation.Source) => EmitInvocation(
-                CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>(invocation.Source),
-                scope,
-                substitutions),
-            IrMemberExpression member when HasCSharpSource(member.Source) => EmitHeapMemberScalar(
-                CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax>(member.Source),
-                scope,
-                substitutions),
+            IrInvocationExpression invocation => EmitIrInvocation(invocation, scope, substitutions),
+            IrMemberExpression member => EmitIrMember(member, scope, substitutions),
             IrElementExpression element when HasCSharpSource(element.Source) => EmitHeapElementScalar(
                 CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.ElementAccessExpressionSyntax>(element.Source),
                 scope),
@@ -179,6 +251,86 @@ public sealed partial class SharpSqlCompiler
                 UnsupportedExpression(expression.Source, $"Unsupported IR expression: {expression.GetType().Name}."))
         };
         return result.WithAnalysis(expression.Type, expression.Facts.Nullability);
+    }
+
+    private SqlScalarExpression EmitIrInvocation(
+        IrInvocationExpression invocation,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions)
+    {
+        if (TryEmitLinqInvocation(invocation, scope, substitutions, out var linqExpression))
+            return linqExpression;
+        if (TryEmitHeapInvocationScalar(invocation, scope, substitutions, out var heapExpression))
+            return heapExpression;
+        if (TryEmitRuntimeDispatchScalar(invocation, scope, substitutions, out var dispatchExpression))
+            return dispatchExpression;
+
+        if (TryGetMethod(invocation, out var method) &&
+            method.PureExpression is not null &&
+            CanUseIrInvocation(method, invocation))
+        {
+            EmitLeadingComments(method.Source);
+            if (method.Body?.Statements.OfType<ProceduralReturn>().FirstOrDefault() is { } returnStatement)
+                EmitLeadingComments(returnStatement.Source);
+            var arguments = InvocationArgumentExpressions(invocation, method);
+            if (!CanInline(method, arguments.Count))
+                return SqlScalarExpression.Primary("NULL");
+
+            var replacements = new Dictionary<string, Substitution>(StringComparer.Ordinal);
+            for (var index = 0; index < method.Parameters.Count; index++)
+                replacements[method.Parameters[index].Name] = new Substitution(
+                    EmitScalarExpression(arguments[index], scope, substitutions));
+            return EmitScalarExpression(method.PureExpression, scope, replacements);
+        }
+
+        if (HasCSharpSource(invocation.Source))
+        {
+            return EmitInvocation(
+                CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>(invocation.Source),
+                scope,
+                substitutions);
+        }
+
+        return SqlScalarExpression.Primary(
+            UnsupportedExpression(invocation.Source, "Only user-defined methods and supported intrinsics can be invoked."));
+    }
+
+    private static bool CanUseIrInvocation(MethodDefinition method, IrInvocationExpression invocation) =>
+        !method.Parameters.Any(parameter =>
+            IsSequenceType(parameter.Type.Name) ||
+            KnownTypeFacts.IsLinqSequence(parameter.Type.Name)) &&
+        !invocation.Arguments.Any(argument => argument is IrLambdaExpression or IrQueryExpression);
+
+    private SqlScalarExpression EmitIrMember(
+        IrMemberExpression member,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions)
+    {
+        var receiverType = member.Receiver.Type;
+        var receiver = EmitScalar(member.Receiver, scope, substitutions);
+        if (receiverType.IsString && member.MemberName == "Length")
+            return SqlScalarExpression.Primary($"CONVERT(INT, DATALENGTH({receiver}) / 2)");
+        if ((IsListType(receiverType.Name) && member.MemberName == "Count") ||
+            (IsArrayType(receiverType.Name) && member.MemberName == "Length") ||
+            (IsDictionaryType(receiverType.Name) && member.MemberName == "Count"))
+            return SqlScalarExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE __id = {receiver})");
+        if (TryResolveHeapField(
+                receiverType,
+                member.MemberName,
+                member.MemberId,
+                out var heapType,
+                out var field))
+            return SqlScalarExpression.Primary(
+                $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE __object_id = {receiver})");
+        if (HasCSharpSource(member.Source))
+        {
+            return EmitHeapMemberScalar(
+                CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax>(member.Source),
+                scope,
+                substitutions);
+        }
+        return SqlScalarExpression.Primary(
+            UnsupportedExpression(member.Source, $"Unknown member '{member.MemberName}' on '{receiverType.Name}'."));
     }
 
     private string EmitPredicate(
@@ -218,8 +370,18 @@ public sealed partial class SharpSqlCompiler
     {
         if (substitutions is not null && substitutions.TryGetValue(variable.Symbol.Name, out var replacement))
             return replacement.Expression;
-        if (scope.Find(variable.Symbol) is { } binding)
+        if (scope.Find(variable.Symbol) is ScalarVariableBinding binding)
             return binding.Scalar;
+        if (TryResolveImplicitHeapField(
+                variable.Symbol.Name,
+                variable.Symbol.ReferencedMemberId,
+                scope,
+                substitutions,
+                out var heapType,
+                out var field,
+                out var receiver))
+            return SqlScalarExpression.Primary(
+                $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE __object_id = {receiver})");
         if (HasCSharpSource(variable.Source) && TryEmitImplicitHeapField(
                 CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax>(variable.Source),
                 scope,
@@ -232,7 +394,7 @@ public sealed partial class SharpSqlCompiler
 
     private string EmitIrAssignable(IrExpression expression, VariableScope scope) => expression switch
     {
-        IrVariableExpression variable when scope.Find(variable.Symbol) is { } binding => binding.SqlName,
+        IrVariableExpression variable when scope.Find(variable.Symbol) is ScalarVariableBinding binding => binding.SqlName,
         _ => UnsupportedExpression(expression.Source, "Only local variables can be assigned here.")
     };
 

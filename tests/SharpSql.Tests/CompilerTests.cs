@@ -293,6 +293,86 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void ExecutesFieldInitializersConstructorControlFlowAndThisChaining()
+    {
+        const string source = """
+            var counter = new Counter(-2) { Steps = 4 };
+            Console.WriteLine($"counter={counter.Value}:{counter.Steps}");
+
+            class Counter
+            {
+                public int Value { get; set; } = InitialValue();
+                public int Steps { get; set; }
+                public List<int> History { get; } = new List<int> { 1 };
+
+                public Counter(int value) : this(value, 2)
+                {
+                    Value++;
+                }
+
+                public Counter(int value, int steps)
+                {
+                    if (value < 0)
+                        value = 0;
+                    History.Add(value);
+                    Value += this.Double(value);
+                    for (int index = 0; index < steps; index++)
+                        Value += 2;
+                    Steps = steps;
+                }
+
+                private int Double(int value) => value * 2;
+                private static int InitialValue() => 5;
+            }
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DECLARE @_ctor_Counter_value", result.Sql);
+        Assert.Contains("__sharpsql_ctor_Counter_end", result.Sql);
+        Assert.Contains("SET [Value] = (SELECT [Value]", result.Sql);
+        Assert.DoesNotContain("SS6002", string.Join(Environment.NewLine, result.Diagnostics));
+    }
+
+    [Fact]
+    public void ExecutesBaseConstructorsAndUsesDeclaringTypeRowsForInheritedFields()
+    {
+        const string source = """
+            var item = new Derived(3);
+            Base alias = item;
+            Console.WriteLine($"{item.BaseValue}:{item.DerivedValue}:{item.Shared}:{alias.Shared}");
+            class Base
+            {
+                public int BaseValue = 2;
+                public int Shared = 10;
+                public Base() { BaseValue++; }
+                public Base(int value) : this() { BaseValue += value; }
+            }
+            class Derived : Base
+            {
+                public new int Shared = 20;
+                public int DerivedValue = 4;
+                public Derived(int value) : base(value + 1)
+                {
+                    BaseValue++;
+                    DerivedValue += BaseValue;
+                    Shared++;
+                    base.Shared++;
+                }
+            }
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("INSERT INTO #__sharpsql_type_1", result.Sql);
+        Assert.Contains("INSERT INTO #__sharpsql_type_2", result.Sql);
+        Assert.Contains("DECLARE @_ctor_Base_value", result.Sql);
+        Assert.DoesNotContain("SS6006", string.Join(Environment.NewLine, result.Diagnostics));
+    }
+
+    [Fact]
     public void FormatsRecordsWhenWritingOrInterpolatingThem()
     {
         const string source = """
@@ -337,8 +417,8 @@ public sealed class CompilerTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("SELECT [Name] FROM #__sharpsql_type_1", result.Sql);
-        Assert.Contains("SELECT MIN(", result.Sql);
-        Assert.Contains("SELECT MAX(", result.Sql);
+        Assert.Contains(" = MIN(", result.Sql);
+        Assert.Contains(" = MAX(", result.Sql);
         Assert.Contains("INSERT INTO #__sharpsql_type_1 (__object_id, [Name], [Quantity])", result.Sql);
     }
 
@@ -472,7 +552,8 @@ public sealed class CompilerTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("CREATE TABLE #__sharpsql_objects", result.Sql);
-        Assert.Contains("__random_inext INT NULL", result.Sql);
+        Assert.Contains("__state0 INT NULL", result.Sql);
+        Assert.Contains("(__type_id, __state0, __state1) VALUES (1004, 0, 21)", result.Sql);
         Assert.Contains("CREATE TABLE #__sharpsql_indexed_items", result.Sql);
         Assert.Contains("DECLARE @_random_seed INT = 12345;", result.Sql);
         Assert.Contains("Random maximum must be non-negative.", result.Sql);
@@ -560,10 +641,33 @@ public sealed class CompilerTests
         Assert.Contains("stack-machine body: RandomString", result.Sql);
         Assert.Contains("Enumerable.Repeat count must be non-negative.", result.Sql);
         Assert.Contains("WHILE @_repeat_index <", result.Sql);
-        Assert.Contains("WHERE __id = @random", result.Sql);
+        Assert.Contains("SELECT __state0 FROM #__sharpsql_objects WHERE __id =", result.Sql);
         Assert.Contains("CAST(1 AS FLOAT) / CAST(2147483647 AS FLOAT)", result.Sql);
         Assert.Contains("SUBSTRING(", result.Sql);
         Assert.Contains("STRING_AGG(", result.Sql);
+    }
+
+    [Fact]
+    public void ComposesLazyRepeatSourcesAndEvaluatesConstructedRandomReceivers()
+    {
+        const string source = """
+            var person = new Person(2, "Bob");
+            var count = new Random(3).Next(0, 100);
+            var people = Enumerable.Repeat(person, count).Take(2);
+
+            foreach (var item in people)
+                Console.WriteLine(item);
+
+            record Person(int Id, string Name);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("Enumerable.Repeat count must be non-negative.", result.Sql);
+        Assert.Contains("FROM GENERATE_SERIES(CONVERT(BIGINT, 0)", result.Sql);
+        Assert.Contains("CASE WHEN", result.Sql);
+        Assert.DoesNotContain("DECLARE @_repeat_index", result.Sql);
     }
 
     [Fact]
@@ -726,7 +830,7 @@ public sealed class CompilerTests
         Assert.DoesNotContain("_range_index", result.Sql);
         Assert.Equal(2, Count(result.Sql, "INT = @@ROWCOUNT;"));
         Assert.Contains("SELECT SUM(", result.Sql);
-        Assert.Contains("SELECT AVG(", result.Sql);
+        Assert.Contains(" = AVG(", result.Sql);
     }
 
     [Fact]
@@ -836,10 +940,11 @@ public sealed class CompilerTests
         Assert.Contains("LINQ sequence contains no elements.", result.Sql);
         Assert.Contains("LINQ sequence contains more than one element.", result.Sql);
         Assert.Contains("LINQ index was out of range.", result.Sql);
-        Assert.Contains("SELECT MIN(", result.Sql);
-        Assert.Contains("SELECT MAX(", result.Sql);
-        Assert.Contains("SELECT AVG(", result.Sql);
+        Assert.Contains(" = MIN(", result.Sql);
+        Assert.Contains(" = MAX(", result.Sql);
+        Assert.Contains(" = AVG(", result.Sql);
         Assert.Contains("ROW_NUMBER() OVER (ORDER BY", result.Sql);
+        Assert.DoesNotContain("IF (SELECT COUNT(*) FROM (", result.Sql);
     }
 
     [Fact]
@@ -863,7 +968,8 @@ public sealed class CompilerTests
         var result = Compile(source);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
-        Assert.Contains("DECLARE @predicate INT = NULL;", result.Sql);
+        Assert.DoesNotContain("DECLARE @predicate", result.Sql);
+        Assert.DoesNotContain("DECLARE @returnedPredicate", result.Sql);
         Assert.Contains("DECLARE @filtered INT = @values;", result.Sql);
         Assert.Contains("__value > @threshold", result.Sql);
         Assert.Contains("DECLARE @_linq_capture", result.Sql);
@@ -1059,7 +1165,7 @@ public sealed class CompilerTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("SET [Value] = (SELECT [Value]", result.Sql);
-        Assert.Contains("+ (@_add_1_amount)", result.Sql);
+        Assert.Matches(@"\+ \(@_add_\d+_amount\)", result.Sql);
     }
 
     [Fact]
@@ -1324,6 +1430,97 @@ public sealed class CompilerTests
         Assert.Contains("THROW 51003, 'Array index was out of range.'", result.Sql);
         Assert.Contains("THROW 51010, 'The given key was not present in the dictionary.'", result.Sql);
         Assert.Contains("THROW 51003, 'String index was out of range.'", result.Sql);
+    }
+
+    [Fact]
+    public void UsesSetBasedArrayInitializationAndSingleProbeDictionaryMutations()
+    {
+        const string source = """
+            int[] values = new int[100];
+            var lookup = new Dictionary<int, int>();
+            lookup[1] = 10;
+            lookup[1] = 20;
+            lookup.Remove(1);
+            Console.WriteLine(values.Length + lookup.Count);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("INSERT INTO #__sharpsql_indexed_items", result.Sql);
+        Assert.Contains("FROM GENERATE_SERIES(CONVERT(BIGINT, 0)", result.Sql);
+        Assert.DoesNotContain("_array_index", result.Sql);
+        Assert.Contains("IF @@ROWCOUNT = 0", result.Sql);
+        Assert.Contains("IF @@ROWCOUNT > 0", result.Sql);
+    }
+
+    [Fact]
+    public void ReadsRawLinqCardinalityFromTheCollectionHeader()
+    {
+        const string source = """
+            var values = new List<int> { 1, 2, 3 };
+            int count = values.Count();
+            long longCount = values.LongCount();
+            bool any = values.Any();
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Equal(3, Count(result.Sql, "SELECT __count FROM #__sharpsql_objects"));
+        Assert.DoesNotContain("SELECT COUNT(*) FROM (SELECT", result.Sql);
+        Assert.DoesNotContain("SELECT COUNT_BIG(*) FROM (SELECT", result.Sql);
+    }
+
+    [Fact]
+    public void BuffersNaturallyBufferingLinqForeachPlansOnce()
+    {
+        const string source = """
+            var values = new List<int> { 3, 1, 2 };
+            foreach (int value in values.OrderBy(value => value))
+                Console.WriteLine(value);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("INTO #__sharpsql_linq_foreach_", result.Sql);
+        Assert.Contains("CREATE UNIQUE CLUSTERED INDEX IX_linq_index", result.Sql);
+        Assert.Equal(1, Count(result.Sql, "ROW_NUMBER() OVER (ORDER BY"));
+    }
+
+    [Fact]
+    public void KeepsNonFallbackHelpersOutOfTheStackMachineAndBatchesRegisters()
+    {
+        const string source = """
+            int Increment(int value) => value + 1;
+            int Recurse(int value) => value == 0 ? 0 : Increment(Recurse(value - 1));
+            int result = Recurse(4);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("stack-machine body: Recurse", result.Sql);
+        Assert.DoesNotContain("stack-machine body: Increment", result.Sql);
+        Assert.Contains("MERGE #__sharpsql_slots AS target", result.Sql);
+        Assert.Contains("FROM (VALUES (0)) AS __vm_seed", result.Sql);
+    }
+
+    [Fact]
+    public void DoesNotCreateHeapTablesForUnusedDeclaredTypes()
+    {
+        const string source = """
+            Used value = new Used { Number = 3 };
+            Console.WriteLine(value.Number);
+            class Used { public int Number { get; set; } }
+            class Unused { public string Name { get; set; } = "unused"; }
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Equal(1, Count(result.Sql, "CREATE TABLE #__sharpsql_type_"));
     }
 
     private static TranspileResult Compile(string source) => new SharpSqlCompiler().Transpile(source);

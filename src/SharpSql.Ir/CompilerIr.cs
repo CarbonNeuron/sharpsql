@@ -32,7 +32,57 @@ internal readonly record struct IrSymbolId(int Value)
     public static IrSymbolId None { get; } = new(0);
 }
 
-internal sealed record IrSymbol(IrSymbolId Id, string Name, IrType Type);
+internal readonly record struct IrTypeDefinitionId(string Value)
+{
+    public static IrTypeDefinitionId None { get; } = new(string.Empty);
+    public bool IsNone => string.IsNullOrEmpty(Value);
+}
+
+internal readonly record struct IrMemberId(string Value)
+{
+    public static IrMemberId None { get; } = new(string.Empty);
+    public bool IsNone => string.IsNullOrEmpty(Value);
+}
+
+internal readonly record struct IrMethodId(string Value)
+{
+    public static IrMethodId None { get; } = new(string.Empty);
+    public bool IsNone => string.IsNullOrEmpty(Value);
+}
+
+internal readonly record struct IrConstructorId(string Value)
+{
+    public static IrConstructorId None { get; } = new(string.Empty);
+    public bool IsNone => string.IsNullOrEmpty(Value);
+}
+
+internal enum IrCallDispatch
+{
+    Unknown,
+    Static,
+    Direct,
+    Virtual,
+    Interface,
+    Delegate
+}
+
+internal enum IrMemberKind
+{
+    Field,
+    Property
+}
+
+internal enum IrConstructorInitializerKind
+{
+    None,
+    This,
+    Base
+}
+
+internal sealed record IrSymbol(IrSymbolId Id, string Name, IrType Type)
+{
+    public IrMemberId ReferencedMemberId { get; init; } = IrMemberId.None;
+}
 
 internal enum IrBinaryOperator
 {
@@ -131,7 +181,10 @@ internal sealed record IrMemberExpression(
     IrSource Source,
     ExpressionFacts Facts,
     IrExpression Receiver,
-    string MemberName) : IrExpression(Source, Facts);
+    string MemberName) : IrExpression(Source, Facts)
+{
+    public IrMemberId MemberId { get; init; } = IrMemberId.None;
+}
 
 internal sealed record IrElementExpression(
     IrSource Source,
@@ -145,6 +198,9 @@ internal sealed record IrInvocationExpression(
     IrExpression Target,
     IReadOnlyList<IrExpression> Arguments) : IrExpression(Source, Facts)
 {
+    public IrMethodId TargetMethodId { get; init; } = IrMethodId.None;
+    public IrCallDispatch Dispatch { get; init; } = IrCallDispatch.Unknown;
+
     public string? MethodName => Target is IrMemberExpression member
         ? member.MemberName
         : Target is IrVariableExpression variable
@@ -157,7 +213,16 @@ internal sealed record IrObjectCreationExpression(
     ExpressionFacts Facts,
     IrType CreatedType,
     IReadOnlyList<IrExpression> Arguments,
-    IReadOnlyList<IrExpression> Initializers) : IrExpression(Source, Facts);
+    IReadOnlyList<IrExpression> Initializers) : IrExpression(Source, Facts)
+{
+    public IrConstructorId ConstructorId { get; init; } = IrConstructorId.None;
+}
+
+internal sealed record IrWithExpression(
+    IrSource Source,
+    ExpressionFacts Facts,
+    IrExpression Receiver,
+    IReadOnlyList<IrAssignmentExpression> Initializers) : IrExpression(Source, Facts);
 
 internal sealed record IrArrayCreationExpression(
     IrSource Source,
@@ -206,7 +271,49 @@ internal sealed record IrUnsupportedExpression(
     ExpressionFacts Facts,
     string Description) : IrExpression(Source, Facts);
 
+internal sealed record IrHeapFieldDefinition(
+    string Name,
+    IrType Type,
+    IrSource Source)
+{
+    public IrMemberId Id { get; init; } = IrMemberId.None;
+    public IrMemberKind Kind { get; init; }
+    public bool IsStatic { get; init; }
+    public bool IsReadOnly { get; init; }
+    public IrExpression? Initializer { get; init; }
+}
+
+internal sealed record IrHeapConstructorDefinition(
+    IReadOnlyList<string> TargetFields)
+{
+    public IrConstructorId Id { get; init; } = IrConstructorId.None;
+    public IReadOnlyList<ParameterDefinition> Parameters { get; init; } = [];
+    public ProceduralBlock? Body { get; init; }
+    public IrConstructorInitializerKind InitializerKind { get; init; }
+    public IrConstructorId InitializerConstructorId { get; init; } = IrConstructorId.None;
+    public IReadOnlyList<IrExpression> InitializerArguments { get; init; } = [];
+    public bool IsFieldAssignmentOnly { get; init; } = true;
+}
+
+internal sealed record IrHeapTypeDefinition(
+    string Name,
+    bool IsValueType,
+    bool IsRecord,
+    IReadOnlyList<IrHeapFieldDefinition> Fields,
+    IReadOnlyList<IrHeapConstructorDefinition> Constructors,
+    IrSource Source)
+{
+    public IrTypeDefinitionId Id { get; init; } = IrTypeDefinitionId.None;
+    public IrType? BaseType { get; init; }
+    public IReadOnlyList<IrType> Interfaces { get; init; } = [];
+    public bool IsAbstract { get; init; }
+    public bool IsSealed { get; init; }
+}
+
 internal sealed record IrProgram(
     IReadOnlyList<MethodDefinition> Methods,
     ProceduralBlock EntryPoint,
-    IReadOnlyList<IrComment> FileComments);
+    IReadOnlyList<IrComment> FileComments)
+{
+    public IReadOnlyList<IrHeapTypeDefinition> HeapTypes { get; init; } = [];
+}

@@ -9,28 +9,28 @@ internal static class SqlTypeMapper
     {
         type = type.ScalarRepresentation ?? type;
         return type.Name switch
-    {
-        "bool" => "BIT",
-        "byte" => "TINYINT",
-        "sbyte" or "short" => "SMALLINT",
-        "ushort" or "int" => "INT",
-        "uint" or "long" => "BIGINT",
-        "ulong" => "DECIMAL(20,0)",
-        "float" => "REAL",
-        "double" => "FLOAT",
-        "decimal" => "DECIMAL(38,18)",
-        "char" => "NCHAR(1)",
-        "string" => "NVARCHAR(MAX)",
-        "DateTime" => "DATETIME2",
-        "DateOnly" => "DATE",
-        "TimeOnly" => "TIME",
-        "Guid" => "UNIQUEIDENTIFIER",
-        "byte[]" => "VARBINARY(MAX)",
-        "void" => string.Empty,
-        "unknown" => "SQL_VARIANT",
-        _ when type.IsReference => "INT",
-        _ => "SQL_VARIANT"
-    };
+        {
+            "bool" => "BIT",
+            "byte" => "TINYINT",
+            "sbyte" or "short" => "SMALLINT",
+            "ushort" or "int" => "INT",
+            "uint" or "long" => "BIGINT",
+            "ulong" => "DECIMAL(20,0)",
+            "float" => "REAL",
+            "double" => "FLOAT",
+            "decimal" => "DECIMAL(38,18)",
+            "char" => "NCHAR(1)",
+            "string" => "NVARCHAR(MAX)",
+            "DateTime" => "DATETIME2",
+            "DateOnly" => "DATE",
+            "TimeOnly" => "TIME",
+            "Guid" => "UNIQUEIDENTIFIER",
+            "byte[]" => "VARBINARY(MAX)",
+            "void" => string.Empty,
+            "unknown" => "SQL_VARIANT",
+            _ when type.IsReference => "INT",
+            _ => "SQL_VARIANT"
+        };
     }
 
     public static string SqlType(this IrType type) => Map(type);

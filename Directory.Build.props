@@ -10,6 +10,8 @@
     <VersionPrefix>0.1.0</VersionPrefix>
     <Authors>SharpSql contributors</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/CarbonNeuron/sharpsql</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/CarbonNeuron/sharpsql.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 </Project>

@@ -32,9 +32,8 @@ public sealed partial class SharpSqlCompiler
     private const int PrecedenceUnary = 80;
 
     private readonly List<CompilerDiagnostic> _diagnostics = [];
-    private readonly Dictionary<string, MethodDefinition> _methods = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, int> _callCounts = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _recursiveMethods = new(StringComparer.Ordinal);
+    private readonly MethodCatalog _methods = new();
+    private MethodGraph? _methodGraph;
     private readonly NameAllocator _names = new();
     private readonly SqlWriter _sql = new();
     private readonly Dictionary<SyntaxTree, SemanticModel> _semanticModels = [];
@@ -42,6 +41,7 @@ public sealed partial class SharpSqlCompiler
     private Diagnostic[]? _semanticDiagnostics;
     private TranspileOptions _options = new();
     private IrProgram? _boundProgram;
+    private VmMethod? _proceduralVmContext;
     private int _inlineId;
     private bool _used;
 
@@ -109,10 +109,9 @@ public sealed partial class SharpSqlCompiler
         foreach (var root in roots)
             CollectMethods(root, selectedEntryPoint, reachableMethods);
         AnalyzeMethodBehaviors();
-        CountCalls(compilationSources);
-        FindRecursion();
-        PrepareVmMethods();
-        PrepareHeapRuntime(roots, compileReachableOnly ? compilationSources : null);
+        var heapTypeDefinitions = BindHeapTypeDefinitions(
+            roots,
+            compileReachableOnly ? compilationSources : null);
 
         var scope = new VariableScope();
         var relevantTrees = topLevelStatements.Select(statement => statement.SyntaxTree)
@@ -152,7 +151,13 @@ public sealed partial class SharpSqlCompiler
             (compileReachableOnly ? compilationSources : commentRoots.Cast<SyntaxNode>())
                 .Where(source => !IsGeneratedSource(source.SyntaxTree.GetCompilationUnitRoot()))
                 .SelectMany(source => ToIrSource(source).DescendantComments)
-                .ToArray());
+                .ToArray())
+        {
+            HeapTypes = heapTypeDefinitions
+        };
+        PrepareHeapRuntime(_boundProgram);
+        _methodGraph = MethodGraph.Create(_boundProgram.Methods, _boundProgram.EntryPoint);
+        PrepareVmMethods();
 
         foreach (var root in commentRoots)
             EmitFileHeaderComments(root);
@@ -193,9 +198,12 @@ public sealed partial class SharpSqlCompiler
         _used = true;
         _options = options ?? new TranspileOptions();
         foreach (var method in program.Methods)
-            _methods.TryAdd(method.Name, method);
+            _methods.TryAdd(method, out _);
         AnalyzeMethodBehaviors();
         _boundProgram = program with { Methods = _methods.Values.ToArray() };
+        PrepareHeapRuntime(_boundProgram);
+        _methodGraph = MethodGraph.Create(_boundProgram.Methods, _boundProgram.EntryPoint);
+        PrepareVmMethods();
 
         EmitIrComments(program.FileComments);
         if (_options.EmitNoCount)
@@ -205,7 +213,11 @@ public sealed partial class SharpSqlCompiler
         }
 
         var scope = new VariableScope();
+        EmitVmPreamble();
+        EmitHeapPreamble();
         EmitProceduralStatementSequence(program.EntryPoint.Statements, scope, null, null, null);
+        EmitVmEpilogue();
+        EmitHeapEpilogue();
         return new TranspileResult(_sql.ToString(), _diagnostics.AsReadOnly());
     }
 
@@ -352,6 +364,13 @@ public sealed partial class SharpSqlCompiler
     {
         var reachable = new HashSet<SyntaxNode>(ReferenceEqualityComparer.Instance);
         var pending = new Queue<SyntaxNode>();
+        var dispatchCandidates = _compilation!.SyntaxTrees
+            .SelectMany(tree => tree.GetRoot().DescendantNodes().OfType<MethodDeclarationSyntax>())
+            .Select(declaration => (
+                Declaration: declaration,
+                Symbol: SemanticModelFor(declaration)?.GetDeclaredSymbol(declaration) as IMethodSymbol))
+            .Where(candidate => candidate.Symbol is not null)
+            .ToArray();
         if (selectedEntryPoint is not null)
         {
             reachable.Add(selectedEntryPoint);
@@ -382,6 +401,73 @@ public sealed partial class SharpSqlCompiler
                         continue;
                     pending.Enqueue(declaration);
                 }
+                EnqueueDispatchImplementations(method);
+            }
+
+            foreach (var creation in ObjectCreationsIn(source))
+            {
+                var constructor = SemanticModelFor(creation)?.GetSymbolInfo(creation).Symbol as IMethodSymbol;
+                EnqueueConstructor(constructor);
+                foreach (var reference in constructor?.ContainingType.DeclaringSyntaxReferences ?? [])
+                {
+                    var declaration = reference.GetSyntax();
+                    if (declaration is not TypeDeclarationSyntax ||
+                        _compilation is null ||
+                        !_compilation.SyntaxTrees.Contains(declaration.SyntaxTree) ||
+                        !reachable.Add(declaration))
+                        continue;
+                    pending.Enqueue(declaration);
+                }
+            }
+
+            if (source is ConstructorDeclarationSyntax { Initializer: not null } constructorDeclaration)
+            {
+                var constructor = SemanticModelFor(constructorDeclaration.Initializer)?
+                    .GetSymbolInfo(constructorDeclaration.Initializer).Symbol as IMethodSymbol;
+                EnqueueConstructor(constructor);
+            }
+
+            void EnqueueConstructor(IMethodSymbol? constructor)
+            {
+                foreach (var reference in constructor?.OriginalDefinition.DeclaringSyntaxReferences ?? [])
+                {
+                    var declaration = reference.GetSyntax();
+                    if (declaration is not ConstructorDeclarationSyntax ||
+                        _compilation is null ||
+                        !_compilation.SyntaxTrees.Contains(declaration.SyntaxTree) ||
+                        !reachable.Add(declaration))
+                        continue;
+                    pending.Enqueue(declaration);
+                }
+            }
+
+            void EnqueueDispatchImplementations(IMethodSymbol target)
+            {
+                if (target.IsStatic || target.MethodKind == MethodKind.DelegateInvoke ||
+                    target.ContainingType.TypeKind != TypeKind.Interface &&
+                    !target.IsVirtual && !target.IsOverride && !target.IsAbstract)
+                    return;
+
+                foreach (var candidate in dispatchCandidates)
+                {
+                    var candidateSymbol = candidate.Symbol!;
+                    var matches = target.ContainingType.TypeKind == TypeKind.Interface
+                        ? SymbolEqualityComparer.Default.Equals(
+                            candidateSymbol.ContainingType.FindImplementationForInterfaceMember(target),
+                            candidateSymbol)
+                        : OverridesOrMatches(candidateSymbol, target);
+                    if (!matches || !reachable.Add(candidate.Declaration))
+                        continue;
+                    pending.Enqueue(candidate.Declaration);
+                }
+            }
+
+            static bool OverridesOrMatches(IMethodSymbol candidate, IMethodSymbol target)
+            {
+                for (IMethodSymbol? current = candidate; current is not null; current = current.OverriddenMethod)
+                    if (SymbolEqualityComparer.Default.Equals(current.OriginalDefinition, target.OriginalDefinition))
+                        return true;
+                return false;
             }
         }
         return reachable;
@@ -390,6 +476,11 @@ public sealed partial class SharpSqlCompiler
             source.DescendantNodesAndSelf(node =>
                     ReferenceEquals(node, source) || node is not (LocalFunctionStatementSyntax or MethodDeclarationSyntax))
                 .OfType<InvocationExpressionSyntax>();
+
+        static IEnumerable<BaseObjectCreationExpressionSyntax> ObjectCreationsIn(SyntaxNode source) =>
+            source.DescendantNodesAndSelf(node =>
+                    ReferenceEquals(node, source) || node is not (LocalFunctionStatementSyntax or MethodDeclarationSyntax))
+                .OfType<BaseObjectCreationExpressionSyntax>();
     }
 
     private void CollectMethods(
@@ -401,13 +492,17 @@ public sealed partial class SharpSqlCompiler
                      .Where(reachableMethods.Contains))
         {
             var scope = new VariableScope();
+            var localSymbol = SemanticModelFor(local)?.GetDeclaredSymbol(local) as IMethodSymbol;
             AddMethod(new MethodDefinition(
                 local.Identifier.ValueText,
                 CSharpTypeFactory.From(local.ReturnType),
                 local.ParameterList.Parameters.Select(ToParameter).ToArray(),
                 local.Body is null ? null : (ProceduralBlock)BindProceduralStatement(local.Body, scope),
                 local.ExpressionBody is null ? null : BindIrExpression(local.ExpressionBody.Expression, scope),
-                ToIrSource(local)));
+                ToIrSource(local))
+            {
+                Id = MethodIdentity(localSymbol)
+            });
         }
 
         foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>()
@@ -418,6 +513,7 @@ public sealed partial class SharpSqlCompiler
 
             var containingType = method.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
             var isInstance = containingType is not null && !method.Modifiers.Any(SyntaxKind.StaticKeyword);
+            var methodSymbol = SemanticModelFor(method)?.GetDeclaredSymbol(method) as IMethodSymbol;
             var scope = new VariableScope();
             var parameters = method.ParameterList.Parameters.Select(ToParameter).ToList();
             if (isInstance)
@@ -434,15 +530,24 @@ public sealed partial class SharpSqlCompiler
                 method.ExpressionBody is null ? null : BindIrExpression(method.ExpressionBody.Expression, scope),
                 ToIrSource(method),
                 containingType?.Identifier.ValueText,
-                isInstance));
+                isInstance)
+            {
+                Id = MethodIdentity(methodSymbol),
+                IsAbstract = methodSymbol?.IsAbstract == true,
+                IsVirtual = methodSymbol?.IsVirtual == true,
+                IsOverride = methodSymbol?.IsOverride == true,
+                IsSealed = methodSymbol?.IsSealed == true,
+                OverriddenMethodId = MethodIdentity(methodSymbol?.OverriddenMethod),
+                ImplementedInterfaceMethodIds = InterfaceMethodIdentities(methodSymbol)
+            });
         }
     }
 
     private void AddMethod(MethodDefinition method)
     {
         method = method with { Flow = AnalyzeMethodFlow(method) };
-        if (!_methods.TryAdd(method.Name, method))
-            AddDiagnostic("SS1001", $"Method overloads are not supported yet: '{method.Name}'.", method.Source);
+        if (!_methods.TryAdd(method, out _))
+            AddDiagnostic("SS1001", $"Duplicate method identity is not supported: '{method.Name}'.", method.Source);
     }
 
     private MethodFlowSummary AnalyzeMethodFlow(MethodDefinition method)
@@ -451,27 +556,15 @@ public sealed partial class SharpSqlCompiler
         {
             return new MethodFlowSummary(
                 EndPointIsReachable: method.ReturnType.Name == "void",
-                ContainsReturn: method.ReturnType.Name != "void",
-                StatementCount: 1,
-                ReadVariables: new HashSet<string>(StringComparer.Ordinal),
-                WrittenVariables: new HashSet<string>(StringComparer.Ordinal),
-                CapturedVariables: new HashSet<string>(StringComparer.Ordinal));
+                StatementCount: 1);
         }
 
         var body = CSharpSyntax<BlockSyntax>(method.Body.Source);
         var semanticModel = SemanticModelFor(body);
         var controlFlow = semanticModel?.AnalyzeControlFlow(body);
-        var dataFlow = semanticModel?.AnalyzeDataFlow(body);
         return new MethodFlowSummary(
             controlFlow is { Succeeded: true, EndPointIsReachable: true },
-            body.DescendantNodes().OfType<ReturnStatementSyntax>().Any(),
-            body.DescendantNodes().OfType<StatementSyntax>().Count(),
-            SymbolNames(dataFlow?.ReadInside ?? []),
-            SymbolNames(dataFlow?.WrittenInside ?? []),
-            SymbolNames(dataFlow?.Captured ?? []));
-
-        static IReadOnlySet<string> SymbolNames(IEnumerable<ISymbol> symbols) =>
-            symbols.Select(symbol => symbol.Name).ToHashSet(StringComparer.Ordinal);
+            body.DescendantNodes().OfType<StatementSyntax>().Count());
     }
 
     private ParameterDefinition ToParameter(ParameterSyntax parameter) =>
@@ -479,59 +572,6 @@ public sealed partial class SharpSqlCompiler
             SemanticModelFor(parameter)?.GetDeclaredSymbol(parameter),
             parameter.Identifier.ValueText,
             parameter.Type is null ? IrType.Unknown : CSharpTypeFactory.From(parameter.Type)));
-
-    private void CountCalls(IEnumerable<SyntaxNode> sources)
-    {
-        foreach (var call in sources.SelectMany(source =>
-                     source.DescendantNodesAndSelf(node =>
-                             ReferenceEquals(node, source) || node is not (LocalFunctionStatementSyntax or MethodDeclarationSyntax))
-                         .OfType<InvocationExpressionSyntax>()))
-        {
-            var name = InvocationName(call.Expression);
-            if (name is not null)
-                _callCounts[name] = _callCounts.GetValueOrDefault(name) + 1;
-        }
-    }
-
-    private void FindRecursion()
-    {
-        var graph = _methods.Values.ToDictionary(
-            method => method.Name,
-            method => CSharpSyntax<SyntaxNode>(method.Source).DescendantNodes().OfType<InvocationExpressionSyntax>()
-                .Select(call => InvocationName(call.Expression))
-                .Where(name => name is not null && _methods.ContainsKey(name))
-                .Cast<string>()
-                .ToHashSet(StringComparer.Ordinal),
-            StringComparer.Ordinal);
-
-        foreach (var method in _methods.Keys)
-            Visit(method, method, []);
-
-        void Visit(string origin, string current, HashSet<string> path)
-        {
-            if (!path.Add(current))
-            {
-                if (current == origin)
-                    foreach (var item in path)
-                        _recursiveMethods.Add(item);
-                return;
-            }
-
-            foreach (var next in graph[current])
-                Visit(origin, next, new HashSet<string>(path, StringComparer.Ordinal));
-        }
-    }
-
-    private void EmitStatementSequence(
-        IEnumerable<StatementSyntax> statements,
-        VariableScope scope,
-        InlineReturn? inlineReturn,
-        LoopContext? loop,
-        string? namePrefix)
-    {
-        foreach (var statement in statements)
-            EmitStatement(BindProceduralStatement(statement, scope), scope, inlineReturn, loop, namePrefix);
-    }
 
     private void EmitStatement(
         ProceduralStatement statement,
@@ -625,6 +665,14 @@ public sealed partial class SharpSqlCompiler
             var type = variable.DeclaredType;
             var sqlName = _names.Allocate(namePrefix is null ? sourceName : $"{namePrefix}_{sourceName}");
 
+            if (variable.Initializer is not null &&
+                TryEmitLinqDelegateDeclaration(variable.Initializer, sourceName, type, scope))
+                continue;
+
+            if (variable.Initializer is not null &&
+                TryEmitLinqQueryDeclaration(variable.Initializer, sourceName, sqlName, type, scope))
+                continue;
+
             if (variable.Initializer is not null && HasCSharpSource(variable.Initializer.Source) &&
                 TryEmitLinqDelegateDeclaration(CSharpExpression(variable.Initializer), sourceName, sqlName, type, scope))
                 continue;
@@ -639,18 +687,17 @@ public sealed partial class SharpSqlCompiler
                 EmitVmExpression(
                     variable.Initializer,
                     scope,
-                    null,
+                    _proceduralVmContext,
                     value => _sql.Line($"SET {sqlName} = {value};"));
-                scope.Add(variable.Symbol, new VariableBinding(sqlName, type));
+                scope.Add(variable.Symbol, new ScalarVariableBinding(sqlName, type));
                 continue;
             }
 
-            if (variable.Initializer is not null && HasCSharpSource(variable.Initializer.Source) &&
-                CSharpExpression(variable.Initializer) is InvocationExpressionSyntax invocation &&
+            if (variable.Initializer is IrInvocationExpression invocation &&
                 TryGetComplexMethod(invocation, out var method))
             {
                 EmitComplexInline(method, InvocationArgumentExpressions(invocation, method), scope, sqlName, type, declareTarget: true);
-                scope.Add(variable.Symbol, new VariableBinding(sqlName, type));
+                scope.Add(variable.Symbol, new ScalarVariableBinding(sqlName, type));
                 continue;
             }
 
@@ -658,92 +705,8 @@ public sealed partial class SharpSqlCompiler
                 ? string.Empty
                 : $" = {EmitScalar(variable.Initializer, scope)}";
             _sql.Line($"DECLARE {sqlName} {type.SqlType()}{initializer};");
-            scope.Add(variable.Symbol, new VariableBinding(sqlName, type));
+            scope.Add(variable.Symbol, new ScalarVariableBinding(sqlName, type));
         }
-    }
-
-    private void EmitExpressionStatement(
-        ExpressionSyntax expression,
-        VariableScope scope,
-        InlineReturn? inlineReturn,
-        string? namePrefix)
-    {
-        if (TryEmitHeapStatement(expression, scope))
-            return;
-
-        if (expression is AssignmentExpressionSyntax vmAssignment && ContainsRuntimeExpression(vmAssignment.Right))
-        {
-            var target = EmitAssignable(vmAssignment.Left, scope);
-            EmitVmExpression(
-                vmAssignment.Right,
-                scope,
-                null,
-                value => _sql.Line(VmAssignmentLine(
-                    vmAssignment,
-                    target,
-                    InferType(vmAssignment.Left, scope),
-                    value)));
-            return;
-        }
-
-        if (expression is AssignmentExpressionSyntax
-            {
-                RawKind: (int)SyntaxKind.SimpleAssignmentExpression,
-                Right: InvocationExpressionSyntax assignedCall
-            } assignment && TryGetComplexMethod(assignedCall, out var assignedMethod))
-        {
-            EmitComplexInline(
-                assignedMethod,
-                InvocationArgumentExpressions(assignedCall, assignedMethod),
-                scope,
-                EmitAssignable(assignment.Left, scope),
-                InferType(assignment.Left, scope),
-                declareTarget: false);
-            return;
-        }
-
-        if (expression is InvocationExpressionSyntax invocation)
-        {
-            if (IsConsoleWrite(invocation))
-            {
-                var value = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
-                var valueType = value is null ? IrType.String : InferType(value, scope);
-                if (value is not null && ContainsRuntimeExpression(value))
-                    EmitVmExpression(value, scope, null, sql => EmitPrintSql(FormatTextValue(valueType, sql)));
-                else
-                    EmitPrintSql(value is null ? "N''" : FormatTextValue(valueType, EmitScalar(value, scope)));
-                return;
-            }
-
-            if (ContainsRuntimeExpression(invocation))
-            {
-                EmitVmExpression(invocation, scope, null, _ => { });
-                return;
-            }
-
-            if (TryGetComplexMethod(invocation, out var method))
-            {
-                EmitComplexInline(method, InvocationArgumentExpressions(invocation, method), scope, null, method.ReturnType, declareTarget: false);
-                return;
-            }
-
-            if (_methods.TryGetValue(InvocationName(invocation.Expression) ?? string.Empty, out var discardedMethod))
-            {
-                if (discardedMethod.Behavior.IsSideEffectFree &&
-                    InvocationInputsAreDiscardable(invocation))
-                    return;
-
-                if (discardedMethod.ReturnType.Name != "void" && discardedMethod.PureExpression is not null)
-                {
-                    var discarded = _names.Allocate("_discarded");
-                    _sql.Line($"DECLARE {discarded} {discardedMethod.ReturnType.SqlType()} = {EmitScalar(invocation, scope)};");
-                    return;
-                }
-            }
-        }
-
-        foreach (var line in MutationLines(expression, scope))
-            _sql.Line(line);
     }
 
     private void EmitIf(
@@ -757,7 +720,7 @@ public sealed partial class SharpSqlCompiler
             EmitVmExpression(
                 statement.Condition,
                 scope,
-                null,
+                _proceduralVmContext,
                 condition => EmitBody(VmPredicate(condition, statement.Condition)));
         else
             EmitBody(EmitPredicate(statement.Condition, scope));
@@ -788,7 +751,7 @@ public sealed partial class SharpSqlCompiler
             EmitVmExpression(
                 statement.Condition,
                 scope,
-                null,
+                _proceduralVmContext,
                 condition => EmitBody(VmPredicate(condition, statement.Condition)));
         else
             EmitBody(EmitPredicate(statement.Condition, scope));
@@ -829,7 +792,7 @@ public sealed partial class SharpSqlCompiler
             EmitVmExpression(
                 statement.Condition,
                 scope,
-                null,
+                _proceduralVmContext,
                 condition => EmitCondition(VmPredicate(condition, statement.Condition)));
         else
             EmitCondition(EmitPredicate(statement.Condition, scope));
@@ -861,7 +824,7 @@ public sealed partial class SharpSqlCompiler
             EmitVmExpression(
                 statement.Condition,
                 scope,
-                null,
+                _proceduralVmContext,
                 condition => EmitBody(VmPredicate(condition, statement.Condition)));
         else
             EmitBody(statement.Condition is null ? "1 = 1" : EmitPredicate(statement.Condition, scope));
@@ -916,7 +879,7 @@ public sealed partial class SharpSqlCompiler
             return;
         }
 
-        EmitVmExpression(statement.SourceExpression, parentScope, null, collectionValue =>
+        EmitVmExpression(statement.SourceExpression, parentScope, _proceduralVmContext, collectionValue =>
         {
             var scope = parentScope.Child();
             var collectionSql = _names.Allocate("_foreach_collection");
@@ -930,7 +893,7 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"DECLARE {collectionSql} INT = {collectionValue};");
             _sql.Line($"DECLARE {indexSql} INT = 0;");
             _sql.Line($"DECLARE {itemSql} {itemType.SqlType()};");
-            scope.Add(statement.Element, new VariableBinding(itemSql, itemType));
+            scope.Add(statement.Element, new ScalarVariableBinding(itemSql, itemType));
             EmitLabel(conditionLabel);
             _sql.Line($"IF {indexSql} >= {SequenceCountSql(collectionSql)} GOTO {breakLabel};");
             _sql.Line($"SET {itemSql} = {SequenceElementSql(collectionSql, indexSql, itemType)};");
@@ -975,70 +938,9 @@ public sealed partial class SharpSqlCompiler
             EmitStatement(statement, scope, inlineReturn, loop, namePrefix);
     }
 
-    private IEnumerable<string> MutationLines(ExpressionSyntax expression, VariableScope scope)
-    {
-        switch (expression)
-        {
-            case AssignmentExpressionSyntax assignment:
-                {
-                    var target = EmitAssignable(assignment.Left, scope);
-                    if (assignment.Right is InvocationExpressionSyntax invocation &&
-                        TryGetComplexMethod(invocation, out _))
-                    {
-                        AddDiagnostic("SS2004", "Complex inline calls on assignment are not supported yet; initialize a new variable instead.", assignment);
-                        return [];
-                    }
-
-                    var value = EmitScalar(assignment.Right, scope);
-                    if (assignment.Kind() == SyntaxKind.SimpleAssignmentExpression)
-                        return [$"SET {target} = {value};"];
-
-                    var op = assignment.Kind() switch
-                    {
-                        SyntaxKind.AddAssignmentExpression => "+",
-                        SyntaxKind.SubtractAssignmentExpression => "-",
-                        SyntaxKind.MultiplyAssignmentExpression => "*",
-                        SyntaxKind.DivideAssignmentExpression => "/",
-                        SyntaxKind.ModuloAssignmentExpression => "%",
-                        SyntaxKind.AndAssignmentExpression => "&",
-                        SyntaxKind.OrAssignmentExpression => "|",
-                        SyntaxKind.ExclusiveOrAssignmentExpression => "^",
-                        _ => null
-                    };
-                    if (op is null)
-                    {
-                        Unsupported(assignment, "assignment operator");
-                        return [];
-                    }
-
-                    var targetType = InferType(assignment.Left, scope);
-                    return targetType.IsString && op == "+"
-                        ? [$"SET {target} = CONCAT({target}, {value});"]
-                        : [$"SET {target} = {target} {op} {value};"];
-                }
-            case PostfixUnaryExpressionSyntax postfix when
-                postfix.Kind() is SyntaxKind.PostIncrementExpression or SyntaxKind.PostDecrementExpression:
-                {
-                    var target = EmitAssignable(postfix.Operand, scope);
-                    var op = postfix.Kind() == SyntaxKind.PostIncrementExpression ? "+" : "-";
-                    return [$"SET {target} = {target} {op} 1;"];
-                }
-            case PrefixUnaryExpressionSyntax prefix when
-                prefix.Kind() is SyntaxKind.PreIncrementExpression or SyntaxKind.PreDecrementExpression:
-                {
-                    var target = EmitAssignable(prefix.Operand, scope);
-                    var op = prefix.Kind() == SyntaxKind.PreIncrementExpression ? "+" : "-";
-                    return [$"SET {target} = {target} {op} 1;"];
-                }
-            default:
-                Unsupported(expression, "expression statement");
-                return [];
-        }
-    }
-
     private void EmitComplexInline(
         MethodDefinition method,
-        IReadOnlyList<ExpressionSyntax> arguments,
+        IReadOnlyList<IrExpression> arguments,
         VariableScope callerScope,
         string? targetSql,
         IrType targetType,
@@ -1059,7 +961,7 @@ public sealed partial class SharpSqlCompiler
             var parameterSql = _names.Allocate($"{prefix}_{parameter.Name}");
             var argumentSql = EmitScalar(arguments[index], callerScope);
             _sql.Line($"DECLARE {parameterSql} {parameter.Type.SqlType()} = {argumentSql};");
-            methodScope.Add(parameter.Symbol, new VariableBinding(parameterSql, parameter.Type));
+            methodScope.Add(parameter.Symbol, new ScalarVariableBinding(parameterSql, parameter.Type));
         }
 
         if (targetSql is not null && declareTarget)
@@ -1098,14 +1000,13 @@ public sealed partial class SharpSqlCompiler
             return false;
         }
 
-        if (_recursiveMethods.Contains(method.Name))
+        if (_methodGraph?.RecursiveMethodIds.Contains(method.Id) == true)
         {
             AddDiagnostic("SS3002", $"Recursive method '{method.Name}' needs the planned temporary-procedure fallback.", method.Source);
             return false;
         }
 
-        if (method.StatementCount > _options.MaxInlineStatements ||
-            _callCounts.GetValueOrDefault(method.Name) > _options.MaxInlineCallSites)
+        if (ExceedsInlineBudget(method))
         {
             AddDiagnostic("SS3003", $"Method '{method.Name}' exceeds the configured inlining budget.", method.Source);
             return false;
@@ -1114,10 +1015,10 @@ public sealed partial class SharpSqlCompiler
         return true;
     }
 
-    private bool TryGetComplexMethod(InvocationExpressionSyntax invocation, out MethodDefinition method)
+    private bool TryGetComplexMethod(IrInvocationExpression invocation, out MethodDefinition method)
     {
-        var name = InvocationName(invocation.Expression);
-        if (name is not null && _methods.TryGetValue(name, out method!) && method.PureExpression is null)
+        if (!TryGetRuntimeDispatch(invocation, out _) &&
+            TryGetMethod(invocation, out method!) && method.PureExpression is null)
             return true;
         method = null!;
         return false;
@@ -1147,7 +1048,7 @@ public sealed partial class SharpSqlCompiler
         {
             LiteralExpressionSyntax literal => SqlScalarExpression.Primary(EmitLiteral(literal)),
             IdentifierNameSyntax identifier => EmitIdentifierExpression(identifier, scope, substitutions),
-            ThisExpressionSyntax => EmitThisExpression(scope, substitutions),
+            ThisExpressionSyntax or BaseExpressionSyntax => EmitThisExpression(scope, substitutions),
             BinaryExpressionSyntax binary => EmitBinaryScalar(binary, scope, substitutions),
             PrefixUnaryExpressionSyntax prefix => EmitPrefixScalar(prefix, scope, substitutions),
             CastExpressionSyntax cast => EmitScalarExpression(
@@ -1263,8 +1164,7 @@ public sealed partial class SharpSqlCompiler
         if (substitutions is null && TryEmitHeapInvocationScalar(invocation, scope, out var heapExpression))
             return heapExpression;
 
-        var name = InvocationName(invocation.Expression);
-        if (name is null || !_methods.TryGetValue(name, out var method))
+        if (!TryGetMethod(invocation, out var method))
             return SqlScalarExpression.Primary(
                 UnsupportedExpression(invocation, "Only user-defined methods and Console.WriteLine are supported."));
         if (method.PureExpression is null)
@@ -1327,6 +1227,28 @@ public sealed partial class SharpSqlCompiler
         return arguments;
     }
 
+    private static IReadOnlyList<IrExpression> InvocationArgumentExpressions(
+        IrInvocationExpression invocation,
+        MethodDefinition method)
+    {
+        var arguments = new List<IrExpression>();
+        if (method.IsInstance)
+        {
+            arguments.Add(invocation.Target is IrMemberExpression member
+                ? member.Receiver
+                : new IrThisExpression(
+                    invocation.Source,
+                    new ExpressionFacts(
+                        method.Parameters[0].Type,
+                        ScalarNullability.MaybeNull,
+                        HasConstantValue: false,
+                        ConstantValue: null),
+                    method.Parameters[0].Symbol));
+        }
+        arguments.AddRange(invocation.Arguments);
+        return arguments;
+    }
+
     private SqlScalarExpression EmitInterpolatedString(
         InterpolatedStringExpressionSyntax interpolated,
         VariableScope scope,
@@ -1385,12 +1307,6 @@ public sealed partial class SharpSqlCompiler
         return FormatTextValue(InferType(interpolation.Expression, scope, substitutions), value);
     }
 
-    private string EmitAssignable(ExpressionSyntax expression, VariableScope scope) => expression switch
-    {
-        IdentifierNameSyntax identifier when scope.Find(identifier.Identifier.ValueText) is { } binding => binding.SqlName,
-        _ => UnsupportedExpression(expression, "Only local variables can be assigned.")
-    };
-
     private string EmitIdentifier(
         IdentifierNameSyntax identifier,
         VariableScope scope,
@@ -1405,7 +1321,7 @@ public sealed partial class SharpSqlCompiler
         var name = identifier.Identifier.ValueText;
         if (substitutions is not null && substitutions.TryGetValue(name, out var replacement))
             return replacement.Expression;
-        if (scope.Find(name) is { } binding)
+        if (scope.Find(name) is ScalarVariableBinding binding)
             return binding.Scalar;
         if (TryEmitImplicitHeapField(identifier, scope, substitutions, out var heapField))
             return heapField;
@@ -1419,7 +1335,7 @@ public sealed partial class SharpSqlCompiler
     {
         if (substitutions is not null && substitutions.TryGetValue("this", out var replacement))
             return replacement.Expression;
-        return scope.Find("this") is { } binding
+        return scope.Find("this") is ScalarVariableBinding binding
             ? binding.Scalar
             : SqlScalarExpression.Primary("NULL");
     }
@@ -1506,7 +1422,7 @@ public sealed partial class SharpSqlCompiler
             LiteralExpressionSyntax => IrType.Int,
             IdentifierNameSyntax identifier when substitutions is not null && substitutions.TryGetValue(identifier.Identifier.ValueText, out var value) => value.Type,
             IdentifierNameSyntax identifier => scope.Find(identifier.Identifier.ValueText)?.Type ?? IrType.Unknown,
-            ThisExpressionSyntax => scope.Find("this")?.Type ?? IrType.Unknown,
+            ThisExpressionSyntax or BaseExpressionSyntax => scope.Find("this")?.Type ?? IrType.Unknown,
             BinaryExpressionSyntax binary when IsPredicateShape(binary) => IrType.Bool,
             BinaryExpressionSyntax binary when binary.IsKind(SyntaxKind.AddExpression) &&
                 (InferType(binary.Left, scope, substitutions).IsString || InferType(binary.Right, scope, substitutions).IsString) => IrType.String,
@@ -1525,7 +1441,7 @@ public sealed partial class SharpSqlCompiler
                   member.Name.Identifier.ValueText is "ContainsKey" or "ContainsValue") ||
                  (IsListType(InferType(member.Expression, scope, substitutions).Name) &&
                   member.Name.Identifier.ValueText == "Contains")) => IrType.Bool,
-            InvocationExpressionSyntax invocation when _methods.TryGetValue(InvocationName(invocation.Expression) ?? string.Empty, out var method) => method.ReturnType,
+            InvocationExpressionSyntax invocation when TryGetMethod(invocation, out var method) => method.ReturnType,
             _ => IrType.Unknown
         };
     }
@@ -1571,13 +1487,6 @@ public sealed partial class SharpSqlCompiler
             _diagnostics.Add(diagnostic);
     }
 
-    private static bool IsConsoleWrite(InvocationExpressionSyntax invocation) =>
-        invocation.Expression is MemberAccessExpressionSyntax
-        {
-            Expression: IdentifierNameSyntax { Identifier.ValueText: "Console" },
-            Name.Identifier.ValueText: "WriteLine" or "Write"
-        };
-
     private static string? InvocationName(ExpressionSyntax expression) => expression switch
     {
         IdentifierNameSyntax identifier => identifier.Identifier.ValueText,
@@ -1585,6 +1494,21 @@ public sealed partial class SharpSqlCompiler
         MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText,
         _ => null
     };
+
+    private bool TryGetMethod(IrInvocationExpression invocation, out MethodDefinition method) =>
+        _methods.TryResolve(invocation, out method);
+
+    private bool TryGetMethod(InvocationExpressionSyntax invocation, out MethodDefinition method)
+    {
+        var symbol = SemanticModelFor(invocation)?.GetSymbolInfo(invocation).Symbol as IMethodSymbol;
+        if (symbol is not null)
+            return _methods.TryGetValue(MethodIdentity(symbol), out method);
+        var name = InvocationName(invocation.Expression);
+        if (name is not null && _methods.TryGetValue(name, out method))
+            return true;
+        method = null!;
+        return false;
+    }
 
     private bool InvocationInputsAreDiscardable(InvocationExpressionSyntax invocation)
     {
@@ -1594,12 +1518,39 @@ public sealed partial class SharpSqlCompiler
         return invocation.ArgumentList.Arguments.All(argument => ExpressionIsDiscardable(argument.Expression));
     }
 
+    private bool InvocationInputsAreDiscardable(IrInvocationExpression invocation)
+    {
+        if (invocation.Target is IrMemberExpression member && !ExpressionIsDiscardable(member.Receiver))
+            return false;
+        return invocation.Arguments.All(ExpressionIsDiscardable);
+    }
+
+    private bool ExpressionIsDiscardable(IrExpression expression) => expression switch
+    {
+        IrConstantExpression or IrVariableExpression or IrThisExpression => true,
+        IrConversionExpression conversion => ExpressionIsDiscardable(conversion.Operand),
+        IrUnaryExpression unary when unary.Operator is not (
+            IrUnaryOperator.PreIncrement or IrUnaryOperator.PreDecrement or
+            IrUnaryOperator.PostIncrement or IrUnaryOperator.PostDecrement) =>
+            ExpressionIsDiscardable(unary.Operand),
+        IrBinaryExpression binary when binary.Operator is not (
+            IrBinaryOperator.Divide or IrBinaryOperator.Remainder) =>
+            ExpressionIsDiscardable(binary.Left) && ExpressionIsDiscardable(binary.Right),
+        IrConditionalExpression conditional =>
+            ExpressionIsDiscardable(conditional.Condition) &&
+            ExpressionIsDiscardable(conditional.WhenTrue) &&
+            ExpressionIsDiscardable(conditional.WhenFalse),
+        IrInvocationExpression nested when TryGetMethod(nested, out var method) =>
+            method.Behavior.IsSideEffectFree && InvocationInputsAreDiscardable(nested),
+        _ => false
+    };
+
     private bool ExpressionIsDiscardable(ExpressionSyntax expression)
     {
         expression = StripParentheses(expression);
         return expression switch
         {
-            LiteralExpressionSyntax or IdentifierNameSyntax or ThisExpressionSyntax => true,
+            LiteralExpressionSyntax or IdentifierNameSyntax or ThisExpressionSyntax or BaseExpressionSyntax => true,
             CastExpressionSyntax cast => ExpressionIsDiscardable(cast.Expression),
             PrefixUnaryExpressionSyntax prefix when prefix.Kind() is not (
                 SyntaxKind.PreIncrementExpression or SyntaxKind.PreDecrementExpression) =>
@@ -1611,8 +1562,7 @@ public sealed partial class SharpSqlCompiler
                 ExpressionIsDiscardable(conditional.Condition) &&
                 ExpressionIsDiscardable(conditional.WhenTrue) &&
                 ExpressionIsDiscardable(conditional.WhenFalse),
-            InvocationExpressionSyntax nested when
-                _methods.TryGetValue(InvocationName(nested.Expression) ?? string.Empty, out var method) =>
+            InvocationExpressionSyntax nested when TryGetMethod(nested, out var method) =>
                 method.Behavior.IsSideEffectFree && InvocationInputsAreDiscardable(nested),
             _ => false
         };

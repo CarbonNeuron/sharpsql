@@ -12,5 +12,7 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="SharpSql.Tests" />
+    <InternalsVisibleTo Include="SharpSql.Cli" />
+    <InternalsVisibleTo Include="SharpSql.IntegrationTests" />
   </ItemGroup>
 </Project>

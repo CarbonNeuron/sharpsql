@@ -6,7 +6,7 @@ namespace SharpSql;
 
 public sealed partial class SharpSqlCompiler
 {
-    private readonly Dictionary<string, VmMethod> _vmMethods = new(StringComparer.Ordinal);
+    private readonly Dictionary<IrMethodId, VmMethod> _vmMethods = [];
     private readonly List<VmContinuation> _vmContinuations = [];
     private int _nextVmMethodId;
     private int _nextVmContinuationId;
@@ -17,55 +17,38 @@ public sealed partial class SharpSqlCompiler
     private const string VmNewFrameId = "@__sharpsql_new_frame_id";
     private const string VmCallerFrameId = "@__sharpsql_caller_frame_id";
     private const string VmJump = "@__sharpsql_jump";
+    private const string VmFunctionId = "@__sharpsql_function_id";
     private const string VmResult = "@__sharpsql_result";
     private const string VmTextResult = "@__sharpsql_text_result";
     private const string VmBinaryResult = "@__sharpsql_binary_result";
 
     private string VmDispatchLabel => "__sharpsql_dispatch";
+    private string VmFunctionDispatchLabel => "__sharpsql_function_dispatch";
     private string VmHaltLabel => "__sharpsql_halt";
 
     private void PrepareVmMethods()
     {
-        var selected = _methods.Values
-            .Where(method => _recursiveMethods.Contains(method.Name) || ExceedsInlineBudget(method) || MethodUsesRandom(method))
-            .Select(method => method.Name)
-            .ToHashSet(StringComparer.Ordinal);
+        PrepareRuntimeDispatch();
+        var graph = _methodGraph ?? throw new InvalidOperationException("Method graph has not been prepared.");
+        var roots = _methods.Values
+            .Where(method => graph.RecursiveMethodIds.Contains(method.Id) || ExceedsInlineBudget(method) || MethodUsesRandom(method))
+            .Select(method => method.Id)
+            .ToHashSet();
+        var dispatchMethods = _runtimeDispatchSlots.Values
+            .SelectMany(slot => slot.Targets.Select(target => target.Method.Id).Append(slot.Method.Id))
+            .ToHashSet();
+        roots.UnionWith(graph.ConnectedClosure(dispatchMethods)
+            .Where(id => _methods.TryGetValue(id, out var method) &&
+                !method.IsAbstract && (method.Body is not null || method.ExpressionBody is not null)));
 
-        // A method which calls, or is called by, an outlined method must share the same
-        // backend so calls never disappear into the scalar-expression emitter.
-        var changed = true;
-        while (changed)
-        {
-            changed = false;
-            foreach (var method in _methods.Values)
-            {
-                var callees = MethodCallees(method).ToArray();
-                if (selected.Contains(method.Name))
-                {
-                    foreach (var callee in callees)
-                        changed |= selected.Add(callee);
-                }
-                else if (callees.Any(selected.Contains))
-                {
-                    changed |= selected.Add(method.Name);
-                }
-            }
-        }
-
-        foreach (var method in _methods.Values.Where(method => selected.Contains(method.Name)))
+        foreach (var method in _methods.Values.Where(method => roots.Contains(method.Id)))
             AddVmMethod(method);
     }
 
     private bool ExceedsInlineBudget(MethodDefinition method) =>
         method.StatementCount > _options.MaxInlineStatements ||
-        _callCounts.GetValueOrDefault(method.Name) > _options.MaxInlineCallSites;
-
-    private IEnumerable<string> MethodCallees(MethodDefinition method) =>
-        CSharpSyntax<Microsoft.CodeAnalysis.SyntaxNode>(method.Source).DescendantNodes()
-            .OfType<InvocationExpressionSyntax>()
-            .Select(call => InvocationName(call.Expression))
-            .Where(name => name is not null && _methods.ContainsKey(name))
-            .Cast<string>();
+        (long)Math.Max(1, method.StatementCount) * (_methodGraph?.CallSiteCount(method.Id) ?? 0) >
+        (long)_options.MaxInlineStatements * _options.MaxInlineCallSites;
 
     private void AddVmMethod(MethodDefinition definition)
     {
@@ -107,7 +90,7 @@ public sealed partial class SharpSqlCompiler
         }
 
         method.NextTemporarySlot = slot;
-        _vmMethods.Add(definition.Name, method);
+        _vmMethods.Add(definition.Id, method);
     }
 
     private void AddVmVariable(VmMethod method, IrSymbol symbol, int slot)
@@ -117,7 +100,7 @@ public sealed partial class SharpSqlCompiler
         var sqlName = _names.Allocate($"_vm_{method.Definition.Name}_{name}");
         var variable = new VmVariable(name, type, slot, sqlName);
         method.Variables.Add(name, variable);
-        method.Scope.Add(symbol, new VariableBinding(sqlName, type));
+        method.Scope.Add(symbol, new ScalarVariableBinding(sqlName, type));
     }
 
     private static IEnumerable<ProceduralStatement> DescendantStatements(ProceduralStatement statement)
@@ -188,6 +171,7 @@ public sealed partial class SharpSqlCompiler
         _sql.Line($"DECLARE {VmNewFrameId} INT;");
         _sql.Line($"DECLARE {VmCallerFrameId} INT;");
         _sql.Line($"DECLARE {VmJump} INT;");
+        _sql.Line($"DECLARE {VmFunctionId} INT;");
         _sql.Line($"DECLARE {VmResult} SQL_VARIANT;");
         _sql.Line($"DECLARE {VmTextResult} NVARCHAR(MAX);");
         _sql.Line($"DECLARE {VmBinaryResult} VARBINARY(MAX);");
@@ -208,6 +192,13 @@ public sealed partial class SharpSqlCompiler
         foreach (var method in _vmMethods.Values)
             EmitVmMethod(method);
 
+        EmitLabel(VmFunctionDispatchLabel);
+        _sql.Line($"SELECT {VmFunctionId} = __function_id FROM {VmStack} WHERE __id = {VmFrameId};");
+        foreach (var method in _vmMethods.Values)
+            _sql.Line($"IF {VmFunctionId} = {method.Id} GOTO {method.EntryLabel};");
+        _sql.Line("THROW 51007, 'Virtual dispatch target was not found.', 1;");
+        _sql.Line();
+
         EmitLabel(VmDispatchLabel);
         foreach (var continuation in _vmContinuations)
             _sql.Line($"IF {VmJump} = {continuation.Id} GOTO {continuation.Label};");
@@ -221,70 +212,14 @@ public sealed partial class SharpSqlCompiler
     private bool ContainsVmCall(ExpressionSyntax expression) =>
         expression.DescendantNodesAndSelf()
             .OfType<InvocationExpressionSyntax>()
-            .Any(call => _vmMethods.ContainsKey(InvocationName(call.Expression) ?? string.Empty));
+            .Any(call => TryGetMethod(call, out var method) && _vmMethods.ContainsKey(method.Id));
 
     private void EmitVmExpression(
         ExpressionSyntax expression,
         VariableScope scope,
         VmMethod? context,
-        Action<string> continuation)
-    {
-        expression = StripParentheses(expression);
-        if (TryEmitGuardedLinqExpression(expression, scope, context, continuation))
-            return;
-        if (TryEmitHeapExpression(expression, scope, context, continuation))
-            return;
-        if (!ContainsRuntimeExpression(expression))
-        {
-            continuation(EmitScalar(expression, scope));
-            return;
-        }
-
-        switch (expression)
-        {
-            case InvocationExpressionSyntax invocation
-                when _vmMethods.TryGetValue(InvocationName(invocation.Expression) ?? string.Empty, out var callee):
-                EmitVmInvocation(invocation, callee, scope, context, continuation);
-                return;
-            case BinaryExpressionSyntax binary:
-                EmitVmBinary(binary, scope, context, continuation);
-                return;
-            case PrefixUnaryExpressionSyntax prefix:
-                EmitVmExpression(prefix.Operand, scope, context, operand =>
-                {
-                    var sql = prefix.Kind() switch
-                    {
-                        SyntaxKind.UnaryMinusExpression => $"-({operand})",
-                        SyntaxKind.UnaryPlusExpression => $"+({operand})",
-                        SyntaxKind.BitwiseNotExpression => $"~({operand})",
-                        SyntaxKind.LogicalNotExpression =>
-                            $"CASE WHEN {operand} = 1 THEN CAST(0 AS BIT) ELSE CAST(1 AS BIT) END",
-                        _ => UnsupportedExpression(prefix)
-                    };
-                    continuation(sql);
-                });
-                return;
-            case ConditionalExpressionSyntax conditional:
-                EmitVmConditional(conditional, scope, context, continuation);
-                return;
-            case ObjectCreationExpressionSyntax creation
-                when IsStringCharacterArrayCreation(creation, scope):
-                EmitVmExpression(
-                    creation.ArgumentList!.Arguments[0].Expression,
-                    scope,
-                    context,
-                    characters => continuation(StringFromCharacterArraySql(characters)));
-                return;
-            case CheckedExpressionSyntax checkedExpression:
-                EmitVmExpression(checkedExpression.Expression, scope, context, continuation);
-                return;
-            default:
-                continuation(UnsupportedExpression(
-                    expression,
-                    "This call-containing expression is not supported by the stack-machine fallback yet."));
-                return;
-        }
-    }
+        Action<string> continuation) =>
+        EmitVmExpression(BindIrExpression(expression, scope), scope, context, continuation);
 
     private void EmitVmExpression(
         IrExpression expression,
@@ -292,6 +227,24 @@ public sealed partial class SharpSqlCompiler
         VmMethod? context,
         Action<string> continuation)
     {
+        if (TryEmitGuardedLinqExpression(expression, scope, context, continuation))
+            return;
+        if (TryEmitLinqMaterialization(expression, scope, context, continuation))
+            return;
+        var preferIrRuntime = !HasCSharpSource(expression.Source) ||
+            expression is IrObjectCreationExpression or IrWithExpression ||
+            expression is IrInvocationExpression
+            {
+                Target: IrMemberExpression
+                {
+                    Receiver.Type.Name: "Random" or "System.Random",
+                    MemberName: "Next" or "NextDouble"
+                }
+            };
+        if (preferIrRuntime &&
+            TryEmitHeapExpression(expression, scope, context, continuation))
+            return;
+
         if (HasCSharpSource(expression.Source))
         {
             var syntax = CSharpExpression(expression);
@@ -299,13 +252,13 @@ public sealed partial class SharpSqlCompiler
                 return;
             if (TryEmitHeapExpression(syntax, scope, context, continuation))
                 return;
-            if (!ContainsRuntimeExpression(syntax))
+            if (!ContainsRuntimeExpression(expression))
             {
                 continuation(EmitScalar(expression, scope));
                 return;
             }
         }
-        else
+        else if (!ContainsRuntimeExpression(expression))
         {
             continuation(EmitScalar(expression, scope));
             return;
@@ -313,9 +266,16 @@ public sealed partial class SharpSqlCompiler
 
         switch (expression)
         {
-            case IrInvocationExpression invocation
-                when invocation.MethodName is { } name && _vmMethods.TryGetValue(name, out var callee):
+            case IrInvocationExpression invocation when TryGetRuntimeDispatch(invocation, out var dispatchSlot):
+                EmitVmDispatchInvocation(invocation, dispatchSlot, scope, context, continuation);
+                return;
+            case IrInvocationExpression invocation when TryGetVmMethod(invocation, out var callee):
                 EmitVmInvocation(invocation, callee, scope, context, continuation);
+                return;
+            case IrInvocationExpression invocation when
+                TryGetMethod(invocation, out var inlineMethod) &&
+                inlineMethod.PureExpression is not null:
+                EmitVmInlineInvocation(invocation, inlineMethod, scope, context, continuation);
                 return;
             case IrBinaryExpression binary:
                 EmitVmBinary(binary, scope, context, continuation);
@@ -348,11 +308,17 @@ public sealed partial class SharpSqlCompiler
                         scope,
                         receiverOverride: receiver).Sql));
                 return;
+            case IrMemberExpression member when
+                _heapTypes.TryGetValue(member.Receiver.Type.Name, out var heapType) &&
+                heapType.Fields.TryGetValue(member.MemberName, out var field):
+                EmitVmExpression(member.Receiver, scope, context, receiver =>
+                    continuation($"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE __object_id = {receiver})"));
+                return;
             case IrObjectCreationExpression
-                {
-                    CreatedType.IsString: true,
-                    Arguments: [var characters]
-                } when characters.Type.Name == "char[]":
+            {
+                CreatedType.IsString: true,
+                Arguments: [var characters]
+            } when characters.Type.Name == "char[]":
                 EmitVmExpression(characters, scope, context, value =>
                     continuation(StringFromCharacterArraySql(value)));
                 return;
@@ -362,6 +328,57 @@ public sealed partial class SharpSqlCompiler
                     "This effectful IR expression is not supported by the stack-machine backend yet."));
                 return;
         }
+    }
+
+    private void EmitVmInlineInvocation(
+        IrInvocationExpression invocation,
+        MethodDefinition method,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        var arguments = InvocationArgumentExpressions(invocation, method);
+        if (!CanInline(method, arguments.Count))
+        {
+            continuation("NULL");
+            return;
+        }
+
+        var captured = new List<VmTemporary>();
+        EvaluateArgument(0);
+
+        void EvaluateArgument(int index)
+        {
+            if (index == arguments.Count)
+            {
+                var replacements = new Dictionary<string, Substitution>(StringComparer.Ordinal);
+                for (var argumentIndex = 0; argumentIndex < captured.Count; argumentIndex++)
+                {
+                    var parameter = method.Parameters[argumentIndex];
+                    replacements[parameter.Name] = new Substitution(
+                        SqlScalarExpression.Primary(ReadVmTemporary(captured[argumentIndex]), parameter.Type));
+                }
+                continuation(EmitScalar(method.PureExpression!, scope, replacements));
+                return;
+            }
+
+            EmitVmExpression(arguments[index], scope, context, value =>
+            {
+                var storage = AllocateVmTemporary(method.Parameters[index].Type, context);
+                StoreVmTemporary(storage, value);
+                captured.Add(storage);
+                EvaluateArgument(index + 1);
+            });
+        }
+    }
+
+    private bool TryGetVmMethod(IrInvocationExpression invocation, out VmMethod method)
+    {
+        if (TryGetMethod(invocation, out var definition) &&
+            _vmMethods.TryGetValue(definition.Id, out method!))
+            return true;
+        method = null!;
+        return false;
     }
 
     private void EmitVmInterpolatedString(
@@ -565,127 +582,20 @@ public sealed partial class SharpSqlCompiler
         }
     }
 
-    private void EmitVmBinary(
-        BinaryExpressionSyntax binary,
+    private void EmitVmDispatchInvocation(
+        IrInvocationExpression invocation,
+        RuntimeDispatchSlot dispatchSlot,
         VariableScope scope,
         VmMethod? context,
         Action<string> continuation)
     {
-        if (binary.Kind() is SyntaxKind.LogicalAndExpression or SyntaxKind.LogicalOrExpression)
+        var arguments = InvocationArgumentExpressions(invocation, dispatchSlot.Method);
+        if (arguments.Count != dispatchSlot.Method.Parameters.Count)
         {
-            EmitVmShortCircuit(binary, scope, context, continuation);
-            return;
-        }
-
-        EmitVmExpression(binary.Left, scope, context, left =>
-        {
-            var type = InferType(binary.Left, scope);
-            var storage = AllocateVmTemporary(type, context);
-            StoreVmTemporary(storage, left);
-            EmitVmExpression(binary.Right, scope, context, right =>
-            {
-                var leftValue = ReadVmTemporary(storage);
-                continuation(CombineVmBinary(binary, leftValue, right, scope));
-            });
-        });
-    }
-
-    private void EmitVmShortCircuit(
-        BinaryExpressionSyntax binary,
-        VariableScope scope,
-        VmMethod? context,
-        Action<string> continuation)
-    {
-        var storage = AllocateVmTemporary(IrType.Bool, context);
-        var shortCircuitLabel = _names.AllocateLabel("vm_short_circuit");
-        var endLabel = _names.AllocateLabel("vm_short_circuit_end");
-        var isAnd = binary.IsKind(SyntaxKind.LogicalAndExpression);
-
-        EmitVmExpression(binary.Left, scope, context, left =>
-        {
-            _sql.Line(isAnd
-                ? $"IF NOT ({left} = 1) GOTO {shortCircuitLabel};"
-                : $"IF {left} = 1 GOTO {shortCircuitLabel};");
-            EmitVmExpression(binary.Right, scope, context, right =>
-            {
-                StoreVmTemporary(storage, right);
-                _sql.Line($"GOTO {endLabel};");
-            });
-            EmitLabel(shortCircuitLabel);
-            StoreVmTemporary(storage, isAnd ? "CAST(0 AS BIT)" : "CAST(1 AS BIT)");
-            EmitLabel(endLabel);
-            continuation(ReadVmTemporary(storage));
-        });
-    }
-
-    private string CombineVmBinary(
-        BinaryExpressionSyntax binary,
-        string left,
-        string right,
-        VariableScope scope)
-    {
-        if (binary.IsKind(SyntaxKind.CoalesceExpression))
-            return $"COALESCE({left}, {right})";
-        if (binary.IsKind(SyntaxKind.AddExpression) &&
-            (InferType(binary.Left, scope).IsString || InferType(binary.Right, scope).IsString))
-            return $"CONCAT({left}, {right})";
-        if (binary.IsKind(SyntaxKind.LogicalAndExpression))
-            return $"CASE WHEN {left} = 1 AND {right} = 1 THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END";
-        if (binary.IsKind(SyntaxKind.LogicalOrExpression))
-            return $"CASE WHEN {left} = 1 OR {right} = 1 THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END";
-
-        var op = SqlOperator(binary.Kind());
-        if (op.Length == 0)
-            return UnsupportedExpression(binary);
-        if (binary.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression &&
-            (binary.Left.IsKind(SyntaxKind.NullLiteralExpression) || binary.Right.IsKind(SyntaxKind.NullLiteralExpression)))
-        {
-            var operand = binary.Left.IsKind(SyntaxKind.NullLiteralExpression) ? right : left;
-            var nullOperator = binary.IsKind(SyntaxKind.EqualsExpression) ? "IS NULL" : "IS NOT NULL";
-            return $"CASE WHEN {operand} {nullOperator} THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END";
-        }
-        if (IsComparison(binary.Kind()))
-            return $"CASE WHEN {left} {op} {right} THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END";
-        return $"({left}) {op} ({right})";
-    }
-
-    private void EmitVmConditional(
-        ConditionalExpressionSyntax conditional,
-        VariableScope scope,
-        VmMethod? context,
-        Action<string> continuation)
-    {
-        var type = InferType(conditional, scope);
-        var storage = AllocateVmTemporary(type, context);
-        var falseLabel = _names.AllocateLabel("vm_conditional_false");
-        var endLabel = _names.AllocateLabel("vm_conditional_end");
-
-        EmitVmExpression(conditional.Condition, scope, context, condition =>
-        {
-            _sql.Line($"IF NOT ({condition} = 1) GOTO {falseLabel};");
-            EmitVmExpression(conditional.WhenTrue, scope, context, value =>
-            {
-                StoreVmTemporary(storage, value);
-                _sql.Line($"GOTO {endLabel};");
-            });
-            EmitLabel(falseLabel);
-            EmitVmExpression(conditional.WhenFalse, scope, context, value => StoreVmTemporary(storage, value));
-            EmitLabel(endLabel);
-            continuation(ReadVmTemporary(storage));
-        });
-    }
-
-    private void EmitVmInvocation(
-        InvocationExpressionSyntax invocation,
-        VmMethod callee,
-        VariableScope scope,
-        VmMethod? context,
-        Action<string> continuation)
-    {
-        var arguments = InvocationArgumentExpressions(invocation, callee.Definition);
-        if (arguments.Count != callee.Definition.Parameters.Count)
-        {
-            AddDiagnostic("SS3001", $"Method '{callee.Definition.Name}' expects {callee.Definition.Parameters.Count} arguments.", invocation);
+            AddDiagnostic(
+                "SS3001",
+                $"Method '{dispatchSlot.Method.Name}' expects {dispatchSlot.Method.Parameters.Count} arguments.",
+                invocation.Source);
             continuation("NULL");
             return;
         }
@@ -701,7 +611,7 @@ public sealed partial class SharpSqlCompiler
                 return;
             }
 
-            var parameterType = callee.Definition.Parameters[index].Type;
+            var parameterType = dispatchSlot.Method.Parameters[index].Type;
             EmitVmExpression(arguments[index], scope, context, value =>
             {
                 var storage = AllocateVmTemporary(parameterType, context);
@@ -713,31 +623,38 @@ public sealed partial class SharpSqlCompiler
 
         void EmitCall()
         {
+            var receiver = ReadVmTemporary(capturedArguments[0]);
+            _sql.Line($"IF {receiver} IS NULL THROW 51011, 'Object reference was null.', 1;");
+            var functionId = AllocateVmTemporary(IrType.Int, context);
+            var cases = dispatchSlot.Targets.Select(target =>
+                $"WHEN {target.RuntimeTypeId} THEN {_vmMethods[target.Method.Id].Id}");
+            StoreVmTemporary(
+                functionId,
+                $"CASE (SELECT __type_id FROM {HeapObjects} WHERE __id = {receiver}) {string.Join(" ", cases)} END");
+            var selectedFunction = ReadVmTemporary(functionId);
+            _sql.Line($"IF {selectedFunction} IS NULL THROW 51007, 'Virtual dispatch target was not found.', 1;");
+
             if (context is not null)
                 SaveVmRegisters(context);
-
-            var returnLabel = _names.AllocateLabel($"vm_return_{callee.Definition.Name}");
+            var returnLabel = _names.AllocateLabel($"vm_return_{dispatchSlot.Method.Name}");
             var returnId = ++_nextVmContinuationId;
             _vmContinuations.Add(new VmContinuation(returnId, returnLabel));
-
-            _sql.Line($"INSERT INTO {VmStack} (__function_id, __return_id, __caller_id) VALUES ({callee.Id}, {returnId}, {(context is null ? "NULL" : VmFrameId)});");
+            _sql.Line($"INSERT INTO {VmStack} (__function_id, __return_id, __caller_id) VALUES ({selectedFunction}, {returnId}, {(context is null ? "NULL" : VmFrameId)});");
             _sql.Line($"SET {VmNewFrameId} = CONVERT(INT, SCOPE_IDENTITY());");
             for (var index = 0; index < capturedArguments.Count; index++)
             {
-                var parameter = callee.Variables[callee.Definition.Parameters[index].Name];
-                InsertVmSlot(VmNewFrameId, parameter.Slot, parameter.Type, ReadVmTemporary(capturedArguments[index]));
+                var parameterType = dispatchSlot.Method.Parameters[index].Type;
+                InsertVmSlot(VmNewFrameId, index + 1, parameterType, ReadVmTemporary(capturedArguments[index]));
             }
             _sql.Line($"SET {VmFrameId} = {VmNewFrameId};");
-            _sql.Line($"GOTO {callee.EntryLabel};");
+            _sql.Line($"GOTO {VmFunctionDispatchLabel};");
             EmitLabel(returnLabel);
-
             if (context is not null)
             {
                 _sql.Line($"SET {VmFrameId} = {VmCallerFrameId};");
                 LoadVmRegisters(context);
             }
-
-            continuation(ReadVmResult(callee.Definition.ReturnType));
+            continuation(ReadVmResult(dispatchSlot.Method.ReturnType));
         }
     }
 
@@ -870,50 +787,6 @@ public sealed partial class SharpSqlCompiler
             EmitVmStatement(statement, method, loop);
     }
 
-    private void EmitVmExpressionStatement(ExpressionSyntax expression, VmMethod method)
-    {
-        if (TryEmitHeapStatement(expression, method.Scope, method))
-            return;
-
-        if (expression is AssignmentExpressionSyntax assignment &&
-            assignment.Left is IdentifierNameSyntax identifier &&
-            method.Variables.TryGetValue(identifier.Identifier.ValueText, out var target))
-        {
-            EmitVmExpression(
-                assignment.Right,
-                method.Scope,
-                method,
-                value => _sql.Line(VmAssignmentLine(assignment, target.SqlName, target.Type, value)));
-            return;
-        }
-
-        if (expression is InvocationExpressionSyntax invocation && IsConsoleWrite(invocation))
-        {
-            var argument = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
-            if (argument is null)
-                EmitPrintSql("N''");
-            else
-            {
-                var argumentType = InferType(argument, method.Scope);
-                EmitVmExpression(
-                    argument,
-                    method.Scope,
-                    method,
-                    value => EmitPrintSql(FormatTextValue(argumentType, value)));
-            }
-            return;
-        }
-
-        if (ContainsVmCall(expression))
-        {
-            EmitVmExpression(expression, method.Scope, method, _ => { });
-            return;
-        }
-
-        foreach (var line in MutationLines(expression, method.Scope))
-            _sql.Line(line);
-    }
-
     private void EmitVmExpressionStatement(IrExpression expression, VmMethod method)
     {
         if (HasCSharpSource(expression.Source) && TryEmitHeapStatement(CSharpExpression(expression), method.Scope, method))
@@ -954,44 +827,13 @@ public sealed partial class SharpSqlCompiler
             } && method.Variables.TryGetValue(variable.Symbol.Name, out var mutationTarget))
         {
             var op = expression is IrUnaryExpression
-                {
-                    Operator: IrUnaryOperator.PreIncrement or IrUnaryOperator.PostIncrement
-                } ? "+" : "-";
+            {
+                Operator: IrUnaryOperator.PreIncrement or IrUnaryOperator.PostIncrement
+            } ? "+" : "-";
             _sql.Line($"SET {mutationTarget.SqlName} = {mutationTarget.SqlName} {op} 1;");
             return;
         }
         EmitVmExpression(expression, method.Scope, method, _ => { });
-    }
-
-    private string VmAssignmentLine(
-        AssignmentExpressionSyntax assignment,
-        string target,
-        IrType targetType,
-        string value)
-    {
-        if (assignment.IsKind(SyntaxKind.SimpleAssignmentExpression))
-            return $"SET {target} = {value};";
-
-        var op = assignment.Kind() switch
-        {
-            SyntaxKind.AddAssignmentExpression => "+",
-            SyntaxKind.SubtractAssignmentExpression => "-",
-            SyntaxKind.MultiplyAssignmentExpression => "*",
-            SyntaxKind.DivideAssignmentExpression => "/",
-            SyntaxKind.ModuloAssignmentExpression => "%",
-            SyntaxKind.AndAssignmentExpression => "&",
-            SyntaxKind.OrAssignmentExpression => "|",
-            SyntaxKind.ExclusiveOrAssignmentExpression => "^",
-            _ => null
-        };
-        if (op is null)
-        {
-            Unsupported(assignment, "assignment operator");
-            return $"SET {target} = {value};";
-        }
-        if (targetType.IsString && op == "+")
-            return $"SET {target} = CONCAT({target}, {value});";
-        return $"SET {target} = {target} {op} ({value});";
     }
 
     private void EmitVmWhile(ProceduralWhile statement, VmMethod method)
@@ -1164,14 +1006,53 @@ public sealed partial class SharpSqlCompiler
 
     private void SaveVmRegisters(VmMethod method)
     {
-        foreach (var variable in method.Variables.Values)
-            StoreVmSlot(VmFrameId, variable.Slot, variable.Type, variable.SqlName);
+        if (method.Variables.Count == 0)
+            return;
+
+        var rows = method.Variables.Values.Select(variable =>
+        {
+            var scalar = variable.Type.IsString || variable.Type.Name == "byte[]"
+                ? "CONVERT(SQL_VARIANT, NULL)"
+                : $"CONVERT(SQL_VARIANT, {variable.SqlName})";
+            var text = variable.Type.IsString
+                ? variable.SqlName
+                : "CONVERT(NVARCHAR(MAX), NULL)";
+            var binary = variable.Type.Name == "byte[]"
+                ? variable.SqlName
+                : "CONVERT(VARBINARY(MAX), NULL)";
+            return $"({variable.Slot}, {scalar}, {text}, {binary})";
+        });
+        _sql.Line($"MERGE {VmSlots} AS target");
+        _sql.Line($"USING (VALUES {string.Join(", ", rows)}) AS source (__slot_id, __value, __text_value, __binary_value)");
+        _sql.Line($"ON target.__frame_id = {VmFrameId} AND target.__slot_id = source.__slot_id");
+        _sql.Line("WHEN MATCHED THEN UPDATE SET __value = source.__value, __text_value = source.__text_value, __binary_value = source.__binary_value");
+        _sql.Line($"WHEN NOT MATCHED THEN INSERT (__frame_id, __slot_id, __value, __text_value, __binary_value) VALUES ({VmFrameId}, source.__slot_id, source.__value, source.__text_value, source.__binary_value);");
     }
 
     private void LoadVmRegisters(VmMethod method)
     {
-        foreach (var variable in method.Variables.Values)
-            _sql.Line($"SET {variable.SqlName} = {ReadVmSlot(VmFrameId, variable.Slot, variable.Type)};");
+        if (method.Variables.Count == 0)
+            return;
+
+        var variables = method.Variables.Values.ToArray();
+        var assignments = variables.Select((variable, index) =>
+        {
+            var alias = $"__vm_load_{index}";
+            var value = variable.Type.IsString
+                ? $"{alias}.__text_value"
+                : variable.Type.Name == "byte[]"
+                    ? $"{alias}.__binary_value"
+                    : $"CONVERT({variable.Type.SqlType()}, {alias}.__value)";
+            return $"{variable.SqlName} = {value}";
+        });
+        _sql.Line($"SELECT {string.Join(", ", assignments)}");
+        _sql.Line("FROM (VALUES (0)) AS __vm_seed (__value)");
+        for (var index = 0; index < variables.Length; index++)
+        {
+            var variable = variables[index];
+            _sql.Line($"LEFT JOIN {VmSlots} AS __vm_load_{index} ON __vm_load_{index}.__frame_id = {VmFrameId} AND __vm_load_{index}.__slot_id = {variable.Slot}");
+        }
+        _sql.Line(";");
     }
 
     private void StoreVmSlot(string frameId, int slot, IrType type, string value)

@@ -24,9 +24,13 @@ public sealed class TestcontainersParityRunner : IParityRunner
     private const string GlobalUsings =
         "global using System; global using System.Collections.Generic; global using System.Linq;";
     private static readonly CSharpParseOptions ParseOptions = new(LanguageVersion.Preview);
-    private static readonly MetadataReference[] References =
+    private static readonly IReadOnlyDictionary<string, string> RuntimeAssemblyPaths =
         (((string?)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")) ?? string.Empty)
         .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+        .Select(path => (Name: Path.GetFileNameWithoutExtension(path)!, Path: path))
+        .GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(group => group.Key, group => group.First().Path, StringComparer.OrdinalIgnoreCase);
+    private static readonly MetadataReference[] References = RuntimeAssemblyPaths.Values
         .Select(path => MetadataReference.CreateFromFile(path))
         .ToArray();
 
@@ -239,6 +243,15 @@ public sealed class TestcontainersParityRunner : IParityRunner
             null);
     }
 
+    internal static async Task<ParityOutcome> ExecuteProjectCSharpForTestingAsync(
+        CSharpCompilation compilation,
+        string sourcePath,
+        string? requestedEntryPoint)
+    {
+        var prepared = PrepareCSharp(compilation, sourcePath, requestedEntryPoint);
+        return prepared.Failure ?? await prepared.Program!.ExecuteAsync();
+    }
+
     private static async Task<ParityOutcome> ExecuteCSharpProfileAsync(
         PreparedCSharpProgram program,
         List<TimeSpan> samples,
@@ -394,7 +407,7 @@ public sealed class TestcontainersParityRunner : IParityRunner
         catch (SqlException exception)
         {
             var error = exception.Errors.Cast<SqlError>()
-                .FirstOrDefault(item => item.Number is >= 51000 and <= 51999)
+                .FirstOrDefault(item => RuntimeErrorCatalog.IsSharpSqlRuntimeError(item.Number))
                 ?? exception.Errors.Cast<SqlError>().First();
             failure = NormalizeSqlFailure(new SqlErrorInfo(error.Number, error.Message));
         }
@@ -495,15 +508,7 @@ public sealed class TestcontainersParityRunner : IParityRunner
 
     private static ParityFailure NormalizeSqlFailure(SqlErrorInfo failure)
     {
-        var type = failure.Number switch
-        {
-            51001 => nameof(ArgumentException),
-            51002 or 51004 or 51005 or 51006 or 51009 => nameof(ArgumentOutOfRangeException),
-            51003 => nameof(IndexOutOfRangeException),
-            51007 or 51008 => nameof(InvalidOperationException),
-            51010 => nameof(KeyNotFoundException),
-            _ => nameof(SqlException)
-        };
+        var type = RuntimeErrorCatalog.ExceptionTypeName(failure.Number) ?? nameof(SqlException);
         return new ParityFailure(ParityFailureCategory.Runtime, type, failure.Message, failure.Number);
     }
 
@@ -566,6 +571,29 @@ public sealed class TestcontainersParityRunner : IParityRunner
                 AssemblyName.ReferenceMatchesDefinition(assembly.GetName(), assemblyName));
             if (loaded is not null)
                 return loaded;
+
+            // Project compilations normally reference the targeting pack under
+            // packs/Microsoft.NETCore.App.Ref. Those files are metadata-only and
+            // throw BadImageFormatException when loaded for execution. Resolve
+            // framework identities through the default runtime context first.
+            try
+            {
+                return Default.LoadFromAssemblyName(assemblyName);
+            }
+            catch (FileNotFoundException)
+            {
+                // Fall through to the compilation reference for project and
+                // package assemblies that are not part of the shared runtime.
+            }
+            catch (FileLoadException)
+            {
+                // The exact requested version may differ from the active shared
+                // framework. Its trusted-platform path is the next best match.
+            }
+
+            if (assemblyName.Name is not null &&
+                RuntimeAssemblyPaths.TryGetValue(assemblyName.Name, out var runtimePath))
+                return Default.LoadFromAssemblyPath(runtimePath);
 
             return assemblyName.Name is not null && _referencePaths.TryGetValue(assemblyName.Name, out var path)
                 ? LoadFromAssemblyPath(path)

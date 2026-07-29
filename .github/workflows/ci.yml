@@ -11,7 +11,9 @@ permissions:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    env:
+      PACKAGE_VERSION: 0.0.0-ci.${{ github.run_number }}
 
     steps:
       - name: Check out repository
@@ -37,6 +39,24 @@ jobs:
 
       - name: Test C# and SQL Server parity
         run: dotnet test SharpSql.slnx --configuration Release --no-build --logger trx --results-directory TestResults
+
+      - name: Pack Linux tool
+        run: >-
+          dotnet pack src/SharpSql.Cli/SharpSql.Cli.csproj
+          --configuration Release
+          --output artifacts/packages
+          -p:Version="$PACKAGE_VERSION"
+          -p:PackageVersion="$PACKAGE_VERSION"
+          -p:RuntimeIdentifiers=linux-x64
+
+      - name: Smoke-test packed tool
+        run: |
+          dotnet tool install SharpSql.Tool \
+            --tool-path artifacts/tool \
+            --source artifacts/packages \
+            --version "$PACKAGE_VERSION" \
+            --no-http-cache
+          test "$(artifacts/tool/sharpsql --version)" = "$PACKAGE_VERSION"
 
       - name: Upload test results
         if: always()
