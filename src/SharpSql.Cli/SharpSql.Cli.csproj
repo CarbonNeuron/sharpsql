@@ -7,7 +7,10 @@
     <Description>Command-line compiler for transpiling supported C# programs to self-contained T-SQL batches.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>csharp;sql;transpiler;compiler;roslyn;sqlserver;dotnet-tool</PackageTags>
-    <RuntimeIdentifiers>linux-x64;linux-arm64;win-x64;win-arm64;osx-x64;osx-arm64</RuntimeIdentifiers>
+    <!-- dotnet pack sets _IsPacking before its implicit restore. Keeping the
+         platform graph out of ordinary restores avoids downloading every RID's
+         runtime pack during builds and tests. -->
+    <RuntimeIdentifiers Condition="'$(_IsPacking)' == 'true'">linux-x64;linux-arm64;win-x64;win-arm64;osx-x64;osx-arm64</RuntimeIdentifiers>
     <PublishReadyToRun Condition="'$(Configuration)' == 'Release'">true</PublishReadyToRun>
   </PropertyGroup>
   <ItemGroup>

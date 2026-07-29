@@ -14,6 +14,7 @@ jobs:
     timeout-minutes: 20
     env:
       PACKAGE_VERSION: 0.0.0-ci.${{ github.run_number }}
+      NUGET_XMLDOC_MODE: skip
 
     steps:
       - name: Check out repository
@@ -26,7 +27,33 @@ jobs:
           cache: true
           cache-dependency-path: |
             **/*.csproj
+            **/*.props
+            **/*.targets
             global.json
+            .github/workflows/ci.yml
+
+      - name: Resolve SQL Server image
+        id: sql-server-image
+        run: |
+          digest="$(docker buildx imagetools inspect mcr.microsoft.com/mssql/server:2022-latest --format '{{.Manifest.Digest}}')"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Cache SQL Server image
+        id: sql-server-cache
+        uses: actions/cache@v5
+        with:
+          path: .cache/docker/mssql-server.tar
+          key: sql-server-${{ runner.os }}-${{ runner.arch }}-${{ steps.sql-server-image.outputs.digest }}
+
+      - name: Load SQL Server image
+        run: |
+          if [[ -f .cache/docker/mssql-server.tar ]]; then
+            docker load --input .cache/docker/mssql-server.tar
+          else
+            mkdir -p .cache/docker
+            docker pull mcr.microsoft.com/mssql/server:2022-latest
+            docker save --output .cache/docker/mssql-server.tar mcr.microsoft.com/mssql/server:2022-latest
+          fi
 
       - name: Restore
         run: dotnet restore SharpSql.slnx
@@ -48,6 +75,7 @@ jobs:
           -p:Version="$PACKAGE_VERSION"
           -p:PackageVersion="$PACKAGE_VERSION"
           -p:RuntimeIdentifiers=linux-x64
+          -p:PublishReadyToRun=false
 
       - name: Smoke-test packed tool
         run: |
