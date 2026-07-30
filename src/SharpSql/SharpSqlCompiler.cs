@@ -78,6 +78,7 @@ public sealed partial class SharpSqlCompiler
         bool compileReachableOnly)
     {
         _options = options ?? new TranspileOptions();
+        _ = SqlIdentifier.Validate(_options.ApplicationSchema, nameof(TranspileOptions.ApplicationSchema));
         _compilation = compilation;
         var roots = compilation.SyntaxTrees
             .Select(tree => tree.GetCompilationUnitRoot())
@@ -209,6 +210,7 @@ public sealed partial class SharpSqlCompiler
             return new SharpSqlCompiler().Transpile(program, options);
         _used = true;
         _options = options ?? new TranspileOptions();
+        _ = SqlIdentifier.Validate(_options.ApplicationSchema, nameof(TranspileOptions.ApplicationSchema));
         foreach (var method in program.Methods)
             _methods.TryAdd(method, out _);
         AnalyzeMethodBehaviors();

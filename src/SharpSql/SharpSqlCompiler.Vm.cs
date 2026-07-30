@@ -15,8 +15,10 @@ public sealed partial class SharpSqlCompiler
     private const string VmSlots = "#__sharpsql_slots";
     private const string MemoryOptimizedVmStack = "@__sharpsql_memory_stack";
     private const string MemoryOptimizedVmSlots = "@__sharpsql_memory_slots";
-    private const string MemoryOptimizedVmStackType = "[SharpSql].[MemoryVmStackV1]";
-    private const string MemoryOptimizedVmSlotsType = "[SharpSql].[MemoryVmSlotsV1]";
+    private string MemoryOptimizedVmStackType =>
+        $"{SqlIdentifier.Quote(_options.ApplicationSchema, nameof(TranspileOptions.ApplicationSchema))}.[MemoryVmStackV1]";
+    private string MemoryOptimizedVmSlotsType =>
+        $"{SqlIdentifier.Quote(_options.ApplicationSchema, nameof(TranspileOptions.ApplicationSchema))}.[MemoryVmSlotsV1]";
     private const string DurableVmStack = "[SharpSql].[__sharpsql_stack]";
     private const string DurableVmSlots = "[SharpSql].[__sharpsql_slots]";
     private const string VmFrameId = "@__sharpsql_frame_id";

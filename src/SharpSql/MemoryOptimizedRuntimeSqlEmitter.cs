@@ -5,8 +5,15 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
 {
     internal const int MissingFilegroupErrorNumber = 51921;
 
-    internal static string Emit()
+    internal static string Emit(string schemaName = "SharpSql")
     {
+        schemaName = SqlIdentifier.Validate(schemaName, nameof(schemaName));
+        var schema = SqlIdentifier.Quote(schemaName, nameof(schemaName));
+        var schemaLiteral = SqlIdentifier.UnicodeLiteral(schemaName);
+        var stackType = $"{schema}.{SqlIdentifier.Quote("MemoryVmStackV1", "typeName")}";
+        var slotsType = $"{schema}.{SqlIdentifier.Quote("MemoryVmSlotsV1", "typeName")}";
+        var stackTypeLiteral = SqlIdentifier.UnicodeLiteral(stackType);
+        var slotsTypeLiteral = SqlIdentifier.UnicodeLiteral(slotsType);
         var sql = new SqlWriter();
         sql.Line("SET ANSI_NULLS ON;");
         sql.Line("SET ANSI_PADDING ON;");
@@ -23,14 +30,14 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
                 $"THROW {MissingFilegroupErrorNumber}, 'The database needs a MEMORY_OPTIMIZED_DATA filegroup before provisioning SharpSql memory-optimized runtime types.', 1;");
         }
         sql.Line();
-        sql.Line("IF SCHEMA_ID(N'SharpSql') IS NULL");
+        sql.Line($"IF SCHEMA_ID({schemaLiteral}) IS NULL");
         using (sql.Indent())
-            sql.Line("EXEC(N'CREATE SCHEMA [SharpSql] AUTHORIZATION [dbo];');");
+            sql.Line($"EXEC({SqlIdentifier.UnicodeLiteral($"CREATE SCHEMA {schema} AUTHORIZATION [dbo];")});");
         sql.Line();
-        sql.Line("IF TYPE_ID(N'SharpSql.MemoryVmStackV1') IS NULL");
+        sql.Line($"IF TYPE_ID({stackTypeLiteral}) IS NULL");
         using (sql.Indent())
         {
-            sql.Line("EXEC(N'CREATE TYPE [SharpSql].[MemoryVmStackV1] AS TABLE (");
+            sql.Line($"EXEC(N'CREATE TYPE {stackType} AS TABLE (");
             using (sql.Indent())
             {
                 sql.Line("[__id] INT IDENTITY(1,1) NOT NULL,");
@@ -42,10 +49,10 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
             sql.Line(") WITH (MEMORY_OPTIMIZED = ON);');");
         }
         sql.Line();
-        sql.Line("IF TYPE_ID(N'SharpSql.MemoryVmSlotsV1') IS NULL");
+        sql.Line($"IF TYPE_ID({slotsTypeLiteral}) IS NULL");
         using (sql.Indent())
         {
-            sql.Line("EXEC(N'CREATE TYPE [SharpSql].[MemoryVmSlotsV1] AS TABLE (");
+            sql.Line($"EXEC(N'CREATE TYPE {slotsType} AS TABLE (");
             using (sql.Indent())
             {
                 sql.Line("[__frame_id] INT NOT NULL,");

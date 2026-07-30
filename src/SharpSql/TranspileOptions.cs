@@ -35,6 +35,11 @@ public sealed record TranspileOptions
     public bool EnableNativeKernels { get; init; }
 
     /// <summary>
+    /// Gets the schema containing application-scoped runtime types and native kernels.
+    /// </summary>
+    public string ApplicationSchema { get; init; } = "SharpSql";
+
+    /// <summary>
     /// Gets the runtime storage and execution strategy. The default preserves the ephemeral SQL contract.
     /// </summary>
     public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;

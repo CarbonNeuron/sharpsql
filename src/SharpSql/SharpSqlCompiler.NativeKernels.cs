@@ -33,7 +33,7 @@ public sealed partial class SharpSqlCompiler
 
         if (!_nativeKernelPlans.TryGetValue(method.Id, out var plan))
         {
-            plan = NativeKernelEmitter.TryCreate(method, _methodGraph);
+            plan = NativeKernelEmitter.TryCreate(method, _methodGraph, _options.ApplicationSchema);
             _nativeKernelPlans.Add(method.Id, plan);
             if (plan is not null)
                 _nativeKernelProvisioning.Add(plan.ProvisioningSql);
@@ -81,7 +81,8 @@ public sealed partial class SharpSqlCompiler
         preamble.Line("SET CONCAT_NULL_YIELDS_NULL ON;");
         preamble.Line("SET QUOTED_IDENTIFIER ON;");
         preamble.Line("SET NUMERIC_ROUNDABORT OFF;");
-        preamble.Line("IF SCHEMA_ID(N'SharpSql') IS NULL");
+        var schemaName = SqlIdentifier.Validate(_options.ApplicationSchema, nameof(TranspileOptions.ApplicationSchema));
+        preamble.Line($"IF SCHEMA_ID({SqlIdentifier.UnicodeLiteral(schemaName)}) IS NULL");
         using (preamble.Indent())
             preamble.Line("THROW 51931, 'Provision the SharpSql memory-optimized runtime before using native kernels.', 1;");
         foreach (var provisioning in _nativeKernelProvisioning)
@@ -103,7 +104,10 @@ public sealed partial class SharpSqlCompiler
             MethodEffects.InvokesUnknown |
             MethodEffects.UsesRandom;
 
-        public static NativeKernelPlan? TryCreate(MethodDefinition method, MethodGraph? graph)
+        public static NativeKernelPlan? TryCreate(
+            MethodDefinition method,
+            MethodGraph? graph,
+            string applicationSchema)
         {
             if (method.Id.IsNone || method.IsInstance || method.IsAsync || method.Body is null ||
                 method.ReturnType == IrType.Void || !SupportedType(method.ReturnType) ||
@@ -125,7 +129,7 @@ public sealed partial class SharpSqlCompiler
             var bodySql = body.ToString();
             var hash = Hash(method.Id.Value + "\n" + bodySql);
             var name = $"NativeKernel_{hash}";
-            var qualifiedName = $"[SharpSql].[{name}]";
+            var qualifiedName = SqlIdentifier.Qualified(applicationSchema, name);
             var procedure = new SqlWriter();
             procedure.Line($"CREATE PROCEDURE {qualifiedName}");
             using (procedure.Indent())
@@ -154,7 +158,7 @@ public sealed partial class SharpSqlCompiler
             var createSql = procedure.ToString().TrimEnd();
             var escapedCreateSql = createSql.Replace("'", "''", StringComparison.Ordinal);
             var provisioning =
-                $"IF OBJECT_ID(N'{qualifiedName}', N'P') IS NULL EXEC(N'{escapedCreateSql}');";
+                $"IF OBJECT_ID({SqlIdentifier.UnicodeLiteral(qualifiedName)}, N'P') IS NULL EXEC(N'{escapedCreateSql}');";
             return new NativeKernelPlan(qualifiedName, provisioning);
         }
 
