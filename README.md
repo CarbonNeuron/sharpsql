@@ -192,6 +192,29 @@ appsettings, user secrets, and `ConnectionStrings__Development`. Set
 override a configured connection. Generated `.sql` files can also be executed
 directly with `sharpsql run generated.sql`.
 
+### Publish an application
+
+Install a compiled application into its own schema in an existing database:
+
+```bash
+sharpsql publish path/to/MyApp.csproj \
+  --connection Production \
+  --schema MyApp \
+  --name MyApp \
+  --version 1.4.0
+```
+
+Publishing creates or updates `[MyApp].[Run]` and records the installed application
+and version in `[MyApp].[PackageManifest]`. The installer is idempotent, so the same
+deployment can be retried safely. Publishing requires an explicit configured
+connection and does not start a Testcontainer.
+
+Use `--memory-optimized` for schema-local memory runtime objects and add
+`--native-kernels` for eligible native procedures. The database must already have a
+`MEMORY_OPTIMIZED_DATA` filegroup and container; SharpSql does not create that physical
+infrastructure. See [publishing applications](docs/application-publishing.md) for the
+installed object model, connection setup, permissions, and deployment prerequisites.
+
 `run` streams ordinary SQL informational output as it arrives. Service Broker
 lines above 2,000 UTF-16 code units retain SQL Server's larger buffered `PRINT`
 fallback. Add `--debug` for the
