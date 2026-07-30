@@ -4,6 +4,17 @@ using Microsoft.Data.SqlClient;
 
 namespace SharpSql.SqlServer;
 
+/// <summary>Summarizes SQL Server query-plan and SharpSql heap diagnostics for a batch.</summary>
+/// <param name="PlanStatementCount">The number of statements found in collected query plans.</param>
+/// <param name="PlanOperatorCount">The number of relational operators found in collected query plans.</param>
+/// <param name="MaximumPlanDepth">The greatest operator nesting depth.</param>
+/// <param name="EstimatedSubtreeCost">The combined estimated subtree cost.</param>
+/// <param name="CompileTimeMilliseconds">The combined SQL compilation time.</param>
+/// <param name="CompileMemoryKilobytes">The combined SQL compilation memory.</param>
+/// <param name="HeapObjectsAllocated">The number of SharpSql heap objects allocated.</param>
+/// <param name="IndexedItemsAllocated">The number of SharpSql indexed collection items allocated.</param>
+/// <param name="DictionaryEntriesAllocated">The number of SharpSql dictionary entries allocated.</param>
+/// <param name="HeapDiagnosticsObserved">Whether the batch emitted heap diagnostic data.</param>
 public sealed record SqlBatchDebugInfo(
     int PlanStatementCount,
     int PlanOperatorCount,
@@ -16,11 +27,22 @@ public sealed record SqlBatchDebugInfo(
     long DictionaryEntriesAllocated,
     bool HeapDiagnosticsObserved = false);
 
+/// <summary>Controls SQL batch execution and diagnostic collection.</summary>
+/// <param name="CollectDebugInfo">Whether to collect SQL query plans and SharpSql heap counters.</param>
+/// <param name="MessageReceived">An optional observer invoked for SQL informational messages.</param>
+/// <param name="ConsumeHeapDiagnostics">Whether heap diagnostic messages are consumed instead of returned.</param>
 public sealed record SqlBatchExecutionOptions(
     bool CollectDebugInfo = false,
     Action<string>? MessageReceived = null,
     bool ConsumeHeapDiagnostics = false);
 
+/// <summary>Contains the outcome of executing a SQL batch.</summary>
+/// <param name="Success">Whether execution completed without a SQL error.</param>
+/// <param name="Messages">The informational messages emitted by SQL Server.</param>
+/// <param name="ErrorNumber">The SQL Server error number, when execution failed.</param>
+/// <param name="ErrorMessage">The SQL Server error message, when execution failed.</param>
+/// <param name="RowsAffected">The number of affected rows reported by the command.</param>
+/// <param name="DebugInfo">Collected diagnostics, when requested.</param>
 public sealed record SqlBatchExecutionResult(
     bool Success,
     IReadOnlyList<string> Messages,
@@ -29,10 +51,17 @@ public sealed record SqlBatchExecutionResult(
     int RowsAffected = -1,
     SqlBatchDebugInfo? DebugInfo = null);
 
+/// <summary>Executes generated SharpSql batches over an open SQL Server connection.</summary>
 public static class SqlBatchExecutor
 {
     private const string HeapDebugPrefix = "__SHARPSQL_DEBUG_HEAP__|";
 
+    /// <summary>Executes a SQL batch.</summary>
+    /// <param name="connection">An open SQL Server connection.</param>
+    /// <param name="sql">The batch text.</param>
+    /// <param name="commandTimeoutSeconds">The command timeout in seconds.</param>
+    /// <param name="cancellationToken">A token that can cancel execution.</param>
+    /// <returns>The execution outcome.</returns>
     public static async Task<SqlBatchExecutionResult> ExecuteAsync(
         SqlConnection connection,
         string sql,
@@ -45,6 +74,13 @@ public static class SqlBatchExecutor
             options: null,
             cancellationToken);
 
+    /// <summary>Executes a SQL batch with diagnostic and message options.</summary>
+    /// <param name="connection">An open SQL Server connection.</param>
+    /// <param name="sql">The batch text.</param>
+    /// <param name="commandTimeoutSeconds">The command timeout in seconds.</param>
+    /// <param name="options">Optional execution settings.</param>
+    /// <param name="cancellationToken">A token that can cancel execution.</param>
+    /// <returns>The execution outcome.</returns>
     public static async Task<SqlBatchExecutionResult> ExecuteAsync(
         SqlConnection connection,
         string sql,

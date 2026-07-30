@@ -9,6 +9,12 @@ using Testcontainers.MsSql;
 
 namespace SharpSql.SqlServer;
 
+/// <summary>Controls creation of a SQL Server session backed by a connection or Testcontainer.</summary>
+/// <param name="ScopePath">A stable path used to scope reusable containers.</param>
+/// <param name="ConnectionString">An existing server connection string, when containers are not used.</param>
+/// <param name="Image">The SQL Server container image.</param>
+/// <param name="DatabaseName">The database to create and use.</param>
+/// <param name="KeepContainer">Whether a container remains available after the session closes.</param>
 public sealed record SqlServerSessionOptions(
     string ScopePath,
     string? ConnectionString = null,
@@ -16,6 +22,7 @@ public sealed record SqlServerSessionOptions(
     string DatabaseName = "SharpSql",
     bool KeepContainer = false);
 
+/// <summary>Owns an open SQL Server connection and any associated container lifetime.</summary>
 public sealed class SqlServerSession : IAsyncDisposable
 {
     private readonly string? _containerId;
@@ -35,11 +42,16 @@ public sealed class SqlServerSession : IAsyncDisposable
         _keepContainer = keepContainer;
     }
 
+    /// <summary>Gets the open SQL Server connection.</summary>
     public SqlConnection Connection { get; }
+    /// <summary>Gets a display description of the connected server and database.</summary>
     public string Description { get; }
+    /// <summary>Gets whether this session uses a Testcontainer.</summary>
     public bool IsContainer { get; }
+    /// <summary>Gets whether the backing container remains available after disposal.</summary>
     public bool KeepContainer => IsContainer && _keepContainer;
 
+    /// <summary>Closes the connection and removes a non-retained container.</summary>
     public async ValueTask DisposeAsync()
     {
         try
@@ -65,11 +77,16 @@ public sealed class SqlServerSession : IAsyncDisposable
     }
 }
 
+/// <summary>Opens SQL Server sessions using configured servers or reusable Testcontainers.</summary>
 public static partial class SqlServerSessionFactory
 {
     private const string ReusableLabel = "io.sharpsql.sqlserver.reusable";
     private const string ScopeLabel = "io.sharpsql.sqlserver.scope";
 
+    /// <summary>Opens a SQL Server session.</summary>
+    /// <param name="options">Connection and container settings.</param>
+    /// <param name="cancellationToken">A token that can cancel session creation.</param>
+    /// <returns>An open session.</returns>
     public static async Task<SqlServerSession> OpenAsync(
         SqlServerSessionOptions options,
         CancellationToken cancellationToken = default)

@@ -21,11 +21,19 @@ public enum RuntimeStorageKind
     ServiceBroker = 2
 }
 
+/// <summary>Controls SQL generation and compiler resource limits.</summary>
 public sealed record TranspileOptions
 {
+    /// <summary>Gets the maximum method statement count eligible for inline expansion.</summary>
     public int MaxInlineStatements { get; init; } = 40;
+
+    /// <summary>Gets the maximum number of call sites eligible for inline expansion.</summary>
     public int MaxInlineCallSites { get; init; } = 8;
+
+    /// <summary>Gets whether generated batches begin with <c>SET NOCOUNT ON</c>.</summary>
     public bool EmitNoCount { get; init; } = true;
+
+    /// <summary>Gets whether generated batches emit runtime diagnostic result sets.</summary>
     public bool EmitRuntimeDiagnostics { get; init; }
 
     /// <summary>

@@ -6,20 +6,27 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace SharpSql.Analyzers;
 
+/// <summary>Reports SharpSql compatibility diagnostics during normal C# analysis.</summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
 {
+    /// <summary>The analyzer configuration property that enables SharpSql analysis.</summary>
     public const string EnabledProperty = "build_property.SharpSqlEnableAnalyzer";
+    /// <summary>The analyzer configuration property that selects the entry point.</summary>
     public const string EntryPointProperty = "build_property.SharpSqlEntryPoint";
+    /// <summary>The analyzer configuration property that selects runtime storage.</summary>
     public const string RuntimeStorageProperty = "build_property.SharpSqlRuntimeStorage";
+    /// <summary>The diagnostic identifier used for unexpected analyzer failures.</summary>
     public const string InternalErrorId = "SSA0001";
 
     private static readonly ImmutableDictionary<string, DiagnosticDescriptor> Descriptors =
         CreateDescriptors();
 
+    /// <inheritdoc />
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics =>
         [.. Descriptors.Values];
 
+    /// <inheritdoc />
     public override void Initialize(AnalysisContext context)
     {
         context.EnableConcurrentExecution();

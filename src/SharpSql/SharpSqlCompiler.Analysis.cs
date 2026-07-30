@@ -1,5 +1,8 @@
 namespace SharpSql;
 
+/// <summary>
+/// Transpiles the supported C# language subset into a self-contained SQL Server batch.
+/// </summary>
 public sealed partial class SharpSqlCompiler
 {
     private void AnalyzeMethodBehaviors()
