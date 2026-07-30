@@ -530,10 +530,10 @@ public sealed partial class SharpSqlCompiler
             scope.Add(statement.Element, new ScalarVariableBinding(itemSql, itemType));
             EmitLabel(conditionLabel);
             var count = collectionType.Name == "byte[]"
-                ? $"CONVERT(INT, DATALENGTH({collectionSql}))"
+                ? ByteArrayLengthSql(collectionSql)
                 : SequenceCountSql(collectionSql);
             var item = collectionType.Name == "byte[]"
-                ? $"CONVERT(TINYINT, SUBSTRING({collectionSql}, {indexSql} + 1, 1))"
+                ? $"CONVERT(TINYINT, SUBSTRING({ByteArrayPayloadSql(collectionSql)}, {indexSql} + 1, 1))"
                 : SequenceElementSql(collectionSql, indexSql, itemType);
             _sql.Line($"IF {indexSql} >= {count} GOTO {breakLabel};");
             _sql.Line($"SET {itemSql} = {item};");

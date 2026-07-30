@@ -462,9 +462,7 @@ public sealed partial class SharpSqlCompiler
                 ? $"CONVERT(INT, {tasksAlias}.[ResultReferenceId])"
                 : query.SourceElementType.IsString
                     ? $"{tasksAlias}.[ResultText]"
-                    : query.SourceElementType.Name == "byte[]"
-                        ? $"{tasksAlias}.[ResultBinary]"
-                        : $"CONVERT({query.SourceElementType.SqlType()}, {tasksAlias}.[ResultScalar])";
+                    : $"CONVERT({query.SourceElementType.SqlType()}, {tasksAlias}.[ResultScalar])";
             return $"SELECT CONVERT(INT, {idsAlias}.[key]) AS __index, {result} AS __value " +
                 $"FROM OPENJSON({taskResults.TaskIdsJsonSql}) AS {idsAlias} " +
                 $"INNER JOIN [SharpSql].[Tasks] AS {tasksAlias} " +

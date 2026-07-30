@@ -138,7 +138,7 @@ internal static class KnownTypeFacts
             "DateOnly" or "System.DateOnly" => new IrType("DateOnly"),
             "TimeOnly" or "System.TimeOnly" or "TimeSpan" or "System.TimeSpan" => new IrType("TimeOnly"),
             "Guid" or "System.Guid" => new IrType("Guid"),
-            "byte[]" or "System.Byte[]" => new IrType("byte[]"),
+            "byte[]" or "System.Byte[]" => new IrType("byte[]", IsReference: true),
             "void" or "System.Void" => IrType.Void,
             "object" or "System.Object" or "unknown" => IrType.Unknown,
             _ when name.EndsWith("[]", StringComparison.Ordinal) =>

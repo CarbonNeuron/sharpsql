@@ -14,7 +14,7 @@ internal static class CSharpTypeFactory
             return From(nullable.ElementType);
 
         if (syntax is ArrayTypeSyntax array && array.ElementType.ToString() == "byte")
-            return new("byte[]");
+            return new("byte[]", IsReference: true);
 
         return FromName(syntax.ToString().Replace("global::", "", StringComparison.Ordinal));
     }
@@ -27,7 +27,7 @@ internal static class CSharpTypeFactory
         {
             var element = From(array.ElementType);
             return element.Name == "byte"
-                ? new IrType("byte[]")
+                ? new IrType("byte[]", IsReference: true)
                 : new IrType(element.Name + "[]", IsReference: true);
         }
 

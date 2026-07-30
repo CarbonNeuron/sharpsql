@@ -115,7 +115,7 @@ public sealed partial class SharpSqlCompiler
             }
             if (receiverType.Name == "byte[]" && member.MemberName == "Length")
             {
-                continuation($"CONVERT(INT, DATALENGTH({receiver}))");
+                continuation(ByteArrayLengthSql(receiver));
                 return;
             }
             if ((IsListType(receiverType.Name) && member.MemberName == "Count") ||

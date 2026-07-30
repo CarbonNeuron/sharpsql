@@ -941,7 +941,7 @@ public sealed partial class SharpSqlCompiler
             : IrType.Void;
 
     private static int TaskResultKind(IrType type) =>
-        type.IsString ? 2 : type.Name == "byte[]" ? 3 : type.IsReference ? 4 : 1;
+        type.IsString ? 2 : type.IsReference ? 4 : 1;
 
     private static string PayloadJsonSql(IReadOnlyList<(IrSymbol Symbol, string Sql)> values)
     {

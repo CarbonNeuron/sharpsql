@@ -304,10 +304,10 @@ public sealed partial class SharpSqlCompiler
             var collectionValue = ReadVmTemporary(collectionStorage);
             var indexValue = ReadVmTemporary(indexStorage);
             var count = collectionType.Name == "byte[]"
-                ? $"CONVERT(INT, DATALENGTH({collectionValue}))"
+                ? ByteArrayLengthSql(collectionValue)
                 : SequenceCountSql(collectionValue);
             var itemValue = collectionType.Name == "byte[]"
-                ? $"CONVERT(TINYINT, SUBSTRING({collectionValue}, {indexValue} + 1, 1))"
+                ? $"CONVERT(TINYINT, SUBSTRING({ByteArrayPayloadSql(collectionValue)}, {indexValue} + 1, 1))"
                 : SequenceElementSql(collectionValue, indexValue, item.Type);
             _sql.Line($"IF {indexValue} >= {count} GOTO {breakLabel};");
             _sql.Line($"SET {item.SqlName} = {itemValue};");
@@ -353,8 +353,6 @@ public sealed partial class SharpSqlCompiler
         _sql.Line($"SET {VmBinaryResult} = NULL;");
         if (method.Definition.ReturnType.IsString)
             _sql.Line($"SET {VmTextResult} = {method.ReturnSqlName};");
-        else if (method.Definition.ReturnType.Name == "byte[]")
-            _sql.Line($"SET {VmBinaryResult} = {method.ReturnSqlName};");
         else if (method.Definition.ReturnType.Name != "void")
             _sql.Line($"SET {VmResult} = CONVERT(SQL_VARIANT, {method.ReturnSqlName});");
 
@@ -368,8 +366,6 @@ public sealed partial class SharpSqlCompiler
     {
         if (type.IsString)
             return VmTextResult;
-        if (type.Name == "byte[]")
-            return VmBinaryResult;
         if (type.Name == "void")
             return "NULL";
         return $"CONVERT({type.SqlType()}, {VmResult})";

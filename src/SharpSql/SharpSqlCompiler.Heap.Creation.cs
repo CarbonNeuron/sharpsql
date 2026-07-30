@@ -131,7 +131,7 @@ public sealed partial class SharpSqlCompiler
                 var capturedSize = _names.Allocate("_byte_array_size");
                 _sql.Line($"DECLARE {capturedSize} INT = {size};");
                 _sql.Line($"IF {capturedSize} < 0 THROW 51013, 'Array dimensions exceeded the supported range.', 1;");
-                continuation(ByteArrayWithLengthSql(capturedSize));
+                continuation(AllocateByteArray(ByteArrayWithLengthSql(capturedSize)));
             });
             return;
         }
@@ -143,7 +143,7 @@ public sealed partial class SharpSqlCompiler
         {
             if (index == creation.Elements.Count)
             {
-                continuation(ByteArrayInitializerSql(values));
+                continuation(AllocateByteArray(ByteArrayInitializerSql(values)));
                 return;
             }
 
@@ -162,6 +162,15 @@ public sealed partial class SharpSqlCompiler
         ? "CONVERT(VARBINARY(MAX), 0x)"
         : string.Join(" + ", values.Select(value =>
             $"CONVERT(VARBINARY(MAX), CONVERT(BINARY(1), {value}))"));
+
+    private string AllocateByteArray(string value)
+    {
+        var payload = _names.Allocate("_byte_array_payload");
+        _sql.Line($"DECLARE {payload} VARBINARY(MAX) = {value};");
+        var array = AllocateHeapHeader(ByteArrayHeapTypeId, "__count", $"CONVERT(INT, DATALENGTH({payload}))");
+        _sql.Line($"INSERT INTO {HeapIndexedItems} ({IndexedItemInsertColumns("__owner_id, __index, __binary_value")}) VALUES ({IndexedItemInsertValues($"{array}, 0, {payload}")});");
+        return array;
+    }
 
     private void EmitNewArray(
         IrArrayCreationExpression creation,

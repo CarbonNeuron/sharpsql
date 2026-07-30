@@ -28,7 +28,7 @@ public sealed partial class SharpSqlCompiler
             var capturedSize = _names.Allocate("_byte_array_size");
             _sql.Line($"DECLARE {capturedSize} INT = {size};");
             _sql.Line($"IF {capturedSize} < 0 THROW 51013, 'Array dimensions exceeded the supported range.', 1;");
-            continuation(ByteArrayWithLengthSql(capturedSize));
+            continuation(AllocateByteArray(ByteArrayWithLengthSql(capturedSize)));
         });
     }
 
@@ -52,7 +52,7 @@ public sealed partial class SharpSqlCompiler
         {
             if (index == values.Count)
             {
-                continuation(ByteArrayInitializerSql(captured));
+                continuation(AllocateByteArray(ByteArrayInitializerSql(captured)));
                 return;
             }
 

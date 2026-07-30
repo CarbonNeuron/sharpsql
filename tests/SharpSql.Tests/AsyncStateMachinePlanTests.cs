@@ -106,6 +106,31 @@ public sealed class AsyncStateMachinePlanTests
     }
 
     [Fact]
+    public void AsyncByteArrayResultsUseManagedReferenceStorage()
+    {
+        const string source = """
+            var values = new List<int> { 1 };
+            var tasks = values.Select(Work).ToList();
+            await Task.WhenAll(tasks);
+
+            async Task<byte[]> Work(int value)
+            {
+                await Task.Delay(0);
+                return new byte[] { (byte)value };
+            }
+            """;
+
+        var result = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions { RuntimeStorage = RuntimeStorageKind.ServiceBroker });
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("@ResultKind = 4", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("@ResultReferenceId", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("__owner_id", result.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ReportsPreAwaitLocalsThatTheCurrentBackendCannotSpill()
     {
         const string source = """

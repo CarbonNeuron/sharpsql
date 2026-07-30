@@ -344,7 +344,7 @@ public sealed partial class SharpSqlCompiler
         if (receiverType.IsString && member.MemberName == "Length")
             return SqlScalarExpression.Primary($"CONVERT(INT, DATALENGTH({receiver}) / 2)");
         if (receiverType.Name == "byte[]" && member.MemberName == "Length")
-            return SqlScalarExpression.Primary($"CONVERT(INT, DATALENGTH({receiver}))");
+            return SqlScalarExpression.Primary(ByteArrayLengthSql(receiver));
         if ((IsListType(receiverType.Name) && member.MemberName == "Count") ||
             (IsArrayType(receiverType.Name) && member.MemberName == "Length") ||
             (IsDictionaryType(receiverType.Name) && member.MemberName == "Count"))

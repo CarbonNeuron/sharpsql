@@ -551,9 +551,10 @@ public sealed class IrBoundaryTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("CONVERT(VARBINARY(MAX), CONVERT(BINARY(1), 4))", result.Sql, StringComparison.Ordinal);
-        Assert.Contains("CONVERT(TINYINT, SUBSTRING(@values, 1 + 1, 1))", result.Sql, StringComparison.Ordinal);
-        Assert.Contains("DECLARE @length INT = CONVERT(INT, DATALENGTH(@values))", result.Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("#__sharpsql_objects", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT __binary_value FROM #__sharpsql_indexed_items", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("__owner_id = @values", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("DECLARE @length INT = (SELECT __count FROM #__sharpsql_objects", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("#__sharpsql_objects", result.Sql, StringComparison.Ordinal);
     }
 
     [Fact]

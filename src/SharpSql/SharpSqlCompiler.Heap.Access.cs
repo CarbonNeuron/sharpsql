@@ -24,7 +24,7 @@ public sealed partial class SharpSqlCompiler
             return SqlScalarExpression.Primary($"CONVERT(INT, DATALENGTH({receiver}) / 2)");
         }
         if (receiverType.Name == "byte[]" && member.Name.Identifier.ValueText == "Length")
-            return SqlScalarExpression.Primary($"CONVERT(INT, DATALENGTH({receiver}))");
+            return SqlScalarExpression.Primary(ByteArrayLengthSql(receiver));
         if (IsSequenceType(receiverType.Name))
         {
             if ((IsListType(receiverType.Name) && member.Name.Identifier.ValueText == "Count") ||
@@ -74,7 +74,7 @@ public sealed partial class SharpSqlCompiler
                 if (receiverType.IsString)
                     _sql.Line($"IF {key} < 0 OR {key} >= CONVERT(INT, DATALENGTH({receiver}) / 2) THROW 51003, 'String index was out of range.', 1;");
                 else if (receiverType.Name == "byte[]")
-                    _sql.Line($"IF {key} < 0 OR {key} >= CONVERT(INT, DATALENGTH({receiver})) THROW 51003, 'Array index was out of range.', 1;");
+                    _sql.Line($"IF {key} < 0 OR {key} >= {ByteArrayLengthSql(receiver)} THROW 51003, 'Array index was out of range.', 1;");
                 else if (IsSequenceType(receiverType.Name))
                     EmitSequenceIndexGuard(receiverType, receiver, key);
                 else if (IsDictionaryType(receiverType.Name))
@@ -111,7 +111,7 @@ public sealed partial class SharpSqlCompiler
                 if (receiverType.IsString)
                     _sql.Line($"IF {key} < 0 OR {key} >= CONVERT(INT, DATALENGTH({receiver}) / 2) THROW 51003, 'String index was out of range.', 1;");
                 else if (receiverType.Name == "byte[]")
-                    _sql.Line($"IF {key} < 0 OR {key} >= CONVERT(INT, DATALENGTH({receiver})) THROW 51003, 'Array index was out of range.', 1;");
+                    _sql.Line($"IF {key} < 0 OR {key} >= {ByteArrayLengthSql(receiver)} THROW 51003, 'Array index was out of range.', 1;");
                 else if (IsSequenceType(receiverType.Name))
                     EmitSequenceIndexGuard(receiverType, receiver, key);
                 else
@@ -149,7 +149,7 @@ public sealed partial class SharpSqlCompiler
         }
         if (receiverType.Name == "byte[]")
         {
-            value = $"CONVERT(TINYINT, SUBSTRING({receiver}, {key} + 1, 1))";
+            value = $"CONVERT(TINYINT, SUBSTRING({ByteArrayPayloadSql(receiver)}, {key} + 1, 1))";
             return true;
         }
         if (IsSequenceType(receiverType.Name))
@@ -182,7 +182,7 @@ public sealed partial class SharpSqlCompiler
                 var receiver = EmitScalar(member.Expression, scope);
                 var other = EmitScalar(invocation.ArgumentList.Arguments[0].Expression, scope);
                 expression = SqlScalarExpression.Primary(
-                    $"CASE WHEN {receiver} = {other} THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                    $"CASE WHEN {ByteArrayPayloadSql(receiver)} = {ByteArrayPayloadSql(other)} THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
                 return true;
             }
             if (IsDictionaryType(receiverType.Name) && member.Name.Identifier.ValueText == "ContainsKey" &&
@@ -232,7 +232,7 @@ public sealed partial class SharpSqlCompiler
                 var receiver = EmitScalar(member.Receiver, scope, substitutions);
                 var other = EmitScalar(invocation.Arguments[0], scope, substitutions);
                 expression = SqlScalarExpression.Primary(
-                    $"CASE WHEN {receiver} = {other} THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                    $"CASE WHEN {ByteArrayPayloadSql(receiver)} = {ByteArrayPayloadSql(other)} THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
                 return true;
             }
             if (IsDictionaryType(receiverType.Name) && member.MemberName == "ContainsKey" &&
@@ -409,15 +409,13 @@ public sealed partial class SharpSqlCompiler
         var prefix = key ? "__key" : "__";
         if (type.IsString)
             return prefix + (key ? "_text" : "text_value");
-        if (type.Name == "byte[]")
-            return prefix + (key ? "_binary" : "binary_value");
         if (type.IsReference)
             return prefix + (key ? "_reference" : "reference_value");
         return key ? "__key" : "__value";
     }
 
     private static string CollectionStoredValue(IrType type, string value) =>
-        type.IsString || type.Name == "byte[]" || type.IsReference
+        type.IsString || type.IsReference
             ? value
             : type.Name == "char"
                 ? $"CONVERT(SQL_VARIANT, CONVERT(NCHAR(1), {value}))"
@@ -426,7 +424,7 @@ public sealed partial class SharpSqlCompiler
     private static string CollectionReadValue(IrType type, bool key, string? qualifier = null)
     {
         var column = (qualifier is null ? string.Empty : qualifier + ".") + CollectionValueColumn(type, key);
-        if (type.IsString || type.Name == "byte[]" || type.IsReference)
+        if (type.IsString || type.IsReference)
             return column;
         return $"CONVERT({type.SqlType()}, {column})";
     }
@@ -437,8 +435,6 @@ public sealed partial class SharpSqlCompiler
             return field.SqlName;
         if (field.Type.IsString)
             return "__text_value";
-        if (field.Type.Name == "byte[]")
-            return "__binary_value";
         if (field.Type.IsReference)
             return "__reference_value";
         return "__scalar_value";
@@ -446,7 +442,7 @@ public sealed partial class SharpSqlCompiler
 
     private string HeapFieldStoredValue(HeapField field, string value)
     {
-        if (!UsesMemoryOptimizedRuntime || field.Type.IsString || field.Type.Name == "byte[]" || field.Type.IsReference)
+        if (!UsesMemoryOptimizedRuntime || field.Type.IsString || field.Type.IsReference)
             return value;
         var typedValue = field.Type.Name == "char"
             ? $"CONVERT(NCHAR(1), {value})"
@@ -460,7 +456,7 @@ public sealed partial class SharpSqlCompiler
             return $"(SELECT {field.SqlName} FROM {declaringType.TableName} WHERE {HeapExecutionFilter()}__object_id = {objectSql})";
 
         var column = HeapFieldValueColumn(field);
-        var value = field.Type.IsString || field.Type.Name == "byte[]" || field.Type.IsReference
+        var value = field.Type.IsString || field.Type.IsReference
             ? column
             : $"CONVERT({field.Type.SqlType()}, {column})";
         return $"(SELECT {value} FROM {MemoryOptimizedHeapFields} WHERE __execution_id = {RuntimeExecutionId} AND __object_id = {objectSql} AND __declaring_type_id = {declaringType.Id} AND __field_id = {field.RuntimeFieldId})";
@@ -498,13 +494,13 @@ public sealed partial class SharpSqlCompiler
     }
 
     private string IndexedItemValueColumn(IrType type) =>
-        UsesMemoryOptimizedRuntime && !type.IsString && type.Name != "byte[]" && !type.IsReference
+        UsesMemoryOptimizedRuntime && !type.IsString && !type.IsReference
             ? "__scalar_value"
             : CollectionValueColumn(type, key: false);
 
     private string IndexedItemStoredValue(IrType type, string value)
     {
-        if (!UsesMemoryOptimizedRuntime || type.IsString || type.Name == "byte[]" || type.IsReference)
+        if (!UsesMemoryOptimizedRuntime || type.IsString || type.IsReference)
             return CollectionStoredValue(type, value);
         var typedValue = type.Name == "char"
             ? $"CONVERT(NCHAR(1), {value})"
@@ -514,7 +510,7 @@ public sealed partial class SharpSqlCompiler
 
     private string IndexedItemReadValue(IrType type, string? qualifier = null)
     {
-        if (!UsesMemoryOptimizedRuntime || type.IsString || type.Name == "byte[]" || type.IsReference)
+        if (!UsesMemoryOptimizedRuntime || type.IsString || type.IsReference)
             return CollectionReadValue(type, key: false, qualifier);
         var column = (qualifier is null ? string.Empty : qualifier + ".") + "__scalar_value";
         return $"CONVERT({type.SqlType()}, {column})";
@@ -531,13 +527,13 @@ public sealed partial class SharpSqlCompiler
     }
 
     private string DictionaryKeyColumn(IrType type) =>
-        UsesMemoryOptimizedRuntime && !type.IsString && type.Name != "byte[]" && !type.IsReference
+        UsesMemoryOptimizedRuntime && !type.IsString && !type.IsReference
             ? "__key_scalar"
             : CollectionValueColumn(type, key: true);
 
     private string DictionaryKeyStoredValue(IrType type, string value)
     {
-        if (!UsesMemoryOptimizedRuntime || type.IsString || type.Name == "byte[]" || type.IsReference)
+        if (!UsesMemoryOptimizedRuntime || type.IsString || type.IsReference)
             return CollectionStoredValue(type, value);
         var typedValue = type.Name == "char"
             ? $"CONVERT(NCHAR(1), {value})"
@@ -546,13 +542,13 @@ public sealed partial class SharpSqlCompiler
     }
 
     private string DictionaryValueColumn(IrType type) =>
-        UsesMemoryOptimizedRuntime && !type.IsString && type.Name != "byte[]" && !type.IsReference
+        UsesMemoryOptimizedRuntime && !type.IsString && !type.IsReference
             ? "__value_scalar"
             : CollectionValueColumn(type, key: false);
 
     private string DictionaryValueStored(IrType type, string value)
     {
-        if (!UsesMemoryOptimizedRuntime || type.IsString || type.Name == "byte[]" || type.IsReference)
+        if (!UsesMemoryOptimizedRuntime || type.IsString || type.IsReference)
             return CollectionStoredValue(type, value);
         var typedValue = type.Name == "char"
             ? $"CONVERT(NCHAR(1), {value})"
@@ -562,7 +558,7 @@ public sealed partial class SharpSqlCompiler
 
     private string DictionaryValueRead(IrType type, string? qualifier = null)
     {
-        if (!UsesMemoryOptimizedRuntime || type.IsString || type.Name == "byte[]" || type.IsReference)
+        if (!UsesMemoryOptimizedRuntime || type.IsString || type.IsReference)
             return CollectionReadValue(type, key: false, qualifier);
         var column = (qualifier is null ? string.Empty : qualifier + ".") + "__value_scalar";
         return $"CONVERT({type.SqlType()}, {column})";
@@ -572,8 +568,6 @@ public sealed partial class SharpSqlCompiler
     {
         if (type.IsString)
             return $"__key_hash = {DictionaryKeyHash(type, value)} AND __key_text COLLATE Latin1_General_100_BIN2 = {value} COLLATE Latin1_General_100_BIN2";
-        if (type.Name == "byte[]")
-            return $"__key_hash = {DictionaryKeyHash(type, value)} AND __key_binary = {value}";
         return $"{DictionaryKeyColumn(type)} = {DictionaryKeyStoredValue(type, value)}";
     }
 
@@ -581,8 +575,6 @@ public sealed partial class SharpSqlCompiler
     {
         if (type.IsString)
             return $"HASHBYTES('SHA2_256', CONVERT(VARBINARY(MAX), {value} COLLATE Latin1_General_100_BIN2))";
-        if (type.Name == "byte[]")
-            return $"HASHBYTES('SHA2_256', {value})";
         return null;
     }
 
@@ -609,6 +601,8 @@ public sealed partial class SharpSqlCompiler
         if (type.IsBoolean)
             return $"CASE {value} WHEN CAST(1 AS BIT) THEN N'True' " +
                    "WHEN CAST(0 AS BIT) THEN N'False' ELSE N'' END";
+        if (type.Name == "byte[]")
+            return $"CASE WHEN {value} IS NULL THEN N'' ELSE N'System.Byte[]' END";
         return _heapTypes.TryGetValue(type.Name, out var heapType) &&
                heapType.IsRecord
             ? FormatRecordText(heapType, value)
@@ -636,7 +630,7 @@ public sealed partial class SharpSqlCompiler
 
     private static string DefaultSql(IrType type)
     {
-        if (type.IsString || type.IsReference || type.Name == "byte[]" || type == IrType.Unknown)
+        if (type.IsString || type.IsReference || type == IrType.Unknown)
             return "NULL";
         if (type.IsBoolean)
             return "CAST(0 AS BIT)";
@@ -664,6 +658,11 @@ public sealed partial class SharpSqlCompiler
 
     private string SequenceCountSql(string collection) =>
         $"(SELECT __count FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {collection})";
+
+    private string ByteArrayLengthSql(string array) => SequenceCountSql(array);
+
+    private string ByteArrayPayloadSql(string array) =>
+        $"(SELECT __binary_value FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {array} AND __index = 0)";
 
     private string SequenceElementSql(string collection, string index, IrType itemType) =>
         $"(SELECT {IndexedItemReadValue(itemType)} FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {collection} AND __index = {index})";

@@ -25,7 +25,7 @@ internal static class SqlTypeMapper
             "DateOnly" => "DATE",
             "TimeOnly" => "TIME",
             "Guid" => "UNIQUEIDENTIFIER",
-            "byte[]" => "VARBINARY(MAX)",
+            "byte[]" => "INT",
             "void" => string.Empty,
             "unknown" => "SQL_VARIANT",
             _ when type.IsReference => "INT",

@@ -13,15 +13,13 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"DELETE FROM {VmSlotsTable} WHERE __frame_id = {VmFrameId} AND __slot_id IN ({string.Join(", ", variables.Select(variable => variable.Slot))}){VmExecutionPredicate()};");
             var memoryRows = variables.Select(variable =>
             {
-                var scalar = variable.Type.IsString || variable.Type.Name == "byte[]"
+                var scalar = variable.Type.IsString
                     ? "CONVERT(VARBINARY(8000), NULL)"
                     : $"CONVERT(VARBINARY(8000), {variable.SqlName})";
                 var text = variable.Type.IsString
                     ? variable.SqlName
                     : "CONVERT(NVARCHAR(MAX), NULL)";
-                var binary = variable.Type.Name == "byte[]"
-                    ? variable.SqlName
-                    : "CONVERT(VARBINARY(MAX), NULL)";
+                var binary = "CONVERT(VARBINARY(MAX), NULL)";
                 return $"({RuntimeExecutionId}, {VmFrameId}, {variable.Slot}, {scalar}, {text}, {binary})";
             });
             _sql.Line($"INSERT INTO {VmSlotsTable} (__execution_id, __frame_id, __slot_id, __scalar_value, __text_value, __binary_value) VALUES");
@@ -32,15 +30,13 @@ public sealed partial class SharpSqlCompiler
 
         var rows = method.Variables.Values.Select(variable =>
         {
-            var scalar = variable.Type.IsString || variable.Type.Name == "byte[]"
+            var scalar = variable.Type.IsString
                 ? "CONVERT(SQL_VARIANT, NULL)"
                 : $"CONVERT(SQL_VARIANT, {variable.SqlName})";
             var text = variable.Type.IsString
                 ? variable.SqlName
                 : "CONVERT(NVARCHAR(MAX), NULL)";
-            var binary = variable.Type.Name == "byte[]"
-                ? variable.SqlName
-                : "CONVERT(VARBINARY(MAX), NULL)";
+            var binary = "CONVERT(VARBINARY(MAX), NULL)";
             return $"({variable.Slot}, {scalar}, {text}, {binary})";
         });
         _sql.Line($"MERGE {VmSlotsTable} AS target");
@@ -63,11 +59,9 @@ public sealed partial class SharpSqlCompiler
             var alias = $"__vm_load_{index}";
             var value = variable.Type.IsString
                 ? $"{alias}.__text_value"
-                : variable.Type.Name == "byte[]"
-                    ? $"{alias}.__binary_value"
-                    : UsesMemoryOptimizedRuntime
-                        ? $"CONVERT({variable.Type.SqlType()}, {alias}.__scalar_value)"
-                        : $"CONVERT({variable.Type.SqlType()}, {alias}.__value)";
+                : UsesMemoryOptimizedRuntime
+                    ? $"CONVERT({variable.Type.SqlType()}, {alias}.__scalar_value)"
+                    : $"CONVERT({variable.Type.SqlType()}, {alias}.__value)";
             return $"{variable.SqlName} = {value}";
         });
         _sql.Line($"SELECT {string.Join(", ", assignments)}");
@@ -84,11 +78,9 @@ public sealed partial class SharpSqlCompiler
     {
         var (column, storedValue) = type.IsString
             ? ("__text_value", value)
-            : type.Name == "byte[]"
-                ? ("__binary_value", value)
-                : UsesMemoryOptimizedRuntime
-                    ? ("__scalar_value", $"CONVERT(VARBINARY(8000), {value})")
-                    : ("__value", $"CONVERT(SQL_VARIANT, {value})");
+            : UsesMemoryOptimizedRuntime
+                ? ("__scalar_value", $"CONVERT(VARBINARY(8000), {value})")
+                : ("__value", $"CONVERT(SQL_VARIANT, {value})");
         _sql.Line($"UPDATE {VmSlotsTable} SET {column} = {storedValue} WHERE __frame_id = {frameId} AND __slot_id = {slot}{VmExecutionPredicate()};");
         _sql.Line("IF @@ROWCOUNT = 0");
         InsertVmSlot(frameId, slot, type, value);
@@ -98,8 +90,6 @@ public sealed partial class SharpSqlCompiler
     {
         if (type.IsString)
             _sql.Line($"INSERT INTO {VmSlotsTable} ({(UsesSharedVmStorage ? "__execution_id, " : string.Empty)}__frame_id, __slot_id, __text_value) VALUES ({(UsesSharedVmStorage ? RuntimeExecutionId + ", " : string.Empty)}{frameId}, {slot}, {value});");
-        else if (type.Name == "byte[]")
-            _sql.Line($"INSERT INTO {VmSlotsTable} ({(UsesSharedVmStorage ? "__execution_id, " : string.Empty)}__frame_id, __slot_id, __binary_value) VALUES ({(UsesSharedVmStorage ? RuntimeExecutionId + ", " : string.Empty)}{frameId}, {slot}, {value});");
         else if (UsesMemoryOptimizedRuntime)
             _sql.Line($"INSERT INTO {VmSlotsTable} (__execution_id, __frame_id, __slot_id, __scalar_value) VALUES ({RuntimeExecutionId}, {frameId}, {slot}, CONVERT(VARBINARY(8000), {value}));");
         else
@@ -110,8 +100,6 @@ public sealed partial class SharpSqlCompiler
     {
         if (type.IsString)
             return $"(SELECT __text_value FROM {VmSlotsTable} WHERE __frame_id = {frameId} AND __slot_id = {slot}{VmExecutionPredicate()})";
-        if (type.Name == "byte[]")
-            return $"(SELECT __binary_value FROM {VmSlotsTable} WHERE __frame_id = {frameId} AND __slot_id = {slot}{VmExecutionPredicate()})";
         if (UsesMemoryOptimizedRuntime)
             return $"CONVERT({type.SqlType()}, (SELECT __scalar_value FROM {VmSlotsTable} WHERE __frame_id = {frameId} AND __slot_id = {slot}{VmExecutionPredicate()}))";
         return $"CONVERT({type.SqlType()}, (SELECT __value FROM {VmSlotsTable} WHERE __frame_id = {frameId} AND __slot_id = {slot}{VmExecutionPredicate()}))";

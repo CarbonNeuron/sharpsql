@@ -31,6 +31,7 @@ public sealed partial class SharpSqlCompiler
     private const int DictionaryHeapTypeId = 1002;
     private const int ArrayHeapTypeId = 1003;
     private const int RandomHeapTypeId = 1004;
+    private const int ByteArrayHeapTypeId = 1005;
 
     private bool UsesDurableHeapStorage => UsesDurableRuntime;
     private bool UsesSharedHeapObjectStorage => UsesDurableHeapStorage || UsesMemoryOptimizedRuntime;
@@ -221,11 +222,8 @@ public sealed partial class SharpSqlCompiler
             switch (expression)
             {
                 case IrArrayCreationExpression array:
-                    if (array.ElementType.Name != "byte")
-                    {
-                        _heapRuntimeNeeded = true;
-                        _usesIndexedItems = true;
-                    }
+                    _heapRuntimeNeeded = true;
+                    _usesIndexedItems = true;
                     if (array.Length is not null)
                         VisitExpression(array.Length);
                     foreach (var element in array.Elements)
@@ -339,7 +337,7 @@ public sealed partial class SharpSqlCompiler
                 var keyType = GenericArguments(type.Name).FirstOrDefault();
                 if (keyType is not null)
                 {
-                    if (keyType.IsString || keyType.Name == "byte[]")
+                    if (keyType.IsString)
                         _usesStringOrBinaryDictionaryKeys = true;
                     else if (keyType.IsReference)
                         _usesReferenceDictionaryKeys = true;

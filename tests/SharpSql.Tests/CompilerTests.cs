@@ -1322,11 +1322,12 @@ public sealed class CompilerTests
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("VARBINARY(MAX)", result.Sql, StringComparison.Ordinal);
         Assert.Contains("CONVERT(BINARY(1), 255)", result.Sql, StringComparison.Ordinal);
-        Assert.Contains("CONVERT(INT, DATALENGTH(@values))", result.Sql, StringComparison.Ordinal);
-        Assert.Contains("CONVERT(TINYINT, SUBSTRING(@values, 0 + 1, 1))", result.Sql, StringComparison.Ordinal);
-        Assert.Contains("SUBSTRING(@values, 1, 0)", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("DECLARE @values INT", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT __count FROM #__sharpsql_objects", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT __binary_value FROM #__sharpsql_indexed_items", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("UPDATE #__sharpsql_indexed_items SET __binary_value", result.Sql, StringComparison.Ordinal);
         Assert.Contains("CONVERT(BINARY(1), 9)", result.Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("#__sharpsql_indexed_items", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("__owner_id = @values", result.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1467,7 +1468,7 @@ public sealed class CompilerTests
         Assert.Contains("@text NVARCHAR(MAX)", sql);
         Assert.Contains("@timestamp DATETIME2", sql);
         Assert.Contains("@id UNIQUEIDENTIFIER", sql);
-        Assert.Contains("@bytes VARBINARY(MAX)", sql);
+        Assert.Contains("@bytes INT", sql);
         Assert.Contains("@nullableInt INT", sql);
     }
 
