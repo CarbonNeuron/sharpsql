@@ -164,7 +164,8 @@ fi
 clr_output="$(dotnet run --project "$work_dir/valid/SdkConsumer.csproj" \
     --configuration Release \
     --no-build \
-    --no-restore)"
+    --no-restore \
+    --no-launch-profile)"
 if [[ "$clr_output" != *"answer=42"* ]]; then
     printf '%s\n' "$clr_output" >&2
     printf 'The SDK package did not expose its DatabaseException runtime assembly.\n' >&2
