@@ -1,6 +1,6 @@
 namespace SharpSql;
 
-/// <summary>Emits compatibility table types and global memory-optimized VM tables.</summary>
+/// <summary>Emits compatibility table types and global memory-optimized runtime tables.</summary>
 internal static class MemoryOptimizedRuntimeSqlEmitter
 {
     internal const int MissingFilegroupErrorNumber = 51921;
@@ -16,6 +16,12 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
 
     internal static string HeapIndexedItemsTableName(RuntimeDurabilityKind durability) =>
         $"__sharpsql_memory_heap_indexed_items_{DurabilityName(durability)}_v1";
+
+    internal static string HeapFieldsTableName(RuntimeDurabilityKind durability) =>
+        $"__sharpsql_memory_heap_fields_{DurabilityName(durability)}_v1";
+
+    internal static string HeapDictionaryEntriesTableName(RuntimeDurabilityKind durability) =>
+        $"__sharpsql_memory_heap_dictionary_entries_{DurabilityName(durability)}_v1";
 
     internal static string Emit(string schemaName = "SharpSql")
     {
@@ -113,6 +119,10 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
         RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, HeapObjectsTable(durability), durability);
         sql.Line();
         RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, HeapIndexedItemsTable(durability), durability);
+        sql.Line();
+        RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, HeapFieldsTable(durability), durability);
+        sql.Line();
+        RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, HeapDictionaryEntriesTable(durability), durability);
         return sql.ToString();
     }
 
@@ -170,6 +180,42 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
         ],
         $"PK_sharpsql_memory_heap_indexed_items_{DurabilityName(durability)}_v1",
         "[__execution_id], [__owner_id], [__index]",
+        1_048_576);
+
+    private static RuntimeTableDefinition HeapFieldsTable(RuntimeDurabilityKind durability) => new(
+        HeapFieldsTableName(durability),
+        [
+            "[__execution_id] UNIQUEIDENTIFIER NOT NULL",
+            "[__object_id] INT NOT NULL",
+            "[__declaring_type_id] INT NOT NULL",
+            "[__field_id] INT NOT NULL",
+            "[__scalar_value] VARBINARY(8000) NULL",
+            "[__text_value] NVARCHAR(MAX) NULL",
+            "[__binary_value] VARBINARY(MAX) NULL",
+            "[__reference_value] INT NULL"
+        ],
+        $"PK_sharpsql_memory_heap_fields_{DurabilityName(durability)}_v1",
+        "[__execution_id], [__object_id], [__declaring_type_id], [__field_id]",
+        1_048_576);
+
+    private static RuntimeTableDefinition HeapDictionaryEntriesTable(RuntimeDurabilityKind durability) => new(
+        HeapDictionaryEntriesTableName(durability),
+        [
+            "[__execution_id] UNIQUEIDENTIFIER NOT NULL",
+            "[__id] BIGINT IDENTITY(1,1) NOT NULL",
+            "[__dictionary_id] INT NOT NULL",
+            "[__key_scalar] VARBINARY(8000) NULL",
+            "[__key_text] NVARCHAR(MAX) NULL",
+            "[__key_binary] VARBINARY(MAX) NULL",
+            "[__key_reference] INT NULL",
+            "[__key_hash] BINARY(32) NULL",
+            "[__value_scalar] VARBINARY(8000) NULL",
+            "[__text_value] NVARCHAR(MAX) NULL",
+            "[__binary_value] VARBINARY(MAX) NULL",
+            "[__reference_value] INT NULL"
+        ],
+        $"PK_sharpsql_memory_heap_dictionary_entries_{DurabilityName(durability)}_v1",
+        "[__execution_id], [__dictionary_id], [__id]",
         1_048_576);
 
     private static string DurabilityName(RuntimeDurabilityKind durability) => durability switch

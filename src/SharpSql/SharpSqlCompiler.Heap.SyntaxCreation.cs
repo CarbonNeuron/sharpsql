@@ -159,15 +159,10 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"DECLARE {objectSql} INT;");
             _sql.Line($"INSERT INTO {HeapObjects} ({HeapObjectInsertColumns("__type_id")}) VALUES ({HeapObjectInsertValues($"{heapType.Id}")});");
             _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
-            var columns = new List<string> { "__object_id" };
-            var values = new List<string> { objectSql };
-            foreach (var field in heapType.Fields.Values)
-            {
-                columns.Add(field.SqlName);
-                var assigned = assignments.LastOrDefault(item => item.Field.Name == field.Name);
-                values.Add(assigned is null ? DefaultSql(field.Type) : assigned.ValueSql);
-            }
-            _sql.Line($"INSERT INTO {heapType.TableName} ({HeapInsertColumns(string.Join(", ", columns))}) VALUES ({HeapInsertValues(string.Join(", ", values))});");
+            EmitHeapTypePayload(
+                heapType,
+                objectSql,
+                field => assignments.LastOrDefault(item => item.Field.Name == field.Name)?.ValueSql ?? DefaultSql(field.Type));
             continuation(objectSql);
         }
     }
@@ -235,7 +230,7 @@ public sealed partial class SharpSqlCompiler
                 var storage = AllocateVmTemporary(field.Type, context);
                 StoreVmTemporary(
                     storage,
-                    $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE {HeapExecutionFilter()}__object_id = {savedReceiver})");
+                    HeapFieldReadValue(heapType, field, savedReceiver));
                 assignments.Add(new HeapValueAssignment(field, ReadVmTemporary(storage)));
                 CaptureField(index + 1);
             }
@@ -266,14 +261,10 @@ public sealed partial class SharpSqlCompiler
                 _sql.Line($"DECLARE {objectSql} INT;");
                 _sql.Line($"INSERT INTO {HeapObjects} ({HeapObjectInsertColumns("__type_id")}) VALUES ({HeapObjectInsertValues($"{heapType.Id}")});");
                 _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
-                var columns = new List<string> { "__object_id" };
-                var values = new List<string> { objectSql };
-                foreach (var field in heapType.Fields.Values)
-                {
-                    columns.Add(field.SqlName);
-                    values.Add(assignments.Single(item => item.Field.Name == field.Name).ValueSql);
-                }
-                _sql.Line($"INSERT INTO {heapType.TableName} ({HeapInsertColumns(string.Join(", ", columns))}) VALUES ({HeapInsertValues(string.Join(", ", values))});");
+                EmitHeapTypePayload(
+                    heapType,
+                    objectSql,
+                    field => assignments.Single(item => item.Field.Name == field.Name).ValueSql);
                 continuation(objectSql);
             }
         });

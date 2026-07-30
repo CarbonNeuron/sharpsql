@@ -438,11 +438,11 @@ sharpsql transpile examples/recursion.cs \
 SQL Server requires the target database to already have a
 `MEMORY_OPTIMIZED_DATA` filegroup and physical container. SharpSql deliberately
 does not create that deployment-specific, effectively irreversible infrastructure.
-The current experiment optimizes legacy VM frames/slots, the fixed-shape managed heap
-object registry, and indexed collection/LINQ rows. Typed object payloads and dictionary
-rows remain ordinary temporary or durable rowstore tables. Scalar slots and indexed
-scalar values use typed binary round-trips because In-Memory OLTP does not support
-`SQL_VARIANT`.
+The current experiment moves legacy VM frames/slots and the complete managed heap—object
+headers, typed fields, indexed collection/LINQ rows, and dictionary entries—into shared
+In-Memory OLTP tables. Statically typed scalar values use binary round-trips because
+In-Memory OLTP does not support `SQL_VARIANT`; text, binary, and references use dedicated
+columns.
 See the [memory-optimized runtime guide](docs/memory-optimized-runtime.md) for
 provisioning, measurements, and the current storage boundary.
 

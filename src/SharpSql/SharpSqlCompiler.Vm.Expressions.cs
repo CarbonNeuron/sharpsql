@@ -127,7 +127,7 @@ public sealed partial class SharpSqlCompiler
                     out var heapType,
                     out var field))
             {
-                continuation($"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})");
+                continuation(HeapFieldReadValue(heapType, field, receiver));
                 return;
             }
             continuation(UnsupportedExpression(

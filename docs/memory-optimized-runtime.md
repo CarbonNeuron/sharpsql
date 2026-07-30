@@ -4,10 +4,9 @@ Status: experimental SQL Server 2022 storage option.
 
 `UseMemoryOptimizedTables` is independent from execution and durability. It preserves
 direct-SQL and static-label lowering while moving stack-machine activation frames,
-spilled slots, managed object headers, and indexed collection/LINQ rows into
-database-global memory-optimized tables. Every row is partitioned by `ExecutionId`,
-allowing inline batches and Service Broker sessions to share the same physical runtime
-safely.
+spilled slots, and the complete managed heap into database-global memory-optimized
+tables. Every row is partitioned by `ExecutionId`, allowing inline batches and Service
+Broker sessions to share the same physical runtime safely.
 
 Ephemeral configuration uses `DURABILITY = SCHEMA_ONLY`; its rows are not recovered
 after SQL Server restarts. Durable configuration uses `DURABILITY = SCHEMA_AND_DATA`.
@@ -91,13 +90,12 @@ cases, and concurrent execution isolation tests.
 
 ## Current boundary
 
-Managed object headers and indexed list/array/`Random`/LINQ rows use database-global,
-execution-partitioned memory-optimized tables with the selected durability. Indexed
-scalars use the same statically typed `VARBINARY(8000)` round-trip as VM slots; strings,
-binary values, and references retain dedicated columns. Per-type object rows and
-dictionary storage still use ordinary temporary or durable rowstore tables. Per-program
-object tables have dynamic, strongly typed columns and need a separate
-provisioning/versioning design rather than being forced into an untyped shared heap.
+Managed object headers, typed field payloads, indexed list/array/`Random`/LINQ rows, and
+dictionary entries use database-global, execution-partitioned memory-optimized tables
+with the selected durability. Statically known scalar fields, items, keys, and values use
+`VARBINARY(8000)` round-trips; strings, binary values, and references retain dedicated
+columns. Object fields are keyed by declaring type and deterministic field IDs, avoiding
+per-program physical DDL while preserving closed-world typed reads and writes.
 
 Service Broker can provision and address either memory-table durability. Its current
 worker continuation slice still rejects calls that require the VM fallback (`SS7005`),

@@ -248,16 +248,7 @@ public sealed partial class SharpSqlCompiler
             else
                 StoreVmTemporary(objectStorage, "CONVERT(INT, SCOPE_IDENTITY())");
             foreach (var allocatedType in HeapHierarchyBaseFirst(heapType))
-            {
-                var columns = new List<string> { "__object_id" };
-                var values = new List<string> { objectSql };
-                foreach (var field in allocatedType.Fields.Values)
-                {
-                    columns.Add(field.SqlName);
-                    values.Add(DefaultSql(field.Type));
-                }
-                _sql.Line($"INSERT INTO {allocatedType.TableName} ({HeapInsertColumns(string.Join(", ", columns))}) VALUES ({HeapInsertValues(string.Join(", ", values))});");
-            }
+                EmitHeapTypePayload(allocatedType, objectSql, field => DefaultSql(field.Type));
 
             var objectScope = scope.Child();
             objectScope.Add("this", new ScalarVariableBinding(
@@ -292,7 +283,7 @@ public sealed partial class SharpSqlCompiler
 
                 EmitVmExpression(initializer.Value, scope, context, value =>
                 {
-                    _sql.Line($"UPDATE {declaringType.TableName} SET {field.SqlName} = {value} WHERE {HeapExecutionFilter()}__object_id = {objectSql};");
+                    EmitHeapFieldUpdate(declaringType, field, objectSql, value);
                     EvaluateObjectInitializer(index + 1);
                 });
             }
@@ -437,7 +428,7 @@ public sealed partial class SharpSqlCompiler
                 var field = fields[index];
                 EmitVmExpression(field.Initializer!, typeScope, context, value =>
                 {
-                    _sql.Line($"UPDATE {declaringType.TableName} SET {field.SqlName} = {value} WHERE {HeapExecutionFilter()}__object_id = {objectSql};");
+                    EmitHeapFieldUpdate(declaringType, field, objectSql, value);
                     EvaluateInstanceInitializer(index + 1);
                 });
             }
@@ -478,7 +469,7 @@ public sealed partial class SharpSqlCompiler
                     var name = current.TargetFields[index];
                     if (string.IsNullOrEmpty(name) || !declaringType.Fields.TryGetValue(name, out var field))
                         continue;
-                    _sql.Line($"UPDATE {declaringType.TableName} SET {field.SqlName} = {arguments[index]} WHERE {HeapExecutionFilter()}__object_id = {objectSql};");
+                    EmitHeapFieldUpdate(declaringType, field, objectSql, arguments[index]);
                 }
             }
 
@@ -598,7 +589,7 @@ public sealed partial class SharpSqlCompiler
                     var storage = AllocateVmTemporary(field.Type, context);
                     StoreVmTemporary(
                         storage,
-                        $"(SELECT {field.SqlName} FROM {declaringType.TableName} WHERE {HeapExecutionFilter()}__object_id = {savedReceiver})");
+                        HeapFieldReadValue(declaringType, field, savedReceiver));
                     assignments.Add((declaringType, field, ReadVmTemporary(storage)));
                 }
                 CaptureField(index + 1);
@@ -631,16 +622,12 @@ public sealed partial class SharpSqlCompiler
                 _sql.Line($"INSERT INTO {HeapObjects} ({HeapObjectInsertColumns("__type_id")}) VALUES ({HeapObjectInsertValues($"{heapType.Id}")});");
                 _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
                 foreach (var allocatedType in hierarchy)
-                {
-                    var columns = new[] { "__object_id" }
-                        .Concat(allocatedType.Fields.Values.Select(field => field.SqlName));
-                    var values = new[] { objectSql }.Concat(
-                        allocatedType.Fields.Values.Select(field =>
-                            assignments.Single(item =>
-                                ReferenceEquals(item.DeclaringType, allocatedType) &&
-                                ReferenceEquals(item.Field, field)).ValueSql));
-                    _sql.Line($"INSERT INTO {allocatedType.TableName} ({HeapInsertColumns(string.Join(", ", columns))}) VALUES ({HeapInsertValues(string.Join(", ", values))});");
-                }
+                    EmitHeapTypePayload(
+                        allocatedType,
+                        objectSql,
+                        field => assignments.Single(item =>
+                            ReferenceEquals(item.DeclaringType, allocatedType) &&
+                            ReferenceEquals(item.Field, field)).ValueSql);
                 continuation(objectSql);
             }
         });

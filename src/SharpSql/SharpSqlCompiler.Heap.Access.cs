@@ -36,7 +36,7 @@ public sealed partial class SharpSqlCompiler
         }
         else if (TryResolveHeapField(member, scope, substitutions, out var type, out var field))
         {
-            return SqlScalarExpression.Primary($"(SELECT {field.SqlName} FROM {type.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})");
+            return SqlScalarExpression.Primary(HeapFieldReadValue(type, field, receiver));
         }
         return SqlScalarExpression.Primary(UnsupportedExpression(member, $"Unknown heap member '{member.Name.Identifier.ValueText}'."));
     }
@@ -75,7 +75,7 @@ public sealed partial class SharpSqlCompiler
                 else if (IsDictionaryType(receiverType.Name))
                 {
                     var keyType = GenericArguments(receiverType.Name)[0];
-                    _sql.Line($"IF NOT EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver} AND {DictionaryKeyPredicate(keyType, key)}) THROW 51010, 'The given key was not present in the dictionary.', 1;");
+                    _sql.Line($"IF NOT EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {receiver} AND {DictionaryKeyPredicate(keyType, key)}) THROW 51010, 'The given key was not present in the dictionary.', 1;");
                 }
 
                 if (TryGetHeapElementSql(receiverType, receiver, key, out var value))
@@ -109,7 +109,7 @@ public sealed partial class SharpSqlCompiler
                 else
                 {
                     var keyType = GenericArguments(receiverType.Name)[0];
-                    _sql.Line($"IF NOT EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver} AND {DictionaryKeyPredicate(keyType, key)}) THROW 51010, 'The given key was not present in the dictionary.', 1;");
+                    _sql.Line($"IF NOT EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {receiver} AND {DictionaryKeyPredicate(keyType, key)}) THROW 51010, 'The given key was not present in the dictionary.', 1;");
                 }
 
                 if (TryGetHeapElementSql(receiverType, receiver, key, out var value))
@@ -148,7 +148,7 @@ public sealed partial class SharpSqlCompiler
         if (IsDictionaryType(receiverType.Name))
         {
             var types = GenericArguments(receiverType.Name);
-            value = $"(SELECT {CollectionReadValue(types[1], false)} FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver} AND {DictionaryKeyPredicate(types[0], key)})";
+            value = $"(SELECT {DictionaryValueRead(types[1])} FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {receiver} AND {DictionaryKeyPredicate(types[0], key)})";
             return true;
         }
         value = string.Empty;
@@ -169,7 +169,7 @@ public sealed partial class SharpSqlCompiler
                 var types = GenericArguments(receiverType.Name);
                 var dictionary = EmitScalar(member.Expression, scope);
                 var key = EmitScalar(invocation.ArgumentList.Arguments[0].Expression, scope);
-                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {dictionary} AND {DictionaryKeyPredicate(types[0], key)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {dictionary} AND {DictionaryKeyPredicate(types[0], key)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
                 return true;
             }
             if (IsListType(receiverType.Name) && member.Name.Identifier.ValueText == "Contains" &&
@@ -187,7 +187,7 @@ public sealed partial class SharpSqlCompiler
                 var valueType = GenericArguments(receiverType.Name)[1];
                 var dictionary = EmitScalar(member.Expression, scope);
                 var value = EmitScalar(invocation.ArgumentList.Arguments[0].Expression, scope);
-                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {dictionary} AND {CollectionValuePredicate(valueType, value, false)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {dictionary} AND {DictionaryValuePredicate(valueType, value)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
                 return true;
             }
         }
@@ -210,7 +210,7 @@ public sealed partial class SharpSqlCompiler
                 var receiver = EmitScalar(member.Receiver, scope, substitutions);
                 var keyType = GenericArguments(receiverType.Name)[0];
                 var key = EmitScalar(invocation.Arguments[0], scope, substitutions);
-                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver} AND {DictionaryKeyPredicate(keyType, key)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {receiver} AND {DictionaryKeyPredicate(keyType, key)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
                 return true;
             }
             if (IsListType(receiverType.Name) && member.MemberName == "Contains" &&
@@ -228,7 +228,7 @@ public sealed partial class SharpSqlCompiler
                 var receiver = EmitScalar(member.Receiver, scope, substitutions);
                 var valueType = GenericArguments(receiverType.Name)[1];
                 var value = EmitScalar(invocation.Arguments[0], scope, substitutions);
-                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver} AND {CollectionValuePredicate(valueType, value, false)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {receiver} AND {DictionaryValuePredicate(valueType, value)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
                 return true;
             }
         }
@@ -300,8 +300,7 @@ public sealed partial class SharpSqlCompiler
                 out var field,
                 out var receiver))
         {
-            expression = SqlScalarExpression.Primary(
-                $"(SELECT {field.SqlName} FROM {type.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})");
+            expression = SqlScalarExpression.Primary(HeapFieldReadValue(type, field, receiver));
             return true;
         }
         expression = null!;
@@ -399,6 +398,72 @@ public sealed partial class SharpSqlCompiler
         return $"CONVERT({type.SqlType()}, {column})";
     }
 
+    private string HeapFieldValueColumn(HeapField field)
+    {
+        if (!UsesMemoryOptimizedRuntime)
+            return field.SqlName;
+        if (field.Type.IsString)
+            return "__text_value";
+        if (field.Type.Name == "byte[]")
+            return "__binary_value";
+        if (field.Type.IsReference)
+            return "__reference_value";
+        return "__scalar_value";
+    }
+
+    private string HeapFieldStoredValue(HeapField field, string value)
+    {
+        if (!UsesMemoryOptimizedRuntime || field.Type.IsString || field.Type.Name == "byte[]" || field.Type.IsReference)
+            return value;
+        var typedValue = field.Type.Name == "char"
+            ? $"CONVERT(NCHAR(1), {value})"
+            : value;
+        return $"CONVERT(VARBINARY(8000), {typedValue})";
+    }
+
+    private string HeapFieldReadValue(HeapType declaringType, HeapField field, string objectSql)
+    {
+        if (!UsesMemoryOptimizedRuntime)
+            return $"(SELECT {field.SqlName} FROM {declaringType.TableName} WHERE {HeapExecutionFilter()}__object_id = {objectSql})";
+
+        var column = HeapFieldValueColumn(field);
+        var value = field.Type.IsString || field.Type.Name == "byte[]" || field.Type.IsReference
+            ? column
+            : $"CONVERT({field.Type.SqlType()}, {column})";
+        return $"(SELECT {value} FROM {MemoryOptimizedHeapFields} WHERE __execution_id = {RuntimeExecutionId} AND __object_id = {objectSql} AND __declaring_type_id = {declaringType.Id} AND __field_id = {field.RuntimeFieldId})";
+    }
+
+    private void EmitHeapFieldUpdate(HeapType declaringType, HeapField field, string objectSql, string value)
+    {
+        if (!UsesMemoryOptimizedRuntime)
+        {
+            _sql.Line($"UPDATE {declaringType.TableName} SET {field.SqlName} = {value} WHERE {HeapExecutionFilter()}__object_id = {objectSql};");
+            return;
+        }
+
+        _sql.Line($"UPDATE {MemoryOptimizedHeapFields} SET {HeapFieldValueColumn(field)} = {HeapFieldStoredValue(field, value)} WHERE __execution_id = {RuntimeExecutionId} AND __object_id = {objectSql} AND __declaring_type_id = {declaringType.Id} AND __field_id = {field.RuntimeFieldId};");
+    }
+
+    private void EmitHeapTypePayload(HeapType declaringType, string objectSql, Func<HeapField, string> valueFor)
+    {
+        if (!UsesMemoryOptimizedRuntime)
+        {
+            var columns = new[] { "__object_id" }
+                .Concat(declaringType.Fields.Values.Select(field => field.SqlName));
+            var values = new[] { objectSql }
+                .Concat(declaringType.Fields.Values.Select(valueFor));
+            _sql.Line($"INSERT INTO {declaringType.TableName} ({HeapInsertColumns(string.Join(", ", columns))}) VALUES ({HeapInsertValues(string.Join(", ", values))});");
+            return;
+        }
+
+        foreach (var field in declaringType.Fields.Values)
+        {
+            var valueColumn = HeapFieldValueColumn(field);
+            var value = HeapFieldStoredValue(field, valueFor(field));
+            _sql.Line($"INSERT INTO {MemoryOptimizedHeapFields} (__execution_id, __object_id, __declaring_type_id, __field_id, {valueColumn}) VALUES ({RuntimeExecutionId}, {objectSql}, {declaringType.Id}, {field.RuntimeFieldId}, {value});");
+        }
+    }
+
     private string IndexedItemValueColumn(IrType type) =>
         UsesMemoryOptimizedRuntime && !type.IsString && type.Name != "byte[]" && !type.IsReference
             ? "__scalar_value"
@@ -432,13 +497,51 @@ public sealed partial class SharpSqlCompiler
         return $"{column} = {IndexedItemStoredValue(type, value)}";
     }
 
-    private static string DictionaryKeyPredicate(IrType type, string value)
+    private string DictionaryKeyColumn(IrType type) =>
+        UsesMemoryOptimizedRuntime && !type.IsString && type.Name != "byte[]" && !type.IsReference
+            ? "__key_scalar"
+            : CollectionValueColumn(type, key: true);
+
+    private string DictionaryKeyStoredValue(IrType type, string value)
+    {
+        if (!UsesMemoryOptimizedRuntime || type.IsString || type.Name == "byte[]" || type.IsReference)
+            return CollectionStoredValue(type, value);
+        var typedValue = type.Name == "char"
+            ? $"CONVERT(NCHAR(1), {value})"
+            : value;
+        return $"CONVERT(VARBINARY(8000), {typedValue})";
+    }
+
+    private string DictionaryValueColumn(IrType type) =>
+        UsesMemoryOptimizedRuntime && !type.IsString && type.Name != "byte[]" && !type.IsReference
+            ? "__value_scalar"
+            : CollectionValueColumn(type, key: false);
+
+    private string DictionaryValueStored(IrType type, string value)
+    {
+        if (!UsesMemoryOptimizedRuntime || type.IsString || type.Name == "byte[]" || type.IsReference)
+            return CollectionStoredValue(type, value);
+        var typedValue = type.Name == "char"
+            ? $"CONVERT(NCHAR(1), {value})"
+            : value;
+        return $"CONVERT(VARBINARY(8000), {typedValue})";
+    }
+
+    private string DictionaryValueRead(IrType type, string? qualifier = null)
+    {
+        if (!UsesMemoryOptimizedRuntime || type.IsString || type.Name == "byte[]" || type.IsReference)
+            return CollectionReadValue(type, key: false, qualifier);
+        var column = (qualifier is null ? string.Empty : qualifier + ".") + "__value_scalar";
+        return $"CONVERT({type.SqlType()}, {column})";
+    }
+
+    private string DictionaryKeyPredicate(IrType type, string value)
     {
         if (type.IsString)
             return $"__key_hash = {DictionaryKeyHash(type, value)} AND __key_text COLLATE Latin1_General_100_BIN2 = {value} COLLATE Latin1_General_100_BIN2";
         if (type.Name == "byte[]")
             return $"__key_hash = {DictionaryKeyHash(type, value)} AND __key_binary = {value}";
-        return $"{CollectionValueColumn(type, true)} = {CollectionStoredValue(type, value)}";
+        return $"{DictionaryKeyColumn(type)} = {DictionaryKeyStoredValue(type, value)}";
     }
 
     private static string? DictionaryKeyHash(IrType type, string value)
@@ -456,6 +559,16 @@ public sealed partial class SharpSqlCompiler
         if (type.IsString)
             return $"{column} COLLATE Latin1_General_100_BIN2 = {value} COLLATE Latin1_General_100_BIN2";
         return $"{column} = {CollectionStoredValue(type, value)}";
+    }
+
+    private string DictionaryValuePredicate(IrType type, string value)
+    {
+        if (!UsesMemoryOptimizedRuntime)
+            return CollectionValuePredicate(type, value, key: false);
+        var column = DictionaryValueColumn(type);
+        if (type.IsString)
+            return $"{column} COLLATE Latin1_General_100_BIN2 = {value} COLLATE Latin1_General_100_BIN2";
+        return $"{column} = {DictionaryValueStored(type, value)}";
     }
 
     private string FormatTextValue(IrType type, string value)
@@ -481,7 +594,7 @@ public sealed partial class SharpSqlCompiler
             if (index > 0)
                 parts.Add("N', '");
             parts.Add($"N'{EscapeSqlString(field.Name)} = '");
-            var fieldValue = $"(SELECT {field.SqlName} FROM {declaringType.TableName} WHERE {HeapExecutionFilter()}__object_id = {reference})";
+            var fieldValue = HeapFieldReadValue(declaringType, field, reference);
             parts.Add(FormatTextValue(field.Type, fieldValue));
         }
         parts.Add("N' }'");

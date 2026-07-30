@@ -353,8 +353,7 @@ public sealed partial class SharpSqlCompiler
                 member.MemberId,
                 out var heapType,
                 out var field))
-            return SqlScalarExpression.Primary(
-                $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})");
+            return SqlScalarExpression.Primary(HeapFieldReadValue(heapType, field, receiver));
         return SqlScalarExpression.Primary(
             UnsupportedExpression(member.Source, $"Unknown member '{member.MemberName}' on '{receiverType.Name}'."));
     }
@@ -423,8 +422,7 @@ public sealed partial class SharpSqlCompiler
                 out var heapType,
                 out var field,
                 out var receiver))
-            return SqlScalarExpression.Primary(
-                $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})");
+            return SqlScalarExpression.Primary(HeapFieldReadValue(heapType, field, receiver));
         AddDiagnostic("SS4001", $"Unknown identifier '{variable.Symbol.Name}'.", variable.Source);
         return SqlScalarExpression.Primary("NULL");
     }

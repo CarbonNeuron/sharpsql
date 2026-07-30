@@ -44,7 +44,7 @@ public sealed partial class SharpSqlCompiler
                 }
                 if (IsDictionaryType(receiverType.Name))
                 {
-                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver};");
+                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {receiver};");
                     _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                     return true;
                 }
@@ -69,7 +69,7 @@ public sealed partial class SharpSqlCompiler
                 {
                     var receiver = EmitScalar(collectionMember.Expression, scope);
                     var predicate = DictionaryKeyPredicate(types[0], key);
-                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver} AND {predicate};");
+                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {receiver} AND {predicate};");
                     _sql.Line("IF @@ROWCOUNT > 0");
                     _sql.Line("BEGIN");
                     using (_sql.Indent())
@@ -87,9 +87,9 @@ public sealed partial class SharpSqlCompiler
                 TryResolveHeapField(fieldAccess, scope, out var heapType, out var field))
             {
                 var receiver = EmitScalar(fieldAccess.Expression, scope);
-                var currentValue = $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})";
+                var currentValue = HeapFieldReadValue(heapType, field, receiver);
                 EmitVmExpression(assignment.Right, scope, context, value =>
-                    _sql.Line($"UPDATE {heapType.TableName} SET {field.SqlName} = {HeapAssignmentValue(assignment, field.Type, currentValue, value)} WHERE {HeapExecutionFilter()}__object_id = {receiver};"));
+                    EmitHeapFieldUpdate(heapType, field, receiver, HeapAssignmentValue(assignment, field.Type, currentValue, value)));
                 return true;
             }
 
@@ -103,9 +103,9 @@ public sealed partial class SharpSqlCompiler
                     out var implicitMember,
                     out var implicitReceiver))
             {
-                var currentValue = $"(SELECT {implicitMember.SqlName} FROM {implicitType.TableName} WHERE {HeapExecutionFilter()}__object_id = {implicitReceiver})";
+                var currentValue = HeapFieldReadValue(implicitType, implicitMember, implicitReceiver);
                 EmitVmExpression(assignment.Right, scope, context, value =>
-                    _sql.Line($"UPDATE {implicitType.TableName} SET {implicitMember.SqlName} = {HeapAssignmentValue(assignment, implicitMember.Type, currentValue, value)} WHERE {HeapExecutionFilter()}__object_id = {implicitReceiver};"));
+                    EmitHeapFieldUpdate(implicitType, implicitMember, implicitReceiver, HeapAssignmentValue(assignment, implicitMember.Type, currentValue, value)));
                 return true;
             }
 
@@ -157,7 +157,7 @@ public sealed partial class SharpSqlCompiler
                 }
                 if (IsDictionaryType(receiverType.Name))
                 {
-                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver};");
+                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {receiver};");
                     _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                     return true;
                 }
@@ -182,7 +182,7 @@ public sealed partial class SharpSqlCompiler
                 {
                     var receiver = EmitScalar(member.Receiver, scope);
                     var predicate = DictionaryKeyPredicate(types[0], key);
-                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver} AND {predicate};");
+                    _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {receiver} AND {predicate};");
                     _sql.Line("IF @@ROWCOUNT > 0");
                     _sql.Line("BEGIN");
                     using (_sql.Indent())
@@ -230,7 +230,8 @@ public sealed partial class SharpSqlCompiler
                 var operation = mutation.Operator is IrUnaryOperator.PreIncrement or IrUnaryOperator.PostIncrement
                     ? "+ 1"
                     : "- 1";
-                _sql.Line($"UPDATE {mutationType.TableName} SET {mutationField.SqlName} = {mutationField.SqlName} {operation} WHERE {HeapExecutionFilter()}__object_id = {mutationReceiver};");
+                var currentValue = HeapFieldReadValue(mutationType, mutationField, mutationReceiver);
+                EmitHeapFieldUpdate(mutationType, mutationField, mutationReceiver, $"{currentValue} {operation}");
                 return true;
             }
         }
@@ -247,9 +248,9 @@ public sealed partial class SharpSqlCompiler
                 out var field))
         {
             var receiver = EmitScalar(fieldAccess.Receiver, scope);
-            var currentValue = $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})";
+            var currentValue = HeapFieldReadValue(heapType, field, receiver);
             EmitVmExpression(assignment.Value, scope, context, value =>
-                _sql.Line($"UPDATE {heapType.TableName} SET {field.SqlName} = {HeapAssignmentValue(assignment.Operator, field.Type, currentValue, value)} WHERE {HeapExecutionFilter()}__object_id = {receiver};"));
+                EmitHeapFieldUpdate(heapType, field, receiver, HeapAssignmentValue(assignment.Operator, field.Type, currentValue, value)));
             return true;
         }
 
@@ -264,9 +265,9 @@ public sealed partial class SharpSqlCompiler
                 out var implicitMember,
                 out var implicitReceiver))
         {
-            var currentValue = $"(SELECT {implicitMember.SqlName} FROM {implicitType.TableName} WHERE {HeapExecutionFilter()}__object_id = {implicitReceiver})";
+            var currentValue = HeapFieldReadValue(implicitType, implicitMember, implicitReceiver);
             EmitVmExpression(assignment.Value, scope, context, value =>
-                _sql.Line($"UPDATE {implicitType.TableName} SET {implicitMember.SqlName} = {HeapAssignmentValue(assignment.Operator, implicitMember.Type, currentValue, value)} WHERE {HeapExecutionFilter()}__object_id = {implicitReceiver};"));
+                EmitHeapFieldUpdate(implicitType, implicitMember, implicitReceiver, HeapAssignmentValue(assignment.Operator, implicitMember.Type, currentValue, value)));
             return true;
         }
 
@@ -495,7 +496,7 @@ public sealed partial class SharpSqlCompiler
             {
                 var dictionary = EmitScalar(receiver, scope);
                 var savedKey = ReadVmTemporary(keyStore);
-                _sql.Line($"IF EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {dictionary} AND {DictionaryKeyPredicate(types[0], savedKey)}) THROW 51001, 'Duplicate dictionary key.', 1;");
+                _sql.Line($"IF EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {dictionary} AND {DictionaryKeyPredicate(types[0], savedKey)}) THROW 51001, 'Duplicate dictionary key.', 1;");
                 InsertDictionaryEntry(dictionary, types[0], savedKey, types[1], value);
                 _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapObjectExecutionFilter()}__id = {dictionary};");
             });
@@ -524,7 +525,7 @@ public sealed partial class SharpSqlCompiler
             {
                 var dictionary = EmitScalar(receiver, scope);
                 var savedKey = ReadVmTemporary(keyStore);
-                _sql.Line($"IF EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {dictionary} AND {DictionaryKeyPredicate(types[0], savedKey)}) THROW 51001, 'Duplicate dictionary key.', 1;");
+                _sql.Line($"IF EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {dictionary} AND {DictionaryKeyPredicate(types[0], savedKey)}) THROW 51001, 'Duplicate dictionary key.', 1;");
                 InsertDictionaryEntry(dictionary, types[0], savedKey, types[1], value);
                 _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapObjectExecutionFilter()}__id = {dictionary};");
             });
@@ -549,7 +550,7 @@ public sealed partial class SharpSqlCompiler
                 var dictionary = EmitScalar(element.Expression, scope);
                 var savedKey = ReadVmTemporary(keyStore);
                 var predicate = DictionaryKeyPredicate(types[0], savedKey);
-                _sql.Line($"UPDATE {HeapDictionaryEntries} SET {CollectionValueColumn(types[1], false)} = {CollectionStoredValue(types[1], value)} WHERE {HeapExecutionFilter()}__dictionary_id = {dictionary} AND {predicate};");
+                _sql.Line($"UPDATE {HeapDictionaryEntries} SET {DictionaryValueColumn(types[1])} = {DictionaryValueStored(types[1], value)} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {dictionary} AND {predicate};");
                 _sql.Line("IF @@ROWCOUNT = 0");
                 _sql.Line("BEGIN");
                 using (_sql.Indent())
@@ -579,7 +580,7 @@ public sealed partial class SharpSqlCompiler
                 var dictionary = EmitScalar(element.Receiver, scope);
                 var savedKey = ReadVmTemporary(keyStore);
                 var predicate = DictionaryKeyPredicate(types[0], savedKey);
-                _sql.Line($"UPDATE {HeapDictionaryEntries} SET {CollectionValueColumn(types[1], false)} = {CollectionStoredValue(types[1], value)} WHERE {HeapExecutionFilter()}__dictionary_id = {dictionary} AND {predicate};");
+                _sql.Line($"UPDATE {HeapDictionaryEntries} SET {DictionaryValueColumn(types[1])} = {DictionaryValueStored(types[1], value)} WHERE {DictionaryEntryExecutionFilter()}__dictionary_id = {dictionary} AND {predicate};");
                 _sql.Line("IF @@ROWCOUNT = 0");
                 _sql.Line("BEGIN");
                 using (_sql.Indent())
@@ -594,17 +595,17 @@ public sealed partial class SharpSqlCompiler
 
     private void InsertDictionaryEntry(string dictionary, IrType keyType, string key, IrType valueType, string value)
     {
-        var columns = new List<string> { "__dictionary_id", CollectionValueColumn(keyType, true) };
-        var values = new List<string> { dictionary, CollectionStoredValue(keyType, key) };
+        var columns = new List<string> { "__dictionary_id", DictionaryKeyColumn(keyType) };
+        var values = new List<string> { dictionary, DictionaryKeyStoredValue(keyType, key) };
         var hash = DictionaryKeyHash(keyType, key);
         if (hash is not null)
         {
             columns.Add("__key_hash");
             values.Add(hash);
         }
-        columns.Add(CollectionValueColumn(valueType, false));
-        values.Add(CollectionStoredValue(valueType, value));
-        _sql.Line($"INSERT INTO {HeapDictionaryEntries} ({HeapInsertColumns(string.Join(", ", columns))}) VALUES ({HeapInsertValues(string.Join(", ", values))});");
+        columns.Add(DictionaryValueColumn(valueType));
+        values.Add(DictionaryValueStored(valueType, value));
+        _sql.Line($"INSERT INTO {HeapDictionaryEntries} ({DictionaryEntryInsertColumns(string.Join(", ", columns))}) VALUES ({DictionaryEntryInsertValues(string.Join(", ", values))});");
     }
 
 }

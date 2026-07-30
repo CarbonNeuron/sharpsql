@@ -111,13 +111,14 @@ The current VM lowering supports scalar and heap-reference parameters/results, d
 
 Both runtime tables are dropped at normal halt and pre-dropped at startup to recover from an earlier failed batch on a reused connection. Local temporary tables are also removed when their SQL connection closes.
 
-The independent memory-optimized option moves VM state, managed object headers, and
-indexed collection/LINQ rows into database-global, execution-partitioned In-Memory OLTP
-tables. Ephemeral tables use `SCHEMA_ONLY`; durable tables use `SCHEMA_AND_DATA`, with
-separate versioned names so both can coexist. Scalar slots and indexed scalar values use
-`VARBINARY(8000)` round-tripping because memory-optimized tables cannot contain
-`SQL_VARIANT`. Dynamic typed-object payloads and dictionaries remain on ordinary
-temporary or durable rowstore tables in this slice.
+The independent memory-optimized option moves VM state and the complete managed heap
+into database-global, execution-partitioned In-Memory OLTP tables. Ephemeral tables use
+`SCHEMA_ONLY`; durable tables use `SCHEMA_AND_DATA`, with separate versioned names so
+both can coexist. Statically typed scalar slots, fields, indexed values, dictionary keys,
+and dictionary values use `VARBINARY(8000)` round-tripping because memory-optimized
+tables cannot contain `SQL_VARIANT`; text, binary, and references use dedicated columns.
+Generic field rows are keyed by declaring-type and field IDs, so programs do not require
+dynamic per-type memory-table DDL.
 
 ## Managed heap and collections
 
