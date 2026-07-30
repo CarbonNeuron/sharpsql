@@ -95,3 +95,40 @@ jobs:
           name: test-results
           path: TestResults
           if-no-files-found: ignore
+
+  conformance:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: always() && needs.build-and-test.result == 'success'
+    timeout-minutes: 30
+    env:
+      NUGET_XMLDOC_MODE: skip
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore SharpSql.slnx
+
+      - name: Build
+        run: dotnet build SharpSql.slnx --configuration Release --no-restore
+
+      - name: Download Mono compiler tests
+        run: bash tests/conformance/download-mono-tests.sh
+
+      - name: Run conformance suite
+        run: dotnet run --project src/SharpSql.Cli/SharpSql.Cli.csproj --configuration Release --no-build -- conformance
+
+      - name: Upload conformance results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-results
+          path: tests/conformance/results.json
+          if-no-files-found: warn

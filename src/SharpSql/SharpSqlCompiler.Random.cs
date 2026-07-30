@@ -81,7 +81,7 @@ public sealed partial class SharpSqlCompiler
         _sql.Line($"DECLARE {mk} BIGINT = 1;");
         InsertDefaultIndexedItems(random, "56", IrType.Int);
         _sql.Line($"DECLARE {index} INT;");
-        _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {mj})) WHERE __owner_id = {random} AND __index = 55;");
+        _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {mj})) WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = 55;");
         _sql.Line($"DECLARE {shuffleIndex} INT = 0;");
         _sql.Line($"SET {index} = 1;");
         _sql.Line($"WHILE {index} < 55");
@@ -90,11 +90,11 @@ public sealed partial class SharpSqlCompiler
         {
             _sql.Line($"SET {shuffleIndex} = {shuffleIndex} + 21;");
             _sql.Line($"IF {shuffleIndex} >= 55 SET {shuffleIndex} = {shuffleIndex} - 55;");
-            _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {mk})) WHERE __owner_id = {random} AND __index = {shuffleIndex};");
+            _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {mk})) WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = {shuffleIndex};");
             _sql.Line($"SET {mk} = {mj} - {mk};");
             EmitInt32Wrap(mk);
             _sql.Line($"IF {mk} < 0 SET {mk} = {mk} + {RandomMax};");
-            _sql.Line($"SET {mj} = CONVERT(INT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = {shuffleIndex}));");
+            _sql.Line($"SET {mj} = CONVERT(INT, (SELECT __value FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = {shuffleIndex}));");
             _sql.Line($"SET {index} = {index} + 1;");
         }
         _sql.Line("END;");
@@ -112,10 +112,10 @@ public sealed partial class SharpSqlCompiler
             {
                 _sql.Line($"SET {offsetIndex} = {index} + 30;");
                 _sql.Line($"IF {offsetIndex} >= 55 SET {offsetIndex} = {offsetIndex} - 55;");
-                _sql.Line($"SET {stateValue} = CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = {index})) - CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = 1 + {offsetIndex}));");
+                _sql.Line($"SET {stateValue} = CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = {index})) - CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = 1 + {offsetIndex}));");
                 EmitInt32Wrap(stateValue);
                 _sql.Line($"IF {stateValue} < 0 SET {stateValue} = {stateValue} + {RandomMax};");
-                _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {stateValue})) WHERE __owner_id = {random} AND __index = {index};");
+                _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {stateValue})) WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = {index};");
                 _sql.Line($"SET {index} = {index} + 1;");
             }
             _sql.Line("END;");
@@ -413,16 +413,45 @@ public sealed partial class SharpSqlCompiler
 
     private string EmitRandomSample(string random)
     {
+        string? lockResource = null;
+        var releaseSessionLock = false;
+        if (UsesDurableRuntime)
+        {
+            lockResource = _names.Allocate("_random_lock_resource");
+            var lockResult = _names.Allocate("_random_lock_result");
+            var lockOwner = UsesServiceBrokerRuntime ? "Transaction" : "Session";
+            _sql.Line($"DECLARE {lockResource} NVARCHAR(255) = CONCAT(N'SharpSql.Random.', CONVERT(NVARCHAR(36), {RuntimeExecutionId}), N'.', CONVERT(NVARCHAR(20), {random}));");
+            _sql.Line($"DECLARE {lockResult} INT;");
+            _sql.Line($"EXEC {lockResult} = sys.sp_getapplock @Resource = {lockResource}, @LockMode = 'Exclusive', @LockOwner = '{lockOwner}', @LockTimeout = 60000;");
+            _sql.Line($"IF {lockResult} = -3 THROW {ServiceBrokerWorkerDispatcherSqlEmitter.RetryableWorkerDeadlockErrorNumber}, 'The SharpSql Random state lock was deadlocked.', 1;");
+            _sql.Line($"IF {lockResult} < 0 THROW 51930, 'Unable to lock the SharpSql Random state.', 1;");
+            releaseSessionLock = !UsesServiceBrokerRuntime;
+            if (releaseSessionLock)
+                _sql.Line("BEGIN TRY");
+        }
+
         var next = _names.Allocate("_random_inext");
         var nextPartner = _names.Allocate("_random_inextp");
         var sample = _names.Allocate("_random_sample");
-        _sql.Line($"DECLARE {next} INT = (SELECT __state0 FROM {HeapObjects} WHERE __id = {random}) % 55 + 1;");
-        _sql.Line($"DECLARE {nextPartner} INT = (SELECT __state1 FROM {HeapObjects} WHERE __id = {random}) % 55 + 1;");
-        _sql.Line($"DECLARE {sample} BIGINT = CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = {next})) - CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE __owner_id = {random} AND __index = {nextPartner}));");
+        _sql.Line($"DECLARE {next} INT = (SELECT __state0 FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {random}) % 55 + 1;");
+        _sql.Line($"DECLARE {nextPartner} INT = (SELECT __state1 FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {random}) % 55 + 1;");
+        _sql.Line($"DECLARE {sample} BIGINT = CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = {next})) - CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = {nextPartner}));");
         _sql.Line($"SET {sample} = (({sample} + 2147483648) % 4294967296 + 4294967296) % 4294967296 - 2147483648;");
         _sql.Line($"SET {sample} = CASE WHEN {sample} = {RandomMax} THEN {sample} - 1 WHEN {sample} < 0 THEN {sample} + {RandomMax} ELSE {sample} END;");
-        _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {sample})) WHERE __owner_id = {random} AND __index = {next};");
-        _sql.Line($"UPDATE {HeapObjects} SET __state0 = {next}, __state1 = {nextPartner} WHERE __id = {random};");
+        _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {sample})) WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = {next};");
+        _sql.Line($"UPDATE {HeapObjects} SET __state0 = {next}, __state1 = {nextPartner} WHERE {HeapExecutionFilter()}__id = {random};");
+        if (releaseSessionLock)
+        {
+            _sql.Line($"EXEC sys.sp_releaseapplock @Resource = {lockResource}, @LockOwner = 'Session';");
+            _sql.Line("END TRY");
+            _sql.Line("BEGIN CATCH");
+            using (_sql.Indent())
+            {
+                _sql.Line($"EXEC sys.sp_releaseapplock @Resource = {lockResource}, @LockOwner = 'Session';");
+                _sql.Line("THROW;");
+            }
+            _sql.Line("END CATCH;");
+        }
         return sample;
     }
 

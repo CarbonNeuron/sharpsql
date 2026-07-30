@@ -6,7 +6,7 @@
 
 **Compile a useful subset of C# into one self-contained T-SQL batch.**
 
-SharpSql uses Roslyn syntax and semantic analysis to lower C# control flow, methods, objects, and collections into SQL Server. Small methods are inlined. Recursive or over-budget methods run on an ephemeral stack machine built from local temporary tables and static `GOTO` labels. The generated batch creates no persistent functions or procedures and cleans up its runtime state when it finishes.
+SharpSql uses Roslyn syntax and semantic analysis to lower C# control flow, methods, objects, and collections into SQL Server. Small methods are inlined. Recursive or over-budget methods run on an ephemeral stack machine built from local temporary tables and static `GOTO` labels. In the default mode, the generated batch creates no persistent functions or procedures and cleans up its runtime state when it finishes.
 
 > [!WARNING]
 > SharpSql is an experimental compiler, not a production-safe way to run arbitrary C#. The supported language surface is intentionally explicit, and C# and SQL Server still differ in numeric, null, collation, evaluation-order, and exception semantics.
@@ -110,6 +110,34 @@ The equivalent manual project configuration is:
 </PropertyGroup>
 ```
 
+Async Service Broker projects opt in with
+`<SharpSqlRuntimeStorage>ServiceBroker</SharpSqlRuntimeStorage>`. The allowed
+values are `Ephemeral` (the default), `MemoryOptimized`, `Durable`, and
+`ServiceBroker`; the same
+setting drives both live analyzer diagnostics and build-time SQL generation.
+The SDK's `SharpSqlRun` target provisions the selected database-scoped runtime
+before executing `MemoryOptimized` or `ServiceBroker` programs.
+
+The SDK also supplies `SharpSql.DatabaseException` for native SQL Server
+failures inside transpiled code. Its `Number`, `Severity`, `State`, `Procedure`,
+`LineNumber`, and inherited `Message` properties map to SQL Server's `ERROR_*`
+metadata:
+
+```csharp
+try
+{
+    RunDatabaseWork();
+}
+catch (SharpSql.DatabaseException exception)
+{
+    Console.WriteLine($"SQL {exception.Number}: {exception.Message}");
+}
+```
+
+SharpSql's reserved errors (`51000`-`51999`) retain their existing .NET
+exception mappings. `throw new ApplicationException(message)` uses a reserved
+error and can be filtered or rethrown by an ordinary `catch` block.
+
 The package reports SharpSql compatibility errors through Roslyn while editing
 and emits SQL during a normal build:
 
@@ -164,6 +192,49 @@ appsettings, user secrets, and `ConnectionStrings__Development`. Set
 override a configured connection. Generated `.sql` files can also be executed
 directly with `sharpsql run generated.sql`.
 
+### Publish an application
+
+Install a compiled application into its own schema in an existing database:
+
+```bash
+sharpsql publish path/to/MyApp.csproj \
+  --connection Production \
+  --schema MyApp \
+  --name MyApp \
+  --version 1.4.0
+```
+
+Publishing creates or updates `[MyApp].[Run]` and records the installed application
+and version in `[MyApp].[PackageManifest]`. The installer is idempotent, so the same
+deployment can be retried safely. Publishing requires an explicit configured
+connection and does not start a Testcontainer.
+
+Use `--memory-optimized` for schema-local memory runtime objects and add
+`--native-kernels` for eligible native procedures. The database must already have a
+`MEMORY_OPTIMIZED_DATA` filegroup and container; SharpSql does not create that physical
+infrastructure. See [publishing applications](docs/application-publishing.md) for the
+installed object model, connection setup, permissions, and deployment prerequisites.
+
+`run` streams ordinary SQL informational output as it arrives. Service Broker
+lines above 2,000 UTF-16 code units retain SQL Server's larger buffered `PRINT`
+fallback. Add `--debug` for the
+actual SQL plan and SharpSql heap counters, `--profile` for one warm-up and
+three measured SQL runs, and `--output` to retain the generated program SQL:
+
+```bash
+sharpsql run path/to/MyApp.csproj \
+  --runtime-storage ServiceBroker \
+  --debug --profile \
+  --output out.sql
+```
+
+Only the warm-up output is streamed during profiling; measured and debug-only
+repeats are silent, so program output is shown once. For Service Broker programs,
+`--output out.sql` also writes the standalone,
+idempotent runtime installer to `out.installer.sql`. Use `--installer-output` to
+select another path. The installer intentionally does not enable Service Broker
+at the database level.
+
 Set `SharpSqlGenerateOnBuild` to `false` for IDE/build diagnostics without SQL
 generation, `SharpSqlEnableAnalyzer` to `false` to disable live diagnostics, or
 `SharpSqlEnabled` to `false` to disable both integrations. Standard Roslyn
@@ -186,6 +257,9 @@ Compile to a file:
 ```bash
 dotnet run --project src/SharpSql.Cli -- examples/objects.cs -o objects.sql
 ```
+
+When `--runtime-storage MemoryOptimized` or `ServiceBroker` is selected, this also writes the
+standalone runtime installer beside the program as `objects.installer.sql`.
 
 Verify a source file by running it as C# locally and running its generated SQL
 against an ephemeral SQL Server 2022 container, then comparing console output
@@ -278,6 +352,7 @@ var result = await new SharpSqlProjectCompiler().TranspileAsync(
 - String length/indexing and `string(char[])` construction
 - `if`/`else`, `while`, `do`, `for`, `foreach`, `break`, and `continue`
 - `Console.WriteLine` and `Console.Write` lowered to `PRINT`
+- `Thread.GetCurrentProcessorId()` lowered to the current SQL session/worker ID (`@@SPID`)
 - Pure-expression and procedural method inlining with hygienic variables and labels
 - Recursive, mutually recursive, and over-budget calls through one generated stack and return trampoline
 - Classes with reference identity, inherited typed-field layouts, base-to-derived initialization, procedural constructor bodies, `this(...)`/`base(...)` chaining, virtual/interface dispatch, object initializers, and instance methods; records use the same typed heap model
@@ -321,7 +396,14 @@ int die = random.Next(1, 7);
 double fraction = random.NextDouble();
 ```
 
-For `new Random(seed)`, SharpSql implements the same compatibility PRNG used by .NET 10, producing the same sequence in C# and SQL. Parameterless construction uses a SQL-generated seed; it has the same range and state behavior, but—as with parameterless `Random` in C#—its exact sequence is intentionally nondeterministic. `NextInt64`, `NextSingle`, and `NextBytes` are not implemented yet.
+For `new Random(seed)`, SharpSql implements the same compatibility PRNG used by .NET 10,
+producing the same sequence in C# and SQL. Parameterless construction uses a
+SQL-generated seed; it has the same range and state behavior, but—as with parameterless
+`Random` in C#—its exact sequence is intentionally nondeterministic. In Service Broker
+executions, calls sharing one `Random` instance are protected by an instance-scoped
+lock; every state transition is atomic, while which concurrent task receives each
+sample remains scheduler-dependent. `NextInt64`, `NextSingle`, and `NextBytes` are not
+implemented yet.
 
 ## How method calls stay ephemeral
 
@@ -332,6 +414,35 @@ SQL Server does not support temporary user-defined functions. SharpSql therefore
 3. Emit larger or recursive methods once as stack-machine blocks inside the batch.
 
 The fallback stores activation frames and typed slots in local temporary tables. Every static call site receives an integer continuation ID, and all returns share one generated dispatcher that jumps to literal T-SQL labels. Normal completion drops the tables; closing the SQL connection provides failure-path cleanup.
+
+### Memory-optimized legacy VM state
+
+`RuntimeStorageKind.MemoryOptimized` keeps the same direct SQL and label-based
+legacy lowering, but stores activation frames and spilled slots in execution-local
+memory-optimized table variables instead of tempdb tables. Provision the fixed table
+types once with `SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql()` or use
+the CLI installer output:
+
+```bash
+sharpsql transpile examples/recursion.cs \
+  --runtime-storage MemoryOptimized \
+  --output recursion.sql
+```
+
+SQL Server requires the target database to already have a
+`MEMORY_OPTIMIZED_DATA` filegroup and physical container. SharpSql deliberately
+does not create that deployment-specific, effectively irreversible infrastructure.
+The current experiment optimizes legacy VM frames and slots; managed heap and LINQ
+buffer tables remain ordinary local temporary tables. Scalar slot values use a
+typed binary round-trip because In-Memory OLTP does not support `SQL_VARIANT`.
+See the [memory-optimized runtime guide](docs/memory-optimized-runtime.md) for
+provisioning, measurements, and the current storage boundary.
+
+Supported pure scalar loop methods can additionally be extracted into natively
+compiled stored-procedure kernels with `--native-kernels`. The interpreted legacy
+batch passes live values as scalar arguments and receives the result through an
+`OUTPUT` parameter. See the [native kernel prototype](docs/native-kernels.md) for
+the measured call-boundary result and current extraction limits.
 
 ## Managed objects and collections
 
@@ -361,6 +472,14 @@ class Person
 ```
 
 The heap is allocation-only for the life of the script. Dropping its temporary tables reclaims the whole heap at once.
+
+Experimental durable modes are also available through the compiler API. `Durable`
+partitions shared heap and VM tables by execution ID. `ServiceBroker` additionally
+lowers the supported `Task.Delay`/`Task.WhenAll` fork-join shape into durable
+continuations executed by an activated SQL Server worker pool, with task results,
+faults, and `Console.WriteLine` output routed back to the entry connection. See the
+[Service Broker async runtime guide](docs/service-broker-async.md) for provisioning,
+isolation rules, the currently supported shape, and remaining state-machine work.
 
 ## Roadmap
 
@@ -414,8 +533,8 @@ The first typed-IR and data-flow phase is complete:
 ### Broader missing layers
 
 - Struct instance semantics, boxing, and unboxing
-- General-purpose delegate invocation outside LINQ, iterators, and async-state-machine diagnostics
-- Exceptions and structured unwinding across VM frames
+- General-purpose delegate invocation outside LINQ, iterators, and general multi-await async-state-machine lowering
+- `finally` and structured exception unwinding across recursive VM calls
 - More of the base class library through explicit compiler intrinsics
 - Exact overflow, culture-sensitive formatting, and exception parity across the two runtimes
 

@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Description>Shared SQL Server connection, Testcontainers, and execution support for SharpSql.</Description>
     <IsPackable>false</IsPackable>
   </PropertyGroup>

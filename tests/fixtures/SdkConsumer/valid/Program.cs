@@ -6,7 +6,16 @@ public static class SqlJob
 
     public static void Run()
     {
-        int answer = 6 * 7;
-        Console.WriteLine($"answer={answer}");
+        try
+        {
+            int answer = 6 * 7;
+            Console.WriteLine($"answer={answer}");
+        }
+        catch (SharpSql.DatabaseException exception)
+        {
+            Console.WriteLine(
+                $"database-error={exception.Number}:{exception.Severity}:{exception.State}:" +
+                $"{exception.Procedure}:{exception.LineNumber}:{exception.Message}");
+        }
     }
 }

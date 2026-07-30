@@ -1,20 +1,18 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Reflection;
 using System.Text.RegularExpressions;
-using System.Text.Json;
-using System.Text.Json.Nodes;
-using System.Xml.Linq;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
 namespace SharpSql.Cli;
 
+/// <summary>Installs and configures the SharpSql SDK in a console project.</summary>
 [Description("Install and configure SharpSql.Sdk in a console project.")]
 public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
 {
     internal const string DefaultOutputPath = "$(OutputPath)$(AssemblyName).sql";
 
+    /// <summary>Defines the options accepted by the <c>init</c> command.</summary>
     public sealed class Settings : CommandSettings
     {
         [CommandArgument(0, "[PROJECT]")]
@@ -46,7 +44,7 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
         public bool NoRestore { get; init; }
 
         [CommandOption("--connection <NAME>")]
-        [Description("Connection string name. Without one, SQL runs use Testcontainers.")]
+        [Description("Connection string name from environment, user secrets, or appsettings.")]
         public string? ConnectionName { get; init; }
 
         [CommandOption("--connection-string-env <VARIABLE>")]
@@ -54,20 +52,20 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
         public string? ConnectionStringEnvironmentVariable { get; init; }
 
         [CommandOption("--container")]
-        [Description("Use Testcontainers instead of a configured connection.")]
+        [Description("Use a SQL Server Testcontainer instead of a configured connection.")]
         public bool UseContainer { get; init; }
 
         [CommandOption("--keep-container")]
-        [Description("Keep and reuse the fallback SQL Server Testcontainer.")]
+        [Description("Keep and reuse the SQL Server Testcontainer.")]
         public bool KeepContainer { get; init; }
 
         [CommandOption("--database <DATABASE>")]
-        [Description("Database created inside the fallback Testcontainer.")]
+        [Description("Database created inside the SQL Server Testcontainer.")]
         [DefaultValue(RunCommand.DefaultDatabase)]
         public string DatabaseName { get; init; } = RunCommand.DefaultDatabase;
 
         [CommandOption("--image <IMAGE>")]
-        [Description("Fallback SQL Server Testcontainer image.")]
+        [Description("SQL Server Testcontainer image.")]
         [DefaultValue(RunCommand.DefaultImage)]
         public string SqlServerImage { get; init; } = RunCommand.DefaultImage;
 
@@ -80,6 +78,7 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
         [Description("Do not add the SharpSql (SQL Server) IDE launch profile.")]
         public bool NoLaunchProfile { get; init; }
 
+        /// <inheritdoc />
         public override ValidationResult Validate()
         {
             if (string.IsNullOrWhiteSpace(OutputPath) && OutputPath is not null)
@@ -128,6 +127,14 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
             await WriteErrorAsync(environment, exception.Message, cancellationToken);
             return 1;
         }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            await WriteErrorAsync(
+                environment,
+                $"Could not resolve the project path: {exception.Message}",
+                cancellationToken);
+            return 2;
+        }
 
         var version = settings.SdkVersion ?? GetToolVersion();
         ProjectSdkInstallation installation;
@@ -154,6 +161,14 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
             await WriteErrorAsync(environment, exception.Message, cancellationToken);
             return 1;
         }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            await WriteErrorAsync(
+                environment,
+                $"Could not configure the project: {exception.Message}",
+                cancellationToken);
+            return 2;
+        }
 
         await WriteOutputAsync(
             environment,
@@ -170,11 +185,23 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
             return 0;
 
         var restorer = environment.ProjectRestorer ?? new DotNetProjectRestorer();
-        var restoreExitCode = await restorer.RestoreAsync(
-            projectPath,
-            environment.Output ?? Console.Out,
-            environment.Error ?? Console.Error,
-            cancellationToken);
+        int restoreExitCode;
+        try
+        {
+            restoreExitCode = await restorer.RestoreAsync(
+                projectPath,
+                environment.Output ?? Console.Out,
+                environment.Error ?? Console.Error,
+                cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            await WriteErrorAsync(
+                environment,
+                $"Could not run dotnet restore: {exception.Message}. The project remains configured.",
+                cancellationToken);
+            return 2;
+        }
         if (restoreExitCode == 0)
         {
             await WriteOutputAsync(environment, "Restore completed." + Environment.NewLine, cancellationToken);
@@ -217,415 +244,5 @@ public sealed class InitCommand : AsyncCommand<InitCommand.Settings>
             return environment.Error.WriteLineAsync(message.AsMemory(), cancellationToken);
         environment.Console.MarkupLine($"[red]{Markup.Escape(message)}[/]");
         return Task.CompletedTask;
-    }
-}
-
-internal sealed record ProjectSdkInstallation(
-    string ProjectPath,
-    string SdkVersion,
-    string OutputPath,
-    bool GenerateOnBuild,
-    bool EnableAnalyzer,
-    string SqlServerConfiguration,
-    bool LaunchProfileAdded);
-
-internal sealed class ProjectInitializationException(string message) : Exception(message);
-
-internal static class ProjectSdkInstaller
-{
-    public static string ResolveProject(string? requestedPath, string currentDirectory)
-    {
-        var candidate = requestedPath is null
-            ? currentDirectory
-            : Path.GetFullPath(requestedPath, currentDirectory);
-
-        if (Directory.Exists(candidate))
-        {
-            var projects = Directory.GetFiles(candidate, "*.csproj", SearchOption.TopDirectoryOnly);
-            return projects.Length switch
-            {
-                0 => throw new ProjectInitializationException($"No .csproj file was found in {candidate}."),
-                1 => Path.GetFullPath(projects[0]),
-                _ => throw new ProjectInitializationException(
-                    $"Multiple .csproj files were found in {candidate}; specify the project explicitly.")
-            };
-        }
-
-        if (!candidate.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
-            throw new ProjectInitializationException($"Expected a .csproj file or project directory: {candidate}");
-        if (!File.Exists(candidate))
-            throw new ProjectInitializationException($"Project file was not found: {candidate}");
-        return candidate;
-    }
-
-    public static ProjectSdkInstallation Install(
-        string projectPath,
-        string sdkVersion,
-        string? requestedOutputPath,
-        string? entryPoint,
-        bool analyzerOnly,
-        bool noAnalyzer,
-        string? connectionName = null,
-        string? connectionStringEnvironmentVariable = null,
-        bool useContainer = false,
-        bool keepContainer = false,
-        string sqlServerImage = RunCommand.DefaultImage,
-        string databaseName = RunCommand.DefaultDatabase,
-        int commandTimeoutSeconds = 60,
-        bool addLaunchProfile = true)
-    {
-        XDocument document;
-        try
-        {
-            document = XDocument.Load(projectPath, LoadOptions.None);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Xml.XmlException)
-        {
-            throw new ProjectInitializationException($"Could not read project '{projectPath}': {exception.Message}");
-        }
-
-        var root = document.Root;
-        if (root is null || root.Name.LocalName != "Project" || !IsSdkStyle(root))
-            throw new ProjectInitializationException("SharpSql init requires an SDK-style .NET project.");
-
-        var outputType = Descendants(root, "OutputType").LastOrDefault()?.Value.Trim();
-        if (!string.Equals(outputType, "Exe", StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(outputType, "WinExe", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ProjectInitializationException(
-                "SharpSql init currently supports console projects (OutputType Exe or WinExe).");
-        }
-
-        var centrallyManaged = UsesCentralPackageManagement(projectPath, root);
-        var packageReference = Descendants(root, "PackageReference").FirstOrDefault(IsSharpSqlSdkReference);
-        if (packageReference is null)
-        {
-            var itemGroup = new XElement(root.Name.Namespace + "ItemGroup",
-                new XAttribute("Label", "SharpSql"));
-            packageReference = new XElement(root.Name.Namespace + "PackageReference",
-                new XAttribute("Include", "SharpSql.Sdk"),
-                new XAttribute(centrallyManaged ? "VersionOverride" : "Version", sdkVersion),
-                new XElement(root.Name.Namespace + "PrivateAssets", "all"));
-            itemGroup.Add(packageReference);
-            root.Add(itemGroup);
-        }
-        else
-        {
-            SetPackageVersion(packageReference, sdkVersion, centrallyManaged);
-            SetPackagePrivateAssets(packageReference);
-        }
-
-        var existingOutputPath = Descendants(root, "SharpSqlOutputPath").LastOrDefault()?.Value.Trim();
-        var outputPath = requestedOutputPath ?? existingOutputPath ?? InitCommand.DefaultOutputPath;
-        SetProperty(root, "SharpSqlEnabled", "true");
-        if (requestedOutputPath is not null)
-            SetProperty(root, "SharpSqlOutputPath", requestedOutputPath);
-        else if (existingOutputPath is null)
-            SetProperty(root, "SharpSqlOutputLocation", "BuildOutput");
-        SetProperty(root, "SharpSqlGenerateOnBuild", analyzerOnly ? "false" : "true");
-        SetProperty(root, "SharpSqlEnableAnalyzer", noAnalyzer ? "false" : "true");
-        SetProperty(root, "SharpSqlKeepContainer", keepContainer ? "true" : "false");
-        SetProperty(root, "SharpSqlContainerImage", sqlServerImage);
-        SetProperty(root, "SharpSqlContainerDatabase", databaseName);
-        SetProperty(root, "SharpSqlCommandTimeoutSeconds", commandTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        if (entryPoint is not null)
-            SetProperty(root, "SharpSqlEntryPoint", entryPoint);
-        var existingConnectionName = Descendants(root, "SharpSqlConnectionName").LastOrDefault()?.Value.Trim();
-        var existingConnectionEnvironment = Descendants(root, "SharpSqlConnectionStringEnvironment").LastOrDefault()?.Value.Trim();
-        if (useContainer)
-        {
-            RemoveProperty(root, "SharpSqlConnectionName");
-            RemoveProperty(root, "SharpSqlConnectionStringEnvironment");
-        }
-        else if (connectionName is not null)
-            SetProperty(root, "SharpSqlConnectionName", connectionName);
-        if (connectionStringEnvironmentVariable is not null)
-            SetProperty(root, "SharpSqlConnectionStringEnvironment", connectionStringEnvironmentVariable);
-
-        WriteAtomically(projectPath, document);
-        if (addLaunchProfile)
-            LaunchProfileInstaller.Install(projectPath);
-        return new ProjectSdkInstallation(
-            projectPath,
-            sdkVersion,
-            outputPath,
-            GenerateOnBuild: !analyzerOnly,
-            EnableAnalyzer: !noAnalyzer,
-            SqlServerConfiguration: DescribeSqlServerConfiguration(
-                useContainer,
-                connectionName ?? existingConnectionName,
-                connectionStringEnvironmentVariable ?? existingConnectionEnvironment),
-            LaunchProfileAdded: addLaunchProfile);
-    }
-
-    private static bool IsSdkStyle(XElement root) =>
-        root.Attribute("Sdk") is not null || root.Elements().Any(element => element.Name.LocalName == "Sdk");
-
-    private static IEnumerable<XElement> Descendants(XElement root, string localName) =>
-        root.Descendants().Where(element => element.Name.LocalName == localName);
-
-    private static bool IsSharpSqlSdkReference(XElement element)
-    {
-        var identity = element.Attribute("Include")?.Value ?? element.Attribute("Update")?.Value;
-        return string.Equals(identity, "SharpSql.Sdk", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool UsesCentralPackageManagement(string projectPath, XElement projectRoot)
-    {
-        if (Descendants(projectRoot, "ManagePackageVersionsCentrally")
-            .Any(element => string.Equals(element.Value.Trim(), "true", StringComparison.OrdinalIgnoreCase)))
-            return true;
-
-        var directory = Path.GetDirectoryName(projectPath);
-        while (directory is not null)
-        {
-            var centralFile = Path.Combine(directory, "Directory.Packages.props");
-            if (File.Exists(centralFile))
-            {
-                try
-                {
-                    var centralDocument = XDocument.Load(centralFile);
-                    return centralDocument.Descendants()
-                        .Any(element =>
-                            element.Name.LocalName == "ManagePackageVersionsCentrally" &&
-                            string.Equals(element.Value.Trim(), "true", StringComparison.OrdinalIgnoreCase));
-                }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Xml.XmlException)
-                {
-                    throw new ProjectInitializationException(
-                        $"Could not read central package file '{centralFile}': {exception.Message}");
-                }
-            }
-            directory = Directory.GetParent(directory)?.FullName;
-        }
-        return false;
-    }
-
-    private static void SetPackageVersion(XElement packageReference, string version, bool centrallyManaged)
-    {
-        var versionName = centrallyManaged ? "VersionOverride" : "Version";
-        var obsoleteVersionName = centrallyManaged ? "Version" : "VersionOverride";
-        packageReference.Attribute(obsoleteVersionName)?.Remove();
-        foreach (var obsoleteElement in packageReference.Elements()
-                     .Where(element => element.Name.LocalName == obsoleteVersionName).ToArray())
-            obsoleteElement.Remove();
-
-        var versionElement = packageReference.Elements()
-            .FirstOrDefault(element => element.Name.LocalName == versionName);
-        if (versionElement is not null)
-        {
-            versionElement.Value = version;
-            packageReference.Attribute(versionName)?.Remove();
-            return;
-        }
-        packageReference.SetAttributeValue(versionName, version);
-    }
-
-    private static void SetPackagePrivateAssets(XElement packageReference)
-    {
-        var privateAssetsElement = packageReference.Elements()
-            .FirstOrDefault(element => element.Name.LocalName == "PrivateAssets");
-        if (privateAssetsElement is not null)
-            privateAssetsElement.Value = "all";
-        else if (packageReference.Attribute("PrivateAssets") is not null)
-            packageReference.SetAttributeValue("PrivateAssets", "all");
-        else
-            packageReference.Add(new XElement(packageReference.Name.Namespace + "PrivateAssets", "all"));
-    }
-
-    private static void SetProperty(XElement root, string name, string value)
-    {
-        var existing = Descendants(root, name).LastOrDefault();
-        if (existing is not null)
-        {
-            existing.Value = value;
-            return;
-        }
-
-        var propertyGroup = root.Elements()
-            .FirstOrDefault(element =>
-                element.Name.LocalName == "PropertyGroup" &&
-                string.Equals(element.Attribute("Label")?.Value, "SharpSql", StringComparison.Ordinal));
-        if (propertyGroup is null)
-        {
-            propertyGroup = new XElement(root.Name.Namespace + "PropertyGroup", new XAttribute("Label", "SharpSql"));
-            root.Add(propertyGroup);
-        }
-        propertyGroup.Add(new XElement(root.Name.Namespace + name, value));
-    }
-
-    private static void RemoveProperty(XElement root, string name)
-    {
-        foreach (var property in Descendants(root, name).ToArray())
-            property.Remove();
-    }
-
-    private static string DescribeSqlServerConfiguration(
-        bool useContainer,
-        string? connectionName,
-        string? connectionStringEnvironmentVariable)
-    {
-        if (useContainer)
-            return "Testcontainers fallback";
-        if (!string.IsNullOrWhiteSpace(connectionStringEnvironmentVariable))
-            return $"environment '{connectionStringEnvironmentVariable}'";
-        return string.IsNullOrWhiteSpace(connectionName)
-            ? "Testcontainers fallback"
-            : $"connection '{connectionName}'";
-    }
-
-    private static void WriteAtomically(string projectPath, XDocument document)
-    {
-        var tempPath = Path.Combine(
-            Path.GetDirectoryName(projectPath)!,
-            $".{Path.GetFileName(projectPath)}.{Guid.NewGuid():N}.tmp");
-        try
-        {
-            using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false)))
-                document.Save(writer, SaveOptions.None);
-            File.Move(tempPath, projectPath, overwrite: true);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            throw new ProjectInitializationException($"Could not update project '{projectPath}': {exception.Message}");
-        }
-        finally
-        {
-            if (File.Exists(tempPath))
-                File.Delete(tempPath);
-        }
-    }
-}
-
-internal static class LaunchProfileInstaller
-{
-    private const string ProfileName = "SharpSql (SQL Server)";
-
-    public static void Install(string projectPath)
-    {
-        var projectDirectory = Path.GetDirectoryName(projectPath)!;
-        var propertiesDirectory = Path.Combine(projectDirectory, "Properties");
-        var launchSettingsPath = Path.Combine(propertiesDirectory, "launchSettings.json");
-        JsonObject root;
-        try
-        {
-            root = File.Exists(launchSettingsPath)
-                ? JsonNode.Parse(
-                      File.ReadAllText(launchSettingsPath),
-                      documentOptions: new JsonDocumentOptions
-                      {
-                          AllowTrailingCommas = true,
-                          CommentHandling = JsonCommentHandling.Skip
-                      }) as JsonObject ?? throw new ProjectInitializationException(
-                          $"Launch settings root must be a JSON object: {launchSettingsPath}")
-                : new JsonObject
-                {
-                    ["$schema"] = "http://json.schemastore.org/launchsettings.json"
-                };
-        }
-        catch (JsonException exception)
-        {
-            throw new ProjectInitializationException(
-                $"Could not read launch settings '{launchSettingsPath}': {exception.Message}");
-        }
-
-        var profiles = root["profiles"] as JsonObject;
-        if (profiles is null)
-        {
-            profiles = new JsonObject();
-            root["profiles"] = profiles;
-        }
-        profiles[ProfileName] = new JsonObject
-        {
-            ["commandName"] = "Executable",
-            ["executablePath"] = "dotnet",
-            ["commandLineArgs"] =
-                $"msbuild \"{Path.GetFileName(projectPath)}\" -t:SharpSqlRun --tl:off -verbosity:minimal",
-            ["workingDirectory"] = "."
-        };
-
-        Directory.CreateDirectory(propertiesDirectory);
-        WriteAtomically(launchSettingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine);
-    }
-
-    private static void WriteAtomically(string path, string contents)
-    {
-        var tempPath = Path.Combine(Path.GetDirectoryName(path)!, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
-        try
-        {
-            File.WriteAllText(tempPath, contents, new System.Text.UTF8Encoding(false));
-            File.Move(tempPath, path, overwrite: true);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            throw new ProjectInitializationException($"Could not update launch settings '{path}': {exception.Message}");
-        }
-        finally
-        {
-            if (File.Exists(tempPath))
-                File.Delete(tempPath);
-        }
-    }
-}
-
-public interface IProjectRestorer
-{
-    Task<int> RestoreAsync(
-        string projectPath,
-        TextWriter output,
-        TextWriter error,
-        CancellationToken cancellationToken);
-}
-
-internal sealed class DotNetProjectRestorer : IProjectRestorer
-{
-    public async Task<int> RestoreAsync(
-        string projectPath,
-        TextWriter output,
-        TextWriter error,
-        CancellationToken cancellationToken)
-    {
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo("dotnet")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false
-            }
-        };
-        process.StartInfo.ArgumentList.Add("restore");
-        process.StartInfo.ArgumentList.Add(projectPath);
-        process.Start();
-
-        var outputTask = CopyAsync(process.StandardOutput, output, cancellationToken);
-        var errorTask = CopyAsync(process.StandardError, error, cancellationToken);
-        try
-        {
-            await process.WaitForExitAsync(cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            if (!process.HasExited)
-                process.Kill(entireProcessTree: true);
-            throw;
-        }
-        await Task.WhenAll(outputTask, errorTask);
-        return process.ExitCode;
-    }
-
-    private static async Task CopyAsync(
-        TextReader reader,
-        TextWriter writer,
-        CancellationToken cancellationToken)
-    {
-        var buffer = new char[4096];
-        int count;
-        while ((count = await reader.ReadAsync(buffer, cancellationToken)) > 0)
-        {
-            await writer.WriteAsync(buffer.AsMemory(0, count), cancellationToken);
-            await writer.FlushAsync(cancellationToken);
-        }
     }
 }

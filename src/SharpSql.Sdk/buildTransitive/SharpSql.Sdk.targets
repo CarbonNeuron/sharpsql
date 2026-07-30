@@ -14,10 +14,13 @@
       <SharpSqlResolvedOutputPath Condition="'$(SharpSqlOutputPath)' != ''">$(SharpSqlOutputPath)</SharpSqlResolvedOutputPath>
       <SharpSqlResolvedOutputPath Condition="'$(SharpSqlResolvedOutputPath)' == '' and '$(SharpSqlOutputLocation)' == 'BuildOutput'">$(OutputPath)$(AssemblyName).sql</SharpSqlResolvedOutputPath>
       <SharpSqlResolvedOutputPath Condition="'$(SharpSqlResolvedOutputPath)' == ''">$(IntermediateOutputPath)sharpsql/$(AssemblyName).sql</SharpSqlResolvedOutputPath>
+      <_SharpSqlRuntimeStorageLower>$([System.String]::Copy('$(SharpSqlRuntimeStorage)').ToLowerInvariant())</_SharpSqlRuntimeStorageLower>
     </PropertyGroup>
     <Error Condition="!Exists('$(SharpSqlBuildHostPath)')"
            Text="SharpSql build host was not found at '$(SharpSqlBuildHostPath)'." />
-    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --project &quot;$(MSBuildProjectFullPath)&quot; --output &quot;$(SharpSqlResolvedOutputPath)&quot; --configuration &quot;$(Configuration)&quot; --framework &quot;$(TargetFramework)&quot; --entry &quot;$(SharpSqlEntryPoint)&quot;"
+    <Error Condition="'$(_SharpSqlRuntimeStorageLower)' != 'ephemeral' and '$(_SharpSqlRuntimeStorageLower)' != 'durable' and '$(_SharpSqlRuntimeStorageLower)' != 'servicebroker'"
+           Text="SharpSqlRuntimeStorage must be Ephemeral, Durable, or ServiceBroker." />
+    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --project &quot;$(MSBuildProjectFullPath)&quot; --output &quot;$(SharpSqlResolvedOutputPath)&quot; --configuration &quot;$(Configuration)&quot; --framework &quot;$(TargetFramework)&quot; --entry &quot;$(SharpSqlEntryPoint)&quot; --runtime-storage &quot;$(SharpSqlRuntimeStorage)&quot;"
           ConsoleToMSBuild="true"
           StandardOutputImportance="High"
           StandardErrorImportance="High" />
@@ -36,7 +39,7 @@
           Condition="'$(SharpSqlEnabled)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
     <Message Text="SharpSql: starting SQL Server execution for $(MSBuildProjectName)..."
              Importance="High" />
-    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --operation run --project &quot;$(MSBuildProjectFullPath)&quot; --sql &quot;$(SharpSqlResolvedOutputPath)&quot; --connection-name &quot;$(SharpSqlConnectionName)&quot; --connection-string-environment &quot;$(SharpSqlConnectionStringEnvironment)&quot; --force-container &quot;$(SharpSqlForceContainer)&quot; --keep-container &quot;$(SharpSqlKeepContainer)&quot; --image &quot;$(SharpSqlContainerImage)&quot; --database &quot;$(SharpSqlContainerDatabase)&quot; --timeout &quot;$(SharpSqlCommandTimeoutSeconds)&quot;"
+    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --operation run --project &quot;$(MSBuildProjectFullPath)&quot; --sql &quot;$(SharpSqlResolvedOutputPath)&quot; --runtime-storage &quot;$(SharpSqlRuntimeStorage)&quot; --connection-name &quot;$(SharpSqlConnectionName)&quot; --connection-string-environment &quot;$(SharpSqlConnectionStringEnvironment)&quot; --force-container &quot;$(SharpSqlForceContainer)&quot; --keep-container &quot;$(SharpSqlKeepContainer)&quot; --image &quot;$(SharpSqlContainerImage)&quot; --database &quot;$(SharpSqlContainerDatabase)&quot; --timeout &quot;$(SharpSqlCommandTimeoutSeconds)&quot;"
           ConsoleToMSBuild="true"
           StandardOutputImportance="High"
           StandardErrorImportance="High" />

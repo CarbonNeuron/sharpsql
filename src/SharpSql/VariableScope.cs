@@ -10,9 +10,26 @@ internal sealed record ScalarVariableBinding(string SqlName, IrType Type) : Vari
     public SqlScalarExpression Scalar => SqlScalarExpression.Primary(SqlName, Type);
 }
 
+internal sealed record ExceptionVariableBinding(
+    IrType Type,
+    string NumberSql,
+    string MessageSql,
+    string SeveritySql,
+    string StateSql,
+    string ProcedureSql,
+    string LineNumberSql) : VariableBinding(Type);
+
 internal sealed record QueryVariableBinding(IrType Type, SqlLinqQueryPlan Query) : VariableBinding(Type);
 
 internal sealed record LambdaVariableBinding(IrType Type, SqlLinqLambdaPlan Lambda) : VariableBinding(Type);
+
+/// <summary>
+/// A source-level <c>List&lt;Task&lt;T&gt;&gt;</c> whose durable task identifiers are held in a JSON array.
+/// </summary>
+internal sealed record AsyncTaskListBinding(
+    IrType Type,
+    string TaskIdsJsonSql,
+    IrType ResultType) : VariableBinding(Type);
 
 internal sealed record UnavailableVariableBinding(IrType Type) : VariableBinding(Type);
 

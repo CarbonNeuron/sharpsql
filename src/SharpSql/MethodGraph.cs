@@ -170,6 +170,18 @@ internal sealed class MethodGraph
                     VisitExpression(forEach.SourceExpression, owner);
                     VisitStatement(forEach.Body, owner);
                     break;
+                case ProceduralTry @try:
+                    VisitStatement(@try.Body, owner);
+                    foreach (var @catch in @try.Catches)
+                    {
+                        if (@catch.Filter is not null)
+                            VisitExpression(@catch.Filter, owner);
+                        VisitStatement(@catch.Body, owner);
+                    }
+                    break;
+                case ProceduralThrow { Expression: not null } @throw:
+                    VisitExpression(@throw.Expression, owner);
+                    break;
                 case ProceduralReturn { Expression: not null } @return:
                     VisitExpression(@return.Expression, owner);
                     break;
@@ -189,6 +201,9 @@ internal sealed class MethodGraph
                     break;
                 case IrConversionExpression conversion:
                     VisitExpression(conversion.Operand, owner);
+                    break;
+                case IrAwaitExpression awaitExpression:
+                    VisitExpression(awaitExpression.Operand, owner);
                     break;
                 case IrConditionalExpression conditional:
                     VisitExpression(conditional.Condition, owner);

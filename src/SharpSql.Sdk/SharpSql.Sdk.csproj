@@ -1,12 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <PackageId>SharpSql.Sdk</PackageId>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Description>Build-time SQL generation and live compatibility diagnostics for SharpSql projects.</Description>
     <PackageTags>csharp;sql;transpiler;compiler;roslyn;analyzer;msbuild</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <DevelopmentDependency>true</DevelopmentDependency>
-    <IncludeBuildOutput>false</IncludeBuildOutput>
-    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <IncludeBuildOutput>true</IncludeBuildOutput>
     <IsPackable>true</IsPackable>
     <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);CollectSharpSqlSdkPackageFiles</TargetsForTfmSpecificContentInPackage>
   </PropertyGroup>

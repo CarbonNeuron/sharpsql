@@ -7,10 +7,16 @@ using Microsoft.CodeAnalysis.MSBuild;
 
 namespace SharpSql;
 
+/// <summary>Loads C# projects through MSBuild and transpiles them with SharpSql.</summary>
 public sealed class SharpSqlProjectCompiler
 {
     private static readonly object RegistrationLock = new();
 
+    /// <summary>Loads and transpiles a C# project.</summary>
+    /// <param name="projectPath">The project file path.</param>
+    /// <param name="options">Optional project-loading and compiler settings.</param>
+    /// <param name="cancellationToken">A token that can cancel project loading.</param>
+    /// <returns>The generated SQL and any diagnostics.</returns>
     public async Task<TranspileResult> TranspileAsync(
         string projectPath,
         ProjectTranspileOptions? options = null,
@@ -27,6 +33,11 @@ public sealed class SharpSqlProjectCompiler
             options.CompilerOptions);
     }
 
+    /// <summary>Loads a C# compilation from an MSBuild project.</summary>
+    /// <param name="projectPath">The project file path.</param>
+    /// <param name="options">Optional project-loading settings.</param>
+    /// <param name="cancellationToken">A token that can cancel project loading.</param>
+    /// <returns>The loaded compilation and any diagnostics.</returns>
     public async Task<ProjectCompilationResult> LoadCompilationAsync(
         string projectPath,
         ProjectTranspileOptions? options = null,

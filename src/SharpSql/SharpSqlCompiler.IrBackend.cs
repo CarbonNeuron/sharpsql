@@ -14,6 +14,7 @@ public sealed partial class SharpSqlCompiler
                 ContainsRuntimeExpression(binary.Left) || ContainsRuntimeExpression(binary.Right),
             IrUnaryExpression unary => ContainsRuntimeExpression(unary.Operand),
             IrConversionExpression conversion => ContainsRuntimeExpression(conversion.Operand),
+            IrAwaitExpression awaitExpression => ContainsRuntimeExpression(awaitExpression.Operand),
             IrConditionalExpression conditional =>
                 ContainsRuntimeExpression(conditional.Condition) ||
                 ContainsRuntimeExpression(conditional.WhenTrue) ||
@@ -198,6 +199,9 @@ public sealed partial class SharpSqlCompiler
                 // Intrinsic calls with statement effects are handled above by heap/runtime lowerers.
                 Unsupported(expression.Source, "expression statement");
                 return;
+            case IrAwaitExpression awaitExpression:
+                UnsupportedAwait(awaitExpression);
+                return;
             default:
                 Unsupported(expression.Source, "expression statement");
                 return;
@@ -236,6 +240,7 @@ public sealed partial class SharpSqlCompiler
             IrBinaryExpression binary => EmitIrBinary(binary, scope, substitutions),
             IrUnaryExpression unary => EmitIrUnary(unary, scope, substitutions),
             IrConversionExpression conversion => EmitScalarExpression(conversion.Operand, scope, substitutions).CastTo(conversion.TargetType),
+            IrAwaitExpression awaitExpression => SqlScalarExpression.Primary(UnsupportedAwait(awaitExpression)),
             IrConditionalExpression conditional => SqlScalarExpression.Primary(
                 $"CASE WHEN {EmitPredicate(conditional.Condition, scope, substitutions)} THEN {EmitScalar(conditional.WhenTrue, scope, substitutions)} ELSE {EmitScalar(conditional.WhenFalse, scope, substitutions)} END"),
             IrInterpolatedStringExpression interpolated => EmitIrInterpolatedString(interpolated, scope, substitutions),
@@ -253,11 +258,18 @@ public sealed partial class SharpSqlCompiler
         return result.WithAnalysis(expression.Type, expression.Facts.Nullability);
     }
 
+    private string UnsupportedAwait(IrAwaitExpression awaitExpression) =>
+        UnsupportedExpression(
+            awaitExpression.Source,
+            "Await expressions require async scheduling, which is not supported by the SQL backend.");
+
     private SqlScalarExpression EmitIrInvocation(
         IrInvocationExpression invocation,
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
+        if (IntrinsicCatalog.IsThreadGetCurrentProcessorId(invocation))
+            return SqlScalarExpression.Primary("CONVERT(INT, @@SPID)", IrType.Int, ScalarNullability.NonNull);
         if (TryEmitLinqInvocation(invocation, scope, substitutions, out var linqExpression))
             return linqExpression;
         if (TryEmitHeapInvocationScalar(invocation, scope, substitutions, out var heapExpression))
@@ -306,6 +318,25 @@ public sealed partial class SharpSqlCompiler
         VariableScope scope,
         IReadOnlyDictionary<string, Substitution>? substitutions)
     {
+        if (member.Receiver is IrVariableExpression exceptionVariable &&
+            scope.Find(exceptionVariable.Symbol) is ExceptionVariableBinding exception)
+        {
+            var exceptionMember = member.MemberName switch
+            {
+                "Message" => exception.MessageSql,
+                "Number" => exception.NumberSql,
+                "Severity" => exception.SeveritySql,
+                "State" => exception.StateSql,
+                "Procedure" => exception.ProcedureSql,
+                "LineNumber" => exception.LineNumberSql,
+                _ => null
+            };
+            if (exceptionMember is not null)
+                return SqlScalarExpression.Primary(exceptionMember);
+            return SqlScalarExpression.Primary(
+                UnsupportedExpression(member.Source, $"Exception member '{member.MemberName}' is not available in SQL Server CATCH metadata."));
+        }
+
         var receiverType = member.Receiver.Type;
         var receiver = EmitScalar(member.Receiver, scope, substitutions);
         if (receiverType.IsString && member.MemberName == "Length")
@@ -313,7 +344,7 @@ public sealed partial class SharpSqlCompiler
         if ((IsListType(receiverType.Name) && member.MemberName == "Count") ||
             (IsArrayType(receiverType.Name) && member.MemberName == "Length") ||
             (IsDictionaryType(receiverType.Name) && member.MemberName == "Count"))
-            return SqlScalarExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE __id = {receiver})");
+            return SqlScalarExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {receiver})");
         if (TryResolveHeapField(
                 receiverType,
                 member.MemberName,
@@ -321,7 +352,7 @@ public sealed partial class SharpSqlCompiler
                 out var heapType,
                 out var field))
             return SqlScalarExpression.Primary(
-                $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE __object_id = {receiver})");
+                $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})");
         if (HasCSharpSource(member.Source))
         {
             return EmitHeapMemberScalar(
@@ -381,7 +412,7 @@ public sealed partial class SharpSqlCompiler
                 out var field,
                 out var receiver))
             return SqlScalarExpression.Primary(
-                $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE __object_id = {receiver})");
+                $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})");
         if (HasCSharpSource(variable.Source) && TryEmitImplicitHeapField(
                 CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax>(variable.Source),
                 scope,

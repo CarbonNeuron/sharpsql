@@ -41,7 +41,11 @@ public static class Program
             {
                 EntryPoint = parsed.EntryPoint,
                 Configuration = parsed.Configuration,
-                TargetFramework = parsed.TargetFramework
+                TargetFramework = parsed.TargetFramework,
+                CompilerOptions = new TranspileOptions
+                {
+                    RuntimeStorage = parsed.RuntimeStorage
+                }
             },
             cancellationToken);
         if (!result.Success)
@@ -93,19 +97,39 @@ public static class Program
         connectionTime.Stop();
         WriteProgress($"SQL Server ready at {session.Description} ({FormatDuration(connectionTime.Elapsed)}).");
 
-        SqlBatchExecutionResult result;
+        var result = new SqlBatchExecutionResult(true, []);
         var sql = await File.ReadAllTextAsync(NormalizePath(parsed.SqlPath!), cancellationToken);
         var executionTime = Stopwatch.StartNew();
-        WriteProgress($"executing SQL batch ({CountLines(sql)} lines)...");
         try
         {
-            result = await SqlBatchExecutor.ExecuteAsync(
-                session.Connection,
-                sql,
-                parsed.CommandTimeoutSeconds,
-                cancellationToken);
-            foreach (var message in result.Messages)
-                Console.WriteLine(message);
+            if (parsed.RuntimeStorage is RuntimeStorageKind.MemoryOptimized or RuntimeStorageKind.ServiceBroker)
+            {
+                var runtimeName = parsed.RuntimeStorage == RuntimeStorageKind.ServiceBroker
+                    ? "Service Broker"
+                    : "memory-optimized";
+                WriteProgress($"provisioning {runtimeName} runtime...");
+                result = await SqlBatchExecutor.ExecuteAsync(
+                    session.Connection,
+                    parsed.RuntimeStorage == RuntimeStorageKind.ServiceBroker
+                        ? SharpSqlServiceBrokerRuntime.GenerateProvisioningSql()
+                        : SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(),
+                    parsed.CommandTimeoutSeconds,
+                    new SqlBatchExecutionOptions(MessageReceived: Console.WriteLine),
+                    cancellationToken);
+                if (result.Success)
+                    WriteProgress($"{runtimeName} runtime ready.");
+            }
+
+            if (result.Success)
+            {
+                WriteProgress($"executing SQL batch ({CountLines(sql)} lines)...");
+                result = await SqlBatchExecutor.ExecuteAsync(
+                    session.Connection,
+                    sql,
+                    parsed.CommandTimeoutSeconds,
+                    new SqlBatchExecutionOptions(MessageReceived: Console.WriteLine),
+                    cancellationToken);
+            }
         }
         finally
         {
@@ -163,6 +187,7 @@ public static class Program
         string Configuration,
         string? TargetFramework,
         string? EntryPoint,
+        RuntimeStorageKind RuntimeStorage,
         string? ConnectionName,
         string? ConnectionStringEnvironmentVariable,
         bool ForceContainer,
@@ -218,6 +243,12 @@ public static class Program
                 error = "--timeout must be greater than zero.";
                 return false;
             }
+            if (!TryRuntimeStorage(Value(values, "runtime-storage"), out var runtimeStorage))
+            {
+                parsed = null!;
+                error = "--runtime-storage must be Ephemeral, Durable, or ServiceBroker.";
+                return false;
+            }
 
             parsed = new BuildArguments(
                 operation,
@@ -227,6 +258,7 @@ public static class Program
                 Value(values, "configuration") ?? "Release",
                 Value(values, "framework"),
                 Value(values, "entry"),
+                runtimeStorage,
                 Value(values, "connection-name"),
                 Value(values, "connection-string-environment"),
                 BoolValue(values, "force-container"),
@@ -256,5 +288,20 @@ public static class Program
 
         private static bool BoolValue(IReadOnlyDictionary<string, string> values, string name) =>
             bool.TryParse(Value(values, name), out var value) && value;
+
+        private static bool TryRuntimeStorage(string? configured, out RuntimeStorageKind runtimeStorage)
+        {
+            configured ??= nameof(RuntimeStorageKind.Ephemeral);
+            foreach (var candidate in Enum.GetValues<RuntimeStorageKind>())
+            {
+                if (!string.Equals(configured, candidate.ToString(), StringComparison.OrdinalIgnoreCase))
+                    continue;
+                runtimeStorage = candidate;
+                return true;
+            }
+
+            runtimeStorage = default;
+            return false;
+        }
     }
 }

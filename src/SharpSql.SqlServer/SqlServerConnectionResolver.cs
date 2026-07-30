@@ -3,8 +3,14 @@ using System.Xml.Linq;
 
 namespace SharpSql.SqlServer;
 
+/// <summary>Resolves named SQL Server connections from standard .NET configuration sources.</summary>
 public static class SqlServerConnectionResolver
 {
+    /// <summary>Resolves the connection string configured for a project.</summary>
+    /// <param name="projectPath">The project file or project-scoped path.</param>
+    /// <param name="connectionName">The optional named connection.</param>
+    /// <param name="connectionStringEnvironmentVariable">An optional environment variable override.</param>
+    /// <returns>The resolved connection string, or <see langword="null"/> when no unnamed connection is configured.</returns>
     public static string? Resolve(
         string projectPath,
         string? connectionName,

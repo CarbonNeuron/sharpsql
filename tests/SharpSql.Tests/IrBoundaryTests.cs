@@ -63,6 +63,48 @@ public sealed class IrBoundaryTests
     }
 
     [Fact]
+    public void CSharpFrontendBindsAwaitAndAsyncMethodMetadataIntoIr()
+    {
+        const string source = """
+            int marker = 1;
+            async System.Threading.Tasks.Task<int> LocalAsync() =>
+                await AsyncWorker.DeclaredAsync();
+
+            static class AsyncWorker
+            {
+                public static async System.Threading.Tasks.Task<int> DeclaredAsync() =>
+                    await System.Threading.Tasks.Task.FromResult(42);
+            }
+            """;
+        var compiler = new SharpSqlCompiler();
+
+        var result = compiler.Transpile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        var program = Assert.IsType<IrProgram>(compiler.BoundProgram);
+        var local = Assert.Single(program.Methods, method => method.Name == "LocalAsync");
+        var declared = Assert.Single(program.Methods, method => method.Name == "DeclaredAsync");
+        Assert.True(local.IsAsync);
+        Assert.True(declared.IsAsync);
+        Assert.Null(local.ContainingType);
+        Assert.Equal("AsyncWorker", declared.ContainingType);
+
+        var localAwait = Assert.IsType<IrAwaitExpression>(local.ExpressionBody);
+        var localCall = Assert.IsType<IrInvocationExpression>(localAwait.Operand);
+        Assert.Equal(IrType.Int, localAwait.Type);
+        Assert.Equal(declared.Id, localCall.TargetMethodId);
+
+        var declaredAwait = Assert.IsType<IrAwaitExpression>(declared.ExpressionBody);
+        Assert.IsType<IrInvocationExpression>(declaredAwait.Operand);
+        Assert.Equal(IrType.Int, declaredAwait.Type);
+
+        var graph = MethodGraph.Create(program.Methods, program.EntryPoint);
+        Assert.Contains(declared.Id, graph.Callees(local.Id));
+        Assert.True(local.Behavior.Effects.HasFlag(MethodEffects.InvokesUnknown));
+        Assert.True(local.Behavior.Effects.HasFlag(MethodEffects.MayThrow));
+    }
+
+    [Fact]
     public void SqlBackendAcceptsAProgramConstructedWithoutRoslyn()
     {
         var source = IrSource.None;
