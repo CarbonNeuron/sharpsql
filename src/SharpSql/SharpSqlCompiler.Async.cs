@@ -26,7 +26,10 @@ public sealed partial class SharpSqlCompiler
             return false;
 
         var rootStateMachine = AsyncStateMachinePlan.Create(ServiceBrokerEntryHandler, program.EntryPoint);
-        var asyncMethods = program.Methods.Where(method => method.IsAsync).ToArray();
+        var reachableMethods = _methodGraph?.ReachableFromEntryPoint().ToHashSet() ?? [];
+        var asyncMethods = program.Methods
+            .Where(method => method.IsAsync && reachableMethods.Contains(method.Id))
+            .ToArray();
         if (rootStateMachine.SuspensionPoints.Count == 0 && asyncMethods.Length == 0)
             return false;
 
@@ -870,7 +873,9 @@ public sealed partial class SharpSqlCompiler
             .Append(_options.MaxInlineCallSites).Append('|')
             .Append(_options.EmitNoCount).Append('|')
             .Append(_options.EmitRuntimeDiagnostics).Append('|')
-            .Append((int)_options.RuntimeStorage)
+            .Append((int)_effectiveRuntime.Execution).Append('|')
+            .Append((int)_effectiveRuntime.Durability).Append('|')
+            .Append(_effectiveRuntime.UseMemoryOptimizedTables)
             .Append('\n');
         if (_compilation is not null)
         {

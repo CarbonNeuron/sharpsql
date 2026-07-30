@@ -369,8 +369,8 @@ public sealed partial class SharpSqlCompiler
             var returnLabel = _names.AllocateLabel($"vm_return_{callee.Definition.Name}");
             var returnId = ++_nextVmContinuationId;
             _vmContinuations.Add(new VmContinuation(returnId, returnLabel));
-            var executionColumns = UsesDurableVmStorage ? "__execution_id, " : string.Empty;
-            var executionValues = UsesDurableVmStorage ? $"{RuntimeExecutionId}, " : string.Empty;
+            var executionColumns = UsesSharedVmStorage ? "__execution_id, " : string.Empty;
+            var executionValues = UsesSharedVmStorage ? $"{RuntimeExecutionId}, " : string.Empty;
             _sql.Line($"INSERT INTO {VmStackTable} ({executionColumns}__function_id, __return_id, __caller_id) VALUES ({executionValues}{callee.Id}, {returnId}, {(context is null ? "NULL" : VmFrameId)});");
             _sql.Line($"SET {VmNewFrameId} = CONVERT(INT, SCOPE_IDENTITY());");
             for (var index = 0; index < capturedArguments.Count; index++)
@@ -447,8 +447,8 @@ public sealed partial class SharpSqlCompiler
             var returnLabel = _names.AllocateLabel($"vm_return_{dispatchSlot.Method.Name}");
             var returnId = ++_nextVmContinuationId;
             _vmContinuations.Add(new VmContinuation(returnId, returnLabel));
-            var executionColumns = UsesDurableVmStorage ? "__execution_id, " : string.Empty;
-            var executionValues = UsesDurableVmStorage ? $"{RuntimeExecutionId}, " : string.Empty;
+            var executionColumns = UsesSharedVmStorage ? "__execution_id, " : string.Empty;
+            var executionValues = UsesSharedVmStorage ? $"{RuntimeExecutionId}, " : string.Empty;
             _sql.Line($"INSERT INTO {VmStackTable} ({executionColumns}__function_id, __return_id, __caller_id) VALUES ({executionValues}{selectedFunction}, {returnId}, {(context is null ? "NULL" : VmFrameId)});");
             _sql.Line($"SET {VmNewFrameId} = CONVERT(INT, SCOPE_IDENTITY());");
             for (var index = 0; index < capturedArguments.Count; index++)

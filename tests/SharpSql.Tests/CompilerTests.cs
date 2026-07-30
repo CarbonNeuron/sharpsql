@@ -5,18 +5,22 @@ namespace SharpSql.Tests;
 public sealed class CompilerTests
 {
     [Fact]
-    public void ReportsOnePreciseDiagnosticWhenAwaitReachesTheSqlBackend()
+    public void ExplicitInlineReportsOnePreciseDiagnosticForAwait()
     {
         const string source = "int value = await System.Threading.Tasks.Task.FromResult(42);";
         var compiler = new SharpSqlCompiler();
 
-        var result = compiler.Transpile(source);
+        var result = compiler.Transpile(
+            source,
+            new TranspileOptions { Execution = RuntimeExecutionKind.Inline });
 
         var diagnostic = Assert.Single(result.Diagnostics);
-        Assert.Equal("SS4002", diagnostic.Code);
+        Assert.Equal("SS7006", diagnostic.Code);
         Assert.Equal(
-            "Await expressions require async scheduling, which is not supported by the SQL backend.",
+            "RuntimeExecutionKind.Inline cannot execute reachable async or await code. Use Auto or ServiceBroker.",
             diagnostic.Message);
+        Assert.DoesNotContain("Await expressions require async scheduling", result.Sql, StringComparison.Ordinal);
+        Assert.Equal(RuntimeExecutionKind.Inline, result.EffectiveRuntime.Execution);
         var program = Assert.IsType<IrProgram>(compiler.BoundProgram);
         var declaration = Assert.IsType<ProceduralDeclarationStatement>(Assert.Single(program.EntryPoint.Statements));
         var awaitExpression = Assert.IsType<IrAwaitExpression>(Assert.Single(declaration.Declaration.Variables).Initializer);

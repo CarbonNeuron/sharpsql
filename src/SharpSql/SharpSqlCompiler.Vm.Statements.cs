@@ -309,7 +309,7 @@ public sealed partial class SharpSqlCompiler
             EmitLabel(continueLabel);
             if (UsesMemoryOptimizedRuntime)
             {
-                _sql.Line($"UPDATE {VmSlotsTable} SET __scalar_value = CONVERT(VARBINARY(8000), CONVERT(INT, __scalar_value) + 1) WHERE __frame_id = {VmFrameId} AND __slot_id = {indexStorage.Slot};");
+                _sql.Line($"UPDATE {VmSlotsTable} SET __scalar_value = CONVERT(VARBINARY(8000), CONVERT(INT, __scalar_value) + 1) WHERE __frame_id = {VmFrameId} AND __slot_id = {indexStorage.Slot}{VmExecutionPredicate()};");
             }
             else
             {

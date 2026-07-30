@@ -13,12 +13,12 @@ public sealed partial class SharpSqlCompiler
 
     private const string VmStack = "#__sharpsql_stack";
     private const string VmSlots = "#__sharpsql_slots";
-    private const string MemoryOptimizedVmStack = "@__sharpsql_memory_stack";
-    private const string MemoryOptimizedVmSlots = "@__sharpsql_memory_slots";
-    private string MemoryOptimizedVmStackType =>
-        $"{SqlIdentifier.Quote(_options.ApplicationSchema, nameof(TranspileOptions.ApplicationSchema))}.[MemoryVmStackV1]";
-    private string MemoryOptimizedVmSlotsType =>
-        $"{SqlIdentifier.Quote(_options.ApplicationSchema, nameof(TranspileOptions.ApplicationSchema))}.[MemoryVmSlotsV1]";
+    private string MemoryOptimizedVmStack =>
+        $"{SqlIdentifier.Quote(_options.ApplicationSchema, nameof(TranspileOptions.ApplicationSchema))}." +
+        $"[{MemoryOptimizedRuntimeSqlEmitter.VmStackTableName(_effectiveRuntime.Durability)}]";
+    private string MemoryOptimizedVmSlots =>
+        $"{SqlIdentifier.Quote(_options.ApplicationSchema, nameof(TranspileOptions.ApplicationSchema))}." +
+        $"[{MemoryOptimizedRuntimeSqlEmitter.VmSlotsTableName(_effectiveRuntime.Durability)}]";
     private const string DurableVmStack = "[SharpSql].[__sharpsql_stack]";
     private const string DurableVmSlots = "[SharpSql].[__sharpsql_slots]";
     private const string VmFrameId = "@__sharpsql_frame_id";
@@ -33,14 +33,15 @@ public sealed partial class SharpSqlCompiler
     private string VmDispatchLabel => "__sharpsql_dispatch";
     private string VmFunctionDispatchLabel => "__sharpsql_function_dispatch";
     private string VmHaltLabel => "__sharpsql_halt";
-    private bool UsesDurableVmStorage => UsesDurableRuntime;
-    private string VmStackTable => UsesDurableVmStorage
-        ? DurableVmStack
-        : UsesMemoryOptimizedRuntime ? MemoryOptimizedVmStack : VmStack;
-    private string VmSlotsTable => UsesDurableVmStorage
-        ? DurableVmSlots
-        : UsesMemoryOptimizedRuntime ? MemoryOptimizedVmSlots : VmSlots;
-    private string VmExecutionPredicate(string? alias = null) => UsesDurableVmStorage
+    private bool UsesDurableVmStorage => UsesDurableRuntime && !UsesMemoryOptimizedRuntime;
+    private bool UsesSharedVmStorage => UsesDurableVmStorage || UsesMemoryOptimizedRuntime;
+    private string VmStackTable => UsesMemoryOptimizedRuntime
+        ? MemoryOptimizedVmStack
+        : UsesDurableVmStorage ? DurableVmStack : VmStack;
+    private string VmSlotsTable => UsesMemoryOptimizedRuntime
+        ? MemoryOptimizedVmSlots
+        : UsesDurableVmStorage ? DurableVmSlots : VmSlots;
+    private string VmExecutionPredicate(string? alias = null) => UsesSharedVmStorage
         ? $" AND {(alias is null ? string.Empty : alias + ".")}__execution_id = {RuntimeExecutionId}"
         : string.Empty;
 
@@ -172,7 +173,17 @@ public sealed partial class SharpSqlCompiler
             return;
 
         _sql.Line("-- SharpSql stack-machine runtime");
-        if (UsesDurableVmStorage)
+        if (UsesMemoryOptimizedRuntime)
+        {
+            _sql.Line("-- SharpSql database-global memory-optimized stack-machine runtime");
+            _sql.Line($"IF OBJECT_ID({SqlIdentifier.UnicodeLiteral(MemoryOptimizedVmStack)}, N'U') IS NULL");
+            using (_sql.Indent())
+                _sql.Line($"THROW {MemoryOptimizedRuntimeSqlEmitter.MissingPhysicalTableErrorNumber}, 'Provision the SharpSql memory-optimized runtime before executing this program.', 1;");
+            _sql.Line($"IF OBJECT_ID({SqlIdentifier.UnicodeLiteral(MemoryOptimizedVmSlots)}, N'U') IS NULL");
+            using (_sql.Indent())
+                _sql.Line($"THROW {MemoryOptimizedRuntimeSqlEmitter.MissingPhysicalTableErrorNumber}, 'Provision the SharpSql memory-optimized runtime before executing this program.', 1;");
+        }
+        else if (UsesDurableVmStorage)
         {
             _sql.Line($"IF OBJECT_ID(N'{DurableVmStack}', N'U') IS NULL");
             _sql.Line("BEGIN");
@@ -211,12 +222,6 @@ public sealed partial class SharpSqlCompiler
                 _sql.Line(");");
             }
             _sql.Line("END;");
-        }
-        else if (UsesMemoryOptimizedRuntime)
-        {
-            _sql.Line("-- SharpSql memory-optimized stack-machine runtime");
-            _sql.Line($"DECLARE {MemoryOptimizedVmStack} {MemoryOptimizedVmStackType};");
-            _sql.Line($"DECLARE {MemoryOptimizedVmSlots} {MemoryOptimizedVmSlotsType};");
         }
         else
         {
@@ -290,7 +295,7 @@ public sealed partial class SharpSqlCompiler
 
     private void EmitDurableVmCleanup()
     {
-        if (!UsesDurableVmStorage || _vmMethods.Count == 0)
+        if (!UsesSharedVmStorage || _vmMethods.Count == 0)
             return;
 
         _sql.Line($"DELETE FROM {VmSlotsTable} WHERE __execution_id = {RuntimeExecutionId};");

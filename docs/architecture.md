@@ -111,13 +111,12 @@ The current VM lowering supports scalar and heap-reference parameters/results, d
 
 Both runtime tables are dropped at normal halt and pre-dropped at startup to recover from an earlier failed batch on a reused connection. Local temporary tables are also removed when their SQL connection closes.
 
-The opt-in `MemoryOptimized` legacy storage mode replaces those two runtime tables
-with variables of the provisioned `SharpSql.MemoryVmStackV1` and
-`SharpSql.MemoryVmSlotsV1` memory-optimized table types. The control-flow lowering
-is identical. Table-variable scope provides execution isolation and automatic
-cleanup without execution IDs; scalar slots use `VARBINARY(8000)` round-tripping
-because memory-optimized tables cannot contain `SQL_VARIANT`. Heap and transient
-LINQ tables remain in tempdb in this first performance slice.
+The independent memory-optimized option replaces those two runtime tables with
+database-global, execution-partitioned In-Memory OLTP tables. Ephemeral tables use
+`SCHEMA_ONLY`; durable tables use `SCHEMA_AND_DATA`, with separate versioned names so
+both can coexist. The control-flow lowering is identical, and scalar slots use
+`VARBINARY(8000)` round-tripping because memory-optimized tables cannot contain
+`SQL_VARIANT`. Heap and transient LINQ tables remain in tempdb in this slice.
 
 ## Managed heap and collections
 

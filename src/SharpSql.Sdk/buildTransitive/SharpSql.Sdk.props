@@ -3,7 +3,9 @@
     <SharpSqlEnabled Condition="'$(SharpSqlEnabled)' == ''">true</SharpSqlEnabled>
     <SharpSqlEnableAnalyzer Condition="'$(SharpSqlEnableAnalyzer)' == ''">true</SharpSqlEnableAnalyzer>
     <SharpSqlGenerateOnBuild Condition="'$(SharpSqlGenerateOnBuild)' == ''">true</SharpSqlGenerateOnBuild>
-    <SharpSqlRuntimeStorage Condition="'$(SharpSqlRuntimeStorage)' == ''">Ephemeral</SharpSqlRuntimeStorage>
+    <SharpSqlExecution Condition="'$(SharpSqlExecution)' == ''">Auto</SharpSqlExecution>
+    <SharpSqlDurability Condition="'$(SharpSqlDurability)' == ''">Ephemeral</SharpSqlDurability>
+    <SharpSqlMemoryOptimized Condition="'$(SharpSqlMemoryOptimized)' == ''">false</SharpSqlMemoryOptimized>
     <SharpSqlOutputLocation Condition="'$(SharpSqlOutputLocation)' == ''">Intermediate</SharpSqlOutputLocation>
     <SharpSqlKeepContainer Condition="'$(SharpSqlKeepContainer)' == ''">false</SharpSqlKeepContainer>
     <SharpSqlForceContainer Condition="'$(SharpSqlForceContainer)' == ''">false</SharpSqlForceContainer>
@@ -15,6 +17,9 @@
   <ItemGroup>
     <CompilerVisibleProperty Include="SharpSqlEnableAnalyzer" />
     <CompilerVisibleProperty Include="SharpSqlEntryPoint" />
+    <CompilerVisibleProperty Include="SharpSqlExecution" />
+    <CompilerVisibleProperty Include="SharpSqlDurability" />
+    <CompilerVisibleProperty Include="SharpSqlMemoryOptimized" />
     <CompilerVisibleProperty Include="SharpSqlRuntimeStorage" />
   </ItemGroup>
 </Project>

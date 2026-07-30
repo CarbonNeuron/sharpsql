@@ -7,6 +7,7 @@ internal sealed class MethodGraph
     private readonly IReadOnlyDictionary<IrMethodId, int> _callSiteCounts;
     private readonly IReadOnlyDictionary<IrMethodId, string> _names;
     private readonly IReadOnlyDictionary<string, IReadOnlyList<IrMethodId>> _idsByName;
+    private readonly IReadOnlyCollection<IrMethodId> _entryPointCallees;
 
     private MethodGraph(
         IReadOnlyDictionary<IrMethodId, IReadOnlyCollection<IrMethodId>> callees,
@@ -14,7 +15,8 @@ internal sealed class MethodGraph
         IReadOnlyDictionary<IrMethodId, int> callSiteCounts,
         IReadOnlyCollection<IrMethodId> recursiveMethods,
         IReadOnlyDictionary<IrMethodId, string> names,
-        IReadOnlyDictionary<string, IReadOnlyList<IrMethodId>> idsByName)
+        IReadOnlyDictionary<string, IReadOnlyList<IrMethodId>> idsByName,
+        IReadOnlyCollection<IrMethodId> entryPointCallees)
     {
         _callees = callees;
         _callers = callers;
@@ -22,6 +24,7 @@ internal sealed class MethodGraph
         RecursiveMethodIds = recursiveMethods;
         _names = names;
         _idsByName = idsByName;
+        _entryPointCallees = entryPointCallees;
     }
 
     public IReadOnlyCollection<IrMethodId> RecursiveMethodIds { get; }
@@ -46,6 +49,19 @@ internal sealed class MethodGraph
 
     public IReadOnlyCollection<string> Callers(string methodName) =>
         Ids(methodName).SelectMany(Callers).Select(id => _names[id]).ToHashSet(StringComparer.Ordinal);
+
+    public IReadOnlyCollection<IrMethodId> ReachableFromEntryPoint()
+    {
+        var selected = _entryPointCallees.ToHashSet();
+        var pending = new Queue<IrMethodId>(selected);
+        while (pending.TryDequeue(out var method))
+        {
+            foreach (var callee in Callees(method))
+                if (selected.Add(callee))
+                    pending.Enqueue(callee);
+        }
+        return selected;
+    }
 
     public IReadOnlyCollection<IrMethodId> ConnectedClosure(IEnumerable<IrMethodId> roots)
     {
@@ -94,6 +110,7 @@ internal sealed class MethodGraph
         var callees = definitions.ToDictionary(item => item.Id, _ => new HashSet<IrMethodId>());
         var callers = definitions.ToDictionary(item => item.Id, _ => new HashSet<IrMethodId>());
         var callSiteCounts = new Dictionary<IrMethodId, int>();
+        var entryPointCallees = new HashSet<IrMethodId>();
 
         VisitStatement(entryPoint, owner: null);
         foreach (var definition in definitions)
@@ -121,7 +138,8 @@ internal sealed class MethodGraph
             callSiteCounts,
             FindRecursiveMethods(readonlyCallees),
             names,
-            idsByName);
+            idsByName,
+            entryPointCallees);
 
         void VisitStatement(ProceduralStatement statement, IrMethodId? owner)
         {
@@ -192,6 +210,9 @@ internal sealed class MethodGraph
         {
             switch (expression)
             {
+                case IrVariableExpression variable:
+                    RegisterReference(variable.Symbol.ReferencedMethodId, owner);
+                    break;
                 case IrBinaryExpression binary:
                     VisitExpression(binary.Left, owner);
                     VisitExpression(binary.Right, owner);
@@ -211,6 +232,7 @@ internal sealed class MethodGraph
                     VisitExpression(conditional.WhenFalse, owner);
                     break;
                 case IrMemberExpression member:
+                    RegisterReference(member.ReferencedMethodId, owner);
                     VisitExpression(member.Receiver, owner);
                     break;
                 case IrElementExpression element:
@@ -222,8 +244,7 @@ internal sealed class MethodGraph
                     if (Resolve(invocation) is { } methodId)
                     {
                         callSiteCounts[methodId] = callSiteCounts.GetValueOrDefault(methodId) + 1;
-                        if (owner is not null)
-                            callees[owner.Value].Add(methodId);
+                        RegisterReference(methodId, owner);
                     }
                     VisitExpression(invocation.Target, owner);
                     foreach (var argument in invocation.Arguments)
@@ -283,6 +304,16 @@ internal sealed class MethodGraph
                     }
                     break;
             }
+        }
+
+        void RegisterReference(IrMethodId methodId, IrMethodId? owner)
+        {
+            if (methodId.IsNone || !methodsById.ContainsKey(methodId))
+                return;
+            if (owner is null)
+                entryPointCallees.Add(methodId);
+            else
+                callees[owner.Value].Add(methodId);
         }
 
         IrMethodId? Resolve(IrInvocationExpression invocation)

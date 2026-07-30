@@ -34,6 +34,28 @@ public sealed class AnalyzerTests
     }
 
     [Fact]
+    public async Task ReportsCompatibilityErrorsDuringDocumentSemanticAnalysis()
+    {
+        var compilation = await CreateCompilationAsync("""
+            int[,] values = new int[2, 2];
+            Console.WriteLine(values.Length);
+            """);
+        var sourceTree = Assert.Single(
+            compilation.SyntaxTrees,
+            tree => Path.GetFileName(tree.FilePath) == "AnalyzerInput.cs");
+        var semanticModel = compilation.GetSemanticModel(sourceTree);
+        var analysis = compilation.WithAnalyzers([new SharpSqlCompatibilityAnalyzer()]);
+
+        var diagnostics = await analysis.GetAnalyzerSemanticDiagnosticsAsync(
+            semanticModel,
+            filterSpan: null,
+            TestContext.Current.CancellationToken);
+
+        var diagnostic = Assert.Single(diagnostics, item => item.Id == "SS6301");
+        Assert.Same(sourceTree, diagnostic.Location.SourceTree);
+    }
+
+    [Fact]
     public async Task AcceptsACompatibleCompilation()
     {
         var compilation = await CreateCompilationAsync("Console.WriteLine(42);");
@@ -79,6 +101,83 @@ public sealed class AnalyzerTests
     }
 
     [Fact]
+    public async Task LegacyRuntimeStorageOverridesSplitAnalyzerDefaults()
+    {
+        var compilation = await CreateCompilationAsync("""
+            var values = new List<int> { 1 };
+            var tasks = values.Select(Work).ToList();
+            await Task.WhenAll(tasks);
+
+            async Task<int> Work(int value)
+            {
+                await Task.Delay(value);
+                return value;
+            }
+            """);
+        var analyzerOptions = CreateAnalyzerOptions(new Dictionary<string, string>
+        {
+            [SharpSqlCompatibilityAnalyzer.RuntimeStorageProperty] = "ServiceBroker",
+            [SharpSqlCompatibilityAnalyzer.ExecutionProperty] = "Inline",
+            [SharpSqlCompatibilityAnalyzer.DurabilityProperty] = "Ephemeral",
+            [SharpSqlCompatibilityAnalyzer.MemoryOptimizedProperty] = "false"
+        });
+
+        var diagnostics = await compilation
+            .WithAnalyzers([new SharpSqlCompatibilityAnalyzer()], analyzerOptions)
+            .GetAnalyzerDiagnosticsAsync(TestContext.Current.CancellationToken);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task AutoSelectsServiceBrokerDuringAsyncAnalysis()
+    {
+        var compilation = await CreateCompilationAsync("""
+            public static class AnalyzerInput
+            {
+                public static async Task Main()
+                {
+                    var values = new List<int> { 1, 2 };
+                    var tasks = values.Select(Work).ToList();
+                    await Task.WhenAll(tasks);
+                }
+
+                private static async Task<int> Work(int value)
+                {
+                    await Task.Delay(value);
+                    return value + 1;
+                }
+            }
+            """);
+
+        var diagnostics = await compilation
+            .WithAnalyzers([new SharpSqlCompatibilityAnalyzer()])
+            .GetAnalyzerDiagnosticsAsync(TestContext.Current.CancellationToken);
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Fact]
+    public async Task ReportsExplicitInlineAsyncWithItsCompilerDiagnostic()
+    {
+        var compilation = await CreateCompilationAsync(
+            "int value = await Task.FromResult(42);");
+        var analyzerOptions = CreateAnalyzerOptions(new Dictionary<string, string>
+        {
+            [SharpSqlCompatibilityAnalyzer.ExecutionProperty] = "Inline"
+        });
+
+        var diagnostics = await compilation
+            .WithAnalyzers([new SharpSqlCompatibilityAnalyzer()], analyzerOptions)
+            .GetAnalyzerDiagnosticsAsync(TestContext.Current.CancellationToken);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal("SS7006", diagnostic.Id);
+        Assert.NotEqual(SharpSqlCompatibilityAnalyzer.InternalErrorId, diagnostic.Id);
+        Assert.Contains("RuntimeExecutionKind.Inline", diagnostic.GetMessage(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ReportsAnInvalidRuntimeStorageConfiguration()
     {
         var compilation = await CreateCompilationAsync("Console.WriteLine(42);");
@@ -94,6 +193,30 @@ public sealed class AnalyzerTests
         var diagnostic = Assert.Single(diagnostics);
         Assert.Equal(SharpSqlCompatibilityAnalyzer.InternalErrorId, diagnostic.Id);
         Assert.Contains("SharpSqlRuntimeStorage", diagnostic.GetMessage());
+    }
+
+    [Theory]
+    [InlineData(SharpSqlCompatibilityAnalyzer.ExecutionProperty, "Background", "SharpSqlExecution")]
+    [InlineData(SharpSqlCompatibilityAnalyzer.DurabilityProperty, "Permanent", "SharpSqlDurability")]
+    [InlineData(SharpSqlCompatibilityAnalyzer.MemoryOptimizedProperty, "sometimes", "SharpSqlMemoryOptimized")]
+    public async Task ReportsInvalidIndependentRuntimeConfiguration(
+        string property,
+        string value,
+        string expectedPropertyName)
+    {
+        var compilation = await CreateCompilationAsync("Console.WriteLine(42);");
+        var analyzerOptions = CreateAnalyzerOptions(new Dictionary<string, string>
+        {
+            [property] = value
+        });
+
+        var diagnostics = await compilation
+            .WithAnalyzers([new SharpSqlCompatibilityAnalyzer()], analyzerOptions)
+            .GetAnalyzerDiagnosticsAsync(TestContext.Current.CancellationToken);
+
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Equal(SharpSqlCompatibilityAnalyzer.InternalErrorId, diagnostic.Id);
+        Assert.Contains(expectedPropertyName, diagnostic.GetMessage(), StringComparison.Ordinal);
     }
 
     private static async Task<CSharpCompilation> CreateCompilationAsync(string source)

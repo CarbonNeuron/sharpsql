@@ -36,10 +36,23 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         [Description("Target framework to select for a multi-targeted project.")]
         public string? TargetFramework { get; init; }
 
+        [CommandOption("--execution <MODE>")]
+        [Description("Runtime execution mode: Auto (default), Inline, or ServiceBroker.")]
+        [DefaultValue(RuntimeExecutionKind.Auto)]
+        public RuntimeExecutionKind Execution { get; init; } = RuntimeExecutionKind.Auto;
+
+        [CommandOption("--durability <MODE>")]
+        [Description("Runtime durability: Ephemeral (default) or Durable.")]
+        [DefaultValue(RuntimeDurabilityKind.Ephemeral)]
+        public RuntimeDurabilityKind Durability { get; init; } = RuntimeDurabilityKind.Ephemeral;
+
+        [CommandOption("--memory-optimized|--memory-optimized-tables")]
+        [Description("Use provisioned memory-optimized runtime tables.")]
+        public bool UseMemoryOptimizedTables { get; init; }
+
         [CommandOption("--runtime-storage <MODE>")]
-        [Description("Runtime state mode: Ephemeral (default), MemoryOptimized, Durable, or ServiceBroker.")]
-        [DefaultValue(RuntimeStorageKind.Ephemeral)]
-        public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;
+        [Description("Compatibility alias for the legacy combined runtime mode.")]
+        public RuntimeStorageKind? RuntimeStorage { get; init; }
 
         [CommandOption("--native-kernels")]
         [Description("Extract supported pure scalar methods into natively compiled procedures.")]
@@ -67,8 +80,19 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
                 return ValidationResult.Error("--output cannot be empty.");
             if (string.IsNullOrWhiteSpace(InstallerOutputPath) && InstallerOutputPath is not null)
                 return ValidationResult.Error("--installer-output cannot be empty.");
-            if (InstallerOutputPath is not null && !SqlOutputArtifacts.RequiresInstaller(RuntimeStorage))
-                return ValidationResult.Error("--installer-output requires MemoryOptimized or ServiceBroker runtime storage.");
+            if (RuntimeStorage is not null && CliRuntimeOptions.HasSplitConfiguration(
+                    Execution,
+                    Durability,
+                    UseMemoryOptimizedTables))
+                return ValidationResult.Error("--runtime-storage cannot be combined with the split runtime options.");
+            var runtime = CliRuntimeOptions.Resolve(
+                Execution,
+                Durability,
+                UseMemoryOptimizedTables,
+                RuntimeStorage);
+            if (InstallerOutputPath is not null && !SqlOutputArtifacts.MayRequireInstaller(runtime))
+                return ValidationResult.Error(
+                    "--installer-output requires Auto or ServiceBroker execution, or memory-optimized tables.");
             if (OutputPath is not null && InstallerOutputPath is not null &&
                 string.Equals(
                     Path.GetFullPath(OutputPath),
@@ -107,9 +131,16 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         CancellationToken cancellationToken)
     {
         var isProject = settings.InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
+        var requestedRuntime = CliRuntimeOptions.Resolve(
+            settings.Execution,
+            settings.Durability,
+            settings.UseMemoryOptimizedTables,
+            settings.RuntimeStorage);
         var compilerOptions = new TranspileOptions
         {
-            RuntimeStorage = settings.RuntimeStorage,
+            Execution = requestedRuntime.Execution,
+            Durability = requestedRuntime.Durability,
+            UseMemoryOptimizedTables = requestedRuntime.UseMemoryOptimizedTables,
             EnableNativeKernels = settings.EnableNativeKernels
         };
 
@@ -148,7 +179,7 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         var artifactPaths = SqlOutputArtifacts.ResolvePaths(
             settings.OutputPath,
             settings.InstallerOutputPath,
-            settings.RuntimeStorage);
+            result.EffectiveRuntime);
         if (artifactPaths.ProgramPath is null)
         {
             if (environment.Output is null)
@@ -159,9 +190,9 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         await SqlOutputArtifacts.WriteAsync(
             artifactPaths,
             result.Sql,
-            InstallerSql(settings.RuntimeStorage),
+            SqlOutputArtifacts.InstallerSql(result.EffectiveRuntime),
             cancellationToken);
-        if (SqlOutputArtifacts.RequiresInstaller(settings.RuntimeStorage) && artifactPaths.InstallerPath is null)
+        if (SqlOutputArtifacts.RequiresInstaller(result.EffectiveRuntime) && artifactPaths.InstallerPath is null)
         {
             const string message =
                 "Runtime installer SQL was not written; use --output or --installer-output to create it.";
@@ -170,11 +201,4 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         }
         return 0;
     }
-
-    private static string? InstallerSql(RuntimeStorageKind runtimeStorage) => runtimeStorage switch
-    {
-        RuntimeStorageKind.MemoryOptimized => SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(),
-        RuntimeStorageKind.ServiceBroker => SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(),
-        _ => null
-    };
 }

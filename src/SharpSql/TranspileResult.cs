@@ -7,6 +7,12 @@ public sealed record TranspileResult(
     string Sql,
     IReadOnlyList<CompilerDiagnostic> Diagnostics)
 {
+    /// <summary>Gets the resolved runtime configuration used for SQL generation.</summary>
+    public RuntimeConfiguration EffectiveRuntime { get; init; } = new(
+        RuntimeExecutionKind.Inline,
+        RuntimeDurabilityKind.Ephemeral,
+        UseMemoryOptimizedTables: false);
+
     /// <summary>Gets whether transpilation completed without diagnostics.</summary>
     public bool Success => Diagnostics.Count == 0;
 }

@@ -28,7 +28,10 @@ public sealed class CliTests
         Assert.Contains("PRINT N'from stdin';", result.Output);
         Assert.DoesNotContain("-- SharpSql durable shared runtime", result.Output);
         var settings = Assert.IsType<TranspileCommand.Settings>(result.Settings);
-        Assert.Equal(RuntimeStorageKind.Ephemeral, settings.RuntimeStorage);
+        Assert.Equal(RuntimeExecutionKind.Auto, settings.Execution);
+        Assert.Equal(RuntimeDurabilityKind.Ephemeral, settings.Durability);
+        Assert.False(settings.UseMemoryOptimizedTables);
+        Assert.Null(settings.RuntimeStorage);
     }
 
     [Fact]
@@ -44,6 +47,23 @@ public sealed class CliTests
         Assert.Contains("-- SharpSql durable shared runtime", result.Output);
         var settings = Assert.IsType<TranspileCommand.Settings>(result.Settings);
         Assert.Equal(RuntimeStorageKind.ServiceBroker, settings.RuntimeStorage);
+    }
+
+    [Fact]
+    public async Task TranspileBindsSplitRuntimeOptions()
+    {
+        var tester = CreateTester("Console.WriteLine(42);");
+
+        var result = await tester.RunAsync(
+            ["--execution", "Inline", "--durability", "Durable", "--memory-optimized"],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        var settings = Assert.IsType<TranspileCommand.Settings>(result.Settings);
+        Assert.Equal(RuntimeExecutionKind.Inline, settings.Execution);
+        Assert.Equal(RuntimeDurabilityKind.Durable, settings.Durability);
+        Assert.True(settings.UseMemoryOptimizedTables);
+        Assert.Null(settings.RuntimeStorage);
     }
 
     [Fact]
@@ -156,11 +176,15 @@ public sealed class CliTests
     {
         var tester = CreateTester("Console.WriteLine(42);");
         var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-{Guid.NewGuid():N}.sql");
-        var installerPath = SqlOutputArtifacts.DefaultInstallerPath(outputPath);
+        var installerPath = Path.Combine(Path.GetTempPath(), $"sharpsql-{Guid.NewGuid():N}.setup.sql");
         try
         {
             var result = await tester.RunAsync(
-                ["--runtime-storage", "ServiceBroker", "--output", outputPath],
+                [
+                    "--runtime-storage", "ServiceBroker",
+                    "--output", outputPath,
+                    "--installer-output", installerPath
+                ],
                 TestContext.Current.CancellationToken);
 
             Assert.Equal(0, result.ExitCode);
@@ -170,6 +194,40 @@ public sealed class CliTests
             var installer = await File.ReadAllTextAsync(installerPath, TestContext.Current.CancellationToken);
             Assert.Contains("CREATE QUEUE [SharpSql].[WorkerQueue]", installer);
             Assert.Contains("PROCEDURE_NAME = [SharpSql].[DispatchWorker]", installer);
+        }
+        finally
+        {
+            File.Delete(outputPath);
+            File.Delete(installerPath);
+        }
+    }
+
+    [Fact]
+    public async Task AutoExecutionWritesTheEffectiveServiceBrokerInstaller()
+    {
+        var tester = CreateTester("""
+            var values = new List<int> { 1 };
+            var tasks = values.Select(Work).ToList();
+            await Task.WhenAll(tasks);
+
+            async Task<int> Work(int value)
+            {
+                await Task.Delay(value);
+                return value;
+            }
+            """);
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-{Guid.NewGuid():N}.sql");
+        var installerPath = SqlOutputArtifacts.DefaultInstallerPath(outputPath);
+        try
+        {
+            var result = await tester.RunAsync(
+                ["--output", outputPath],
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Contains(
+                "CREATE QUEUE [SharpSql].[WorkerQueue]",
+                await File.ReadAllTextAsync(installerPath, TestContext.Current.CancellationToken));
         }
         finally
         {
@@ -195,11 +253,11 @@ public sealed class CliTests
 
             Assert.Equal(0, result.ExitCode);
             Assert.Contains(
-                "DECLARE @__sharpsql_memory_stack [SharpSql].[MemoryVmStackV1]",
+                "[SharpSql].[__sharpsql_memory_vm_stack_ephemeral_v1]",
                 await File.ReadAllTextAsync(outputPath, TestContext.Current.CancellationToken));
             var installer = await File.ReadAllTextAsync(installerPath, TestContext.Current.CancellationToken);
             Assert.Contains("CREATE TYPE [SharpSql].[MemoryVmStackV1]", installer);
-            Assert.Contains("WITH (MEMORY_OPTIMIZED = ON)", installer);
+            Assert.Contains("DURABILITY = SCHEMA_ONLY", installer);
         }
         finally
         {
@@ -731,7 +789,9 @@ public sealed class CliTests
         Assert.True(request.KeepContainer);
         Assert.Equal("DemoDev", request.DatabaseName);
         Assert.Equal(75, request.CommandTimeoutSeconds);
-        Assert.Equal(RuntimeStorageKind.Ephemeral, request.RuntimeStorage);
+        Assert.Equal(RuntimeExecutionKind.Auto, request.Execution);
+        Assert.Equal(RuntimeDurabilityKind.Ephemeral, request.Durability);
+        Assert.False(request.UseMemoryOptimizedTables);
     }
 
     [Fact]
@@ -766,7 +826,9 @@ public sealed class CliTests
             Assert.False(request.KeepContainer);
             Assert.Equal("Scratch", request.DatabaseName);
             Assert.Equal(12, request.CommandTimeoutSeconds);
-            Assert.Equal(RuntimeStorageKind.ServiceBroker, request.RuntimeStorage);
+            Assert.Equal(RuntimeExecutionKind.ServiceBroker, request.Execution);
+            Assert.Equal(RuntimeDurabilityKind.Durable, request.Durability);
+            Assert.False(request.UseMemoryOptimizedTables);
         }
         finally
         {
@@ -833,6 +895,7 @@ public sealed class CliTests
                 "run", project.ProjectPath,
                 "--runtime-storage", "ServiceBroker",
                 "--output", outputPath,
+                "--installer-output", installerPath,
                 "--debug",
                 "--profile"
             ]),
@@ -853,9 +916,50 @@ public sealed class CliTests
         var request = Assert.IsType<SqlRunRequest>(service.LastRequest);
         Assert.True(request.Debug);
         Assert.True(request.Profile);
-        Assert.Equal(RuntimeStorageKind.ServiceBroker, request.RuntimeStorage);
+        Assert.Equal(RuntimeExecutionKind.ServiceBroker, request.Execution);
+        Assert.Equal(RuntimeDurabilityKind.Durable, request.Durability);
+        Assert.False(request.UseMemoryOptimizedTables);
         Assert.Equal(outputPath, request.OutputPath);
         Assert.Equal(installerPath, request.InstallerOutputPath);
+    }
+
+    [Fact]
+    public async Task RunUsesTheEffectiveRuntimeToResolveAutoInstallerOutput()
+    {
+        using var project = TemporaryProject.Create("""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <OutputType>Exe</OutputType>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+        var outputPath = Path.Combine(project.DirectoryPath, "auto.sql");
+        var installerPath = SqlOutputArtifacts.DefaultInstallerPath(outputPath);
+        var effectiveRuntime = new RuntimeConfiguration(
+            RuntimeExecutionKind.ServiceBroker,
+            RuntimeDurabilityKind.Ephemeral,
+            UseMemoryOptimizedTables: false);
+        var service = new StubSqlRunService(new SqlRunResult(
+            true,
+            "container abc",
+            [],
+            [],
+            ContainerKept: false,
+            GeneratedSql: "PRINT N'program';",
+            InstallerSql: "CREATE QUEUE [SharpSql].[WorkerQueue];",
+            EffectiveRuntime: effectiveRuntime));
+        var tester = CreateRoutedTester(sqlRunService: service);
+
+        var result = await tester.RunAsync(
+            CliArgumentRouter.Route(["run", project.ProjectPath, "--output", outputPath]),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("Installer SQL:", result.Output);
+        Assert.True(File.Exists(installerPath));
+        var request = Assert.IsType<SqlRunRequest>(service.LastRequest);
+        Assert.Equal(RuntimeExecutionKind.Auto, request.Execution);
     }
 
     [Theory]
@@ -941,11 +1045,13 @@ public sealed class CliTests
         public async Task<SqlRunResult> RunAsync(SqlRunRequest request, CancellationToken cancellationToken)
         {
             LastRequest = request;
+            var effectiveRuntime = result.EffectiveRuntime ??
+                                   CliRuntimeOptions.ResolveSqlInput(request.RequestedRuntime);
             await SqlOutputArtifacts.WriteAsync(
                 SqlOutputArtifacts.ResolvePaths(
                     request.OutputPath,
                     request.InstallerOutputPath,
-                    request.RuntimeStorage),
+                    effectiveRuntime),
                 result.GeneratedSql,
                 result.InstallerSql,
                 cancellationToken);

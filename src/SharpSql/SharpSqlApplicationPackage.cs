@@ -114,7 +114,7 @@ internal static class ApplicationPackageSqlEmitter
             if (package.RuntimeStorage == RuntimeStorageKind.MemoryOptimized)
             {
                 sql.Line();
-                foreach (var line in MemoryOptimizedRuntimeSqlEmitter.Emit(schemaName)
+                foreach (var line in SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(schemaName)
                     .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
                 {
                     sql.Line(line);

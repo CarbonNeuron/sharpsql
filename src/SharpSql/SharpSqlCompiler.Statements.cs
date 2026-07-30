@@ -69,7 +69,7 @@ public sealed partial class SharpSqlCompiler
             case ProceduralReturn @return:
                 if (@return.Expression is null)
                 {
-                    if (UsesDurableRuntime)
+                    if (UsesExecutionScopedRuntime)
                         _sql.Line($"GOTO {RuntimeCleanupLabel};");
                     else
                         _sql.Line("RETURN;");
@@ -677,4 +677,3 @@ public sealed partial class SharpSqlCompiler
     }
 
 }
-

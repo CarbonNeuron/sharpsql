@@ -5,7 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <SharpSqlEntryPoint>SdkConsumer.SqlJob::Run</SharpSqlEntryPoint>
-    <SharpSqlRuntimeStorage>MemoryOptimized</SharpSqlRuntimeStorage>
+    <SharpSqlExecution>Inline</SharpSqlExecution>
+    <SharpSqlDurability>Ephemeral</SharpSqlDurability>
+    <SharpSqlMemoryOptimized>true</SharpSqlMemoryOptimized>
     <SharpSqlOutputPath>$(MSBuildProjectDirectory)/generated.sql</SharpSqlOutputPath>
   </PropertyGroup>
 </Project>

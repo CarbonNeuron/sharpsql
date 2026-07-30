@@ -10,9 +10,9 @@ internal static class SqlOutputArtifacts
     public static SqlOutputArtifactPaths ResolvePaths(
         string? outputPath,
         string? installerOutputPath,
-        RuntimeStorageKind runtimeStorage)
+        RuntimeConfiguration runtime)
     {
-        if (!RequiresInstaller(runtimeStorage))
+        if (!RequiresInstaller(runtime))
             return new SqlOutputArtifactPaths(outputPath, null);
         return new SqlOutputArtifactPaths(
             outputPath,
@@ -45,6 +45,22 @@ internal static class SqlOutputArtifacts
                 : $"{fileName}.installer{extension}");
     }
 
-    internal static bool RequiresInstaller(RuntimeStorageKind runtimeStorage) => runtimeStorage is
-        RuntimeStorageKind.MemoryOptimized or RuntimeStorageKind.ServiceBroker;
+    internal static bool RequiresInstaller(RuntimeConfiguration runtime) =>
+        runtime.UseMemoryOptimizedTables || runtime.Execution == RuntimeExecutionKind.ServiceBroker;
+
+    internal static bool MayRequireInstaller(RuntimeConfiguration runtime) =>
+        runtime.UseMemoryOptimizedTables ||
+        runtime.Execution is RuntimeExecutionKind.Auto or RuntimeExecutionKind.ServiceBroker;
+
+    internal static string? InstallerSql(RuntimeConfiguration runtime)
+    {
+        var installers = new List<string>(2);
+        if (runtime.UseMemoryOptimizedTables)
+            installers.Add(SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(runtime));
+        if (runtime.Execution == RuntimeExecutionKind.ServiceBroker)
+            installers.Add(SharpSqlServiceBrokerRuntime.GenerateProvisioningSql());
+        return installers.Count == 0
+            ? null
+            : string.Join(Environment.NewLine, installers);
+    }
 }

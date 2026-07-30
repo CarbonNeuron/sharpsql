@@ -15,7 +15,7 @@ public sealed partial class SharpSqlCompiler
         {
             AddDiagnostic(
                 "SS8201",
-                "Native kernels require RuntimeStorageKind.MemoryOptimized.",
+                "Native kernels require TranspileOptions.UseMemoryOptimizedTables.",
                 source);
         }
     }

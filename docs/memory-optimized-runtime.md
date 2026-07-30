@@ -1,11 +1,16 @@
-# Memory-optimized legacy runtime
+# Memory-optimized runtime tables
 
-Status: experimental SQL Server 2022 storage mode.
+Status: experimental SQL Server 2022 storage option.
 
-`RuntimeStorageKind.MemoryOptimized` preserves the legacy direct-SQL and static-label
-lowering. Only the stack-machine fallback's activation frames and spilled slots change:
-local temp tables become execution-local memory-optimized table variables. Directly
-lowered SQL is therefore identical, and concurrent executions do not share runtime rows.
+`UseMemoryOptimizedTables` is independent from execution and durability. It preserves
+direct-SQL and static-label lowering while moving the stack-machine activation frames
+and spilled slots into database-global memory-optimized tables. Every row is partitioned
+by `ExecutionId`, allowing inline batches and Service Broker sessions to share the same
+physical runtime safely.
+
+Ephemeral configuration uses `DURABILITY = SCHEMA_ONLY`; its rows are not recovered
+after SQL Server restarts. Durable configuration uses `DURABILITY = SCHEMA_AND_DATA`.
+Separate versioned table names allow both configurations to coexist in one database.
 
 ## Provisioning
 
@@ -31,20 +36,28 @@ requires dropping the database. SharpSql consequently never emits this physical 
 After the filegroup exists, run the idempotent SQL returned by:
 
 ```csharp
-SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql()
+SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(
+    new RuntimeConfiguration(
+        RuntimeExecutionKind.Auto,
+        RuntimeDurabilityKind.Ephemeral,
+        UseMemoryOptimizedTables: true))
 ```
 
 The CLI writes that script beside an output program automatically:
 
 ```bash
 sharpsql transpile Program.cs \
-  --runtime-storage MemoryOptimized \
+  --execution Inline --memory-optimized \
   --output Program.sql
 ```
 
-This provisions two versioned table types, `SharpSql.MemoryVmStackV1` and
-`SharpSql.MemoryVmSlotsV1`. Each generated batch declares its own variables of those
-types, so state lifetime and isolation match the ordinary ephemeral mode.
+The legacy `--runtime-storage MemoryOptimized` spelling remains available as a
+compatibility alias.
+
+This provisions the compatibility table types plus a durability-specific pair of
+global VM tables. Generated programs verify that the selected tables exist, scope all
+access by execution ID, and remove their rows on normal completion, early return, or
+failure. A server restart automatically clears `SCHEMA_ONLY` rows.
 
 ## Representation
 
@@ -60,8 +73,9 @@ multi-row insert instead of the ephemeral runtime's `MERGE` upsert.
 
 ## Initial measurement
 
-On the repository's SQL Server 2022 Linux container, 20 alternating warmed runs of
-recursive Fibonacci(12) measured:
+The earlier table-variable prototype measured the following on the repository's SQL
+Server 2022 Linux container. The new global-table design needs a fresh benchmark before
+these numbers can be treated as representative:
 
 | Storage | Median execution |
 | --- | ---: |
@@ -71,8 +85,8 @@ recursive Fibonacci(12) measured:
 The observed memory/temp ratio was `0.679x`, approximately a 32% elapsed-time
 reduction. This is a focused microbenchmark, not a universal throughput claim.
 
-The mode also passes all 33 successful parity programs, all 12 runtime-failure parity
-programs, and an eight-connection concurrent-state isolation test.
+The global-table implementation remains covered by the parity corpus, runtime-failure
+cases, and concurrent execution isolation tests.
 
 ## Current boundary
 
@@ -81,3 +95,8 @@ buffers still use local temporary tables. Moving the fixed-shape object and inde
 item tables is a reasonable next experiment. Per-program object tables have dynamic,
 strongly typed columns and need a separate provisioning/versioning design rather than
 being forced into an untyped shared heap.
+
+Service Broker can provision and address either memory-table durability. Its current
+worker continuation slice still rejects calls that require the VM fallback (`SS7005`),
+so global VM state is ready for that integration but is not yet exercised inside an
+activated async continuation.

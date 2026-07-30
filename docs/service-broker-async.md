@@ -114,10 +114,13 @@ maintenance runner; provisioning installs the operations but does not create an 
 job.
 
 The CLI keeps that deployment boundary explicit. Transpiling or running with
-`--runtime-storage ServiceBroker --output out.sql` writes the program to `out.sql`
+`--execution ServiceBroker --durability Durable --output out.sql` writes the program to `out.sql`
 and the idempotent standalone installer to `out.installer.sql`. Override the latter
 with `--installer-output`. `run` executes the installer once before the program and
 excludes installation and container startup from `--profile` measurements.
+With the default `--execution Auto`, the CLI uses the transpiler's effective runtime,
+so async programs that select Service Broker receive the same installer automatically.
+`--runtime-storage ServiceBroker` remains a compatibility alias.
 
 The dispatcher accepts only 32-character hexadecimal compiler program IDs and maps
 them to `[SharpSql].[Program_<hash>]`; message data cannot supply an arbitrary
@@ -127,27 +130,30 @@ messages remain on the worker queue.
 
 ## Compiler mode
 
-Enable async lowering explicitly:
+Async lowering is selected automatically from reachable IR:
 
 ```csharp
 var result = new SharpSqlCompiler().Transpile(
     source,
-    new TranspileOptions { RuntimeStorage = RuntimeStorageKind.ServiceBroker });
+    new TranspileOptions { Execution = RuntimeExecutionKind.Auto });
 ```
 
 For a `SharpSql.Sdk` project, use the matching MSBuild property:
 
 ```xml
 <PropertyGroup>
-  <SharpSqlRuntimeStorage>ServiceBroker</SharpSqlRuntimeStorage>
+  <SharpSqlExecution>Auto</SharpSqlExecution>
+  <SharpSqlDurability>Ephemeral</SharpSqlDurability>
+  <SharpSqlMemoryOptimized>false</SharpSqlMemoryOptimized>
 </PropertyGroup>
 ```
 
-`SharpSqlRuntimeStorage` accepts `Ephemeral` (the default), `MemoryOptimized`,
-`Durable`, or `ServiceBroker`. The SDK passes it to the analyzer and build host, and
-`SharpSqlRun` provisions the infrastructure as a separate batch before running
-the generated program SQL. The CLI exposes the same choice as
-`--runtime-storage ServiceBroker` for `transpile` and `run`. The `run` command also
+The SDK passes these independent settings to the analyzer and build host, and
+`SharpSqlRun` provisions the effective infrastructure as a separate batch before
+running the generated program SQL. `SharpSqlRuntimeStorage` remains a legacy
+compatibility alias. The CLI exposes execution, durability, and
+memory-optimized tables independently through `--execution`, `--durability`, and
+`--memory-optimized` for `transpile` and `run`. The `run` command also
 supports live output, `--debug`, `--profile`, and `--output` without requiring the
 C# side of a parity run. Profile timings cover the end-to-end execution, including
 activated workers; plan diagnostics cover statements observed on the launcher session.

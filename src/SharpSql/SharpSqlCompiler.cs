@@ -98,8 +98,9 @@ public sealed partial class SharpSqlCompiler
 
         if (roots.Length == 0)
         {
+            ResolveRuntimeConfigurationWithoutProgram();
             _diagnostics.Add(new CompilerDiagnostic("SS0001", "The compilation contains no C# source files.", 0, 0));
-            return new TranspileResult(string.Empty, _diagnostics.AsReadOnly());
+            return CreateTranspileResult(string.Empty);
         }
 
         foreach (var root in roots)
@@ -173,9 +174,11 @@ public sealed partial class SharpSqlCompiler
         {
             HeapTypes = heapTypeDefinitions
         };
+        _methodGraph = MethodGraph.Create(_boundProgram.Methods, _boundProgram.EntryPoint);
+        if (!ResolveRuntimeConfiguration(_boundProgram))
+            return CreateTranspileResult(string.Empty);
         ValidateNativeKernelOptions(_boundProgram.EntryPoint.Source);
         PrepareHeapRuntime(_boundProgram);
-        _methodGraph = MethodGraph.Create(_boundProgram.Methods, _boundProgram.EntryPoint);
         PrepareVmMethods();
 
         foreach (var root in commentRoots)
@@ -213,7 +216,7 @@ public sealed partial class SharpSqlCompiler
         EmitHeapEpilogue();
         EmitDurableExecutionBodyEpilogue();
 
-        return new TranspileResult(CompleteSql(), _diagnostics.AsReadOnly());
+        return CreateTranspileResult(CompleteSql());
     }
 
     internal TranspileResult Transpile(IrProgram program, TranspileOptions? options = null)
@@ -227,9 +230,11 @@ public sealed partial class SharpSqlCompiler
             _methods.TryAdd(method, out _);
         AnalyzeMethodBehaviors();
         _boundProgram = program with { Methods = _methods.Values.ToArray() };
+        _methodGraph = MethodGraph.Create(_boundProgram.Methods, _boundProgram.EntryPoint);
+        if (!ResolveRuntimeConfiguration(_boundProgram))
+            return CreateTranspileResult(string.Empty);
         ValidateNativeKernelOptions(_boundProgram.EntryPoint.Source);
         PrepareHeapRuntime(_boundProgram);
-        _methodGraph = MethodGraph.Create(_boundProgram.Methods, _boundProgram.EntryPoint);
         PrepareVmMethods();
 
         EmitIrComments(program.FileComments);
@@ -251,8 +256,14 @@ public sealed partial class SharpSqlCompiler
         EmitDurableExecutionCleanupLabel();
         EmitHeapEpilogue();
         EmitDurableExecutionBodyEpilogue();
-        return new TranspileResult(CompleteSql(), _diagnostics.AsReadOnly());
+        return CreateTranspileResult(CompleteSql());
     }
+
+    private TranspileResult CreateTranspileResult(string sql) =>
+        new(sql, _diagnostics.AsReadOnly())
+        {
+            EffectiveRuntime = _effectiveRuntime
+        };
 
     private void AddParseDiagnostics(SyntaxTree tree)
     {

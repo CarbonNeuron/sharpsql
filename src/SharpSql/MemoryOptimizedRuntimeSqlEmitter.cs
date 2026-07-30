@@ -1,9 +1,15 @@
 namespace SharpSql;
 
-/// <summary>Emits the fixed memory-optimized table types used by the legacy VM.</summary>
+/// <summary>Emits compatibility table types and global memory-optimized VM tables.</summary>
 internal static class MemoryOptimizedRuntimeSqlEmitter
 {
     internal const int MissingFilegroupErrorNumber = 51921;
+    internal const int MissingPhysicalTableErrorNumber = 51936;
+    internal static string VmStackTableName(RuntimeDurabilityKind durability) =>
+        $"__sharpsql_memory_vm_stack_{DurabilityName(durability)}_v1";
+
+    internal static string VmSlotsTableName(RuntimeDurabilityKind durability) =>
+        $"__sharpsql_memory_vm_slots_{DurabilityName(durability)}_v1";
 
     internal static string Emit(string schemaName = "SharpSql")
     {
@@ -66,4 +72,71 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
         }
         return sql.ToString();
     }
+
+    internal static string EmitPhysicalTables(
+        RuntimeDurabilityKind durability,
+        string schemaName = "SharpSql")
+    {
+        schemaName = SqlIdentifier.Validate(schemaName, nameof(schemaName));
+        var schema = SqlIdentifier.Quote(schemaName, nameof(schemaName));
+        var schemaLiteral = SqlIdentifier.UnicodeLiteral(schemaName);
+        var sql = new SqlWriter();
+        sql.Line("SET ANSI_NULLS ON;");
+        sql.Line("SET ANSI_PADDING ON;");
+        sql.Line("SET ANSI_WARNINGS ON;");
+        sql.Line("SET ARITHABORT ON;");
+        sql.Line("SET CONCAT_NULL_YIELDS_NULL ON;");
+        sql.Line("SET QUOTED_IDENTIFIER ON;");
+        sql.Line("SET NUMERIC_ROUNDABORT OFF;");
+        sql.Line();
+        sql.Line("IF NOT EXISTS (SELECT 1 FROM sys.filegroups WHERE [type] = N'FX')");
+        using (sql.Indent())
+        {
+            sql.Line(
+                $"THROW {MissingFilegroupErrorNumber}, 'The database needs a MEMORY_OPTIMIZED_DATA filegroup before provisioning SharpSql memory-optimized runtime tables.', 1;");
+        }
+        sql.Line();
+        sql.Line($"IF SCHEMA_ID({schemaLiteral}) IS NULL");
+        using (sql.Indent())
+            sql.Line($"EXEC({SqlIdentifier.UnicodeLiteral($"CREATE SCHEMA {schema} AUTHORIZATION [dbo];")});");
+        sql.Line();
+        RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, VmStackTable(durability), durability);
+        sql.Line();
+        RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, VmSlotsTable(durability), durability);
+        return sql.ToString();
+    }
+
+    private static RuntimeTableDefinition VmStackTable(RuntimeDurabilityKind durability) => new(
+        VmStackTableName(durability),
+        [
+            "[__execution_id] UNIQUEIDENTIFIER NOT NULL",
+            "[__id] INT IDENTITY(1,1) NOT NULL",
+            "[__function_id] INT NOT NULL",
+            "[__return_id] INT NOT NULL",
+            "[__caller_id] INT NULL"
+        ],
+        $"PK_sharpsql_memory_vm_stack_{DurabilityName(durability)}_v1",
+        "[__execution_id], [__id]",
+        131_072);
+
+    private static RuntimeTableDefinition VmSlotsTable(RuntimeDurabilityKind durability) => new(
+        VmSlotsTableName(durability),
+        [
+            "[__execution_id] UNIQUEIDENTIFIER NOT NULL",
+            "[__frame_id] INT NOT NULL",
+            "[__slot_id] INT NOT NULL",
+            "[__scalar_value] VARBINARY(8000) NULL",
+            "[__text_value] NVARCHAR(MAX) NULL",
+            "[__binary_value] VARBINARY(MAX) NULL"
+        ],
+        $"PK_sharpsql_memory_vm_slots_{DurabilityName(durability)}_v1",
+        "[__execution_id], [__frame_id], [__slot_id]",
+        524_288);
+
+    private static string DurabilityName(RuntimeDurabilityKind durability) => durability switch
+    {
+        RuntimeDurabilityKind.Ephemeral => "ephemeral",
+        RuntimeDurabilityKind.Durable => "durable",
+        _ => throw new ArgumentOutOfRangeException(nameof(durability), durability, null)
+    };
 }

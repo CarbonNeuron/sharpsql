@@ -42,10 +42,7 @@ public static class Program
                 EntryPoint = parsed.EntryPoint,
                 Configuration = parsed.Configuration,
                 TargetFramework = parsed.TargetFramework,
-                CompilerOptions = new TranspileOptions
-                {
-                    RuntimeStorage = parsed.RuntimeStorage
-                }
+                CompilerOptions = CompilerOptions(parsed)
             },
             cancellationToken);
         if (!result.Success)
@@ -72,6 +69,10 @@ public static class Program
 
     private static async Task<int> RunSqlAsync(BuildArguments parsed, CancellationToken cancellationToken)
     {
+        var runtime = await ResolveRuntimeAsync(parsed, cancellationToken);
+        if (runtime is null)
+            return 1;
+
         var totalTime = Stopwatch.StartNew();
         WriteProgress("resolving SQL Server configuration...");
         var connectionString = parsed.ForceContainer
@@ -102,22 +103,30 @@ public static class Program
         var executionTime = Stopwatch.StartNew();
         try
         {
-            if (parsed.RuntimeStorage is RuntimeStorageKind.MemoryOptimized or RuntimeStorageKind.ServiceBroker)
+            if (runtime.Execution == RuntimeExecutionKind.ServiceBroker)
             {
-                var runtimeName = parsed.RuntimeStorage == RuntimeStorageKind.ServiceBroker
-                    ? "Service Broker"
-                    : "memory-optimized";
-                WriteProgress($"provisioning {runtimeName} runtime...");
+                WriteProgress("provisioning Service Broker runtime...");
                 result = await SqlBatchExecutor.ExecuteAsync(
                     session.Connection,
-                    parsed.RuntimeStorage == RuntimeStorageKind.ServiceBroker
-                        ? SharpSqlServiceBrokerRuntime.GenerateProvisioningSql()
-                        : SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(),
+                    SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(),
                     parsed.CommandTimeoutSeconds,
                     new SqlBatchExecutionOptions(MessageReceived: Console.WriteLine),
                     cancellationToken);
                 if (result.Success)
-                    WriteProgress($"{runtimeName} runtime ready.");
+                    WriteProgress("Service Broker runtime ready.");
+            }
+
+            if (result.Success && runtime.UseMemoryOptimizedTables)
+            {
+                WriteProgress("provisioning memory-optimized runtime...");
+                result = await SqlBatchExecutor.ExecuteAsync(
+                    session.Connection,
+                    SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(runtime),
+                    parsed.CommandTimeoutSeconds,
+                    new SqlBatchExecutionOptions(MessageReceived: Console.WriteLine),
+                    cancellationToken);
+                if (result.Success)
+                    WriteProgress("memory-optimized runtime ready.");
             }
 
             if (result.Success)
@@ -154,6 +163,76 @@ public static class Program
         return 0;
     }
 
+    private static async Task<RuntimeConfiguration?> ResolveRuntimeAsync(
+        BuildArguments parsed,
+        CancellationToken cancellationToken)
+    {
+        var requested = RequestedRuntime(parsed);
+        if (requested.Execution != RuntimeExecutionKind.Auto)
+            return requested;
+
+        WriteProgress($"resolving runtime for {Path.GetFileName(parsed.ProjectPath)}...");
+        var result = await new SharpSqlProjectCompiler().TranspileAsync(
+            parsed.ProjectPath,
+            new ProjectTranspileOptions
+            {
+                EntryPoint = parsed.EntryPoint,
+                Configuration = parsed.Configuration,
+                TargetFramework = parsed.TargetFramework,
+                CompilerOptions = CompilerOptions(parsed)
+            },
+            cancellationToken);
+        if (result.Success)
+            return result.EffectiveRuntime;
+
+        foreach (var diagnostic in result.Diagnostics)
+            WriteDiagnostic(diagnostic);
+        return null;
+    }
+
+    private static TranspileOptions CompilerOptions(BuildArguments parsed)
+    {
+        if (parsed.CompatibilityStorage is { } compatibilityStorage)
+            return new TranspileOptions { RuntimeStorage = compatibilityStorage };
+        return new TranspileOptions
+        {
+            Execution = parsed.Execution,
+            Durability = parsed.Durability,
+            UseMemoryOptimizedTables = parsed.UseMemoryOptimizedTables
+        };
+    }
+
+    private static RuntimeConfiguration RequestedRuntime(BuildArguments parsed)
+    {
+        if (parsed.CompatibilityStorage is { } compatibilityStorage)
+        {
+            return compatibilityStorage switch
+            {
+                RuntimeStorageKind.MemoryOptimized => new RuntimeConfiguration(
+                    RuntimeExecutionKind.Inline,
+                    RuntimeDurabilityKind.Ephemeral,
+                    UseMemoryOptimizedTables: true),
+                RuntimeStorageKind.Durable => new RuntimeConfiguration(
+                    RuntimeExecutionKind.Inline,
+                    RuntimeDurabilityKind.Durable,
+                    UseMemoryOptimizedTables: false),
+                RuntimeStorageKind.ServiceBroker => new RuntimeConfiguration(
+                    RuntimeExecutionKind.ServiceBroker,
+                    RuntimeDurabilityKind.Durable,
+                    UseMemoryOptimizedTables: false),
+                _ => new RuntimeConfiguration(
+                    RuntimeExecutionKind.Inline,
+                    RuntimeDurabilityKind.Ephemeral,
+                    UseMemoryOptimizedTables: false)
+            };
+        }
+
+        return new RuntimeConfiguration(
+            parsed.Execution,
+            parsed.Durability,
+            parsed.UseMemoryOptimizedTables);
+    }
+
     private static void WriteProgress(string message) => Console.WriteLine($"SharpSql: {message}");
 
     private static int CountLines(string value) =>
@@ -187,7 +266,10 @@ public static class Program
         string Configuration,
         string? TargetFramework,
         string? EntryPoint,
-        RuntimeStorageKind RuntimeStorage,
+        RuntimeExecutionKind Execution,
+        RuntimeDurabilityKind Durability,
+        bool UseMemoryOptimizedTables,
+        RuntimeStorageKind? CompatibilityStorage,
         string? ConnectionName,
         string? ConnectionStringEnvironmentVariable,
         bool ForceContainer,
@@ -243,10 +325,28 @@ public static class Program
                 error = "--timeout must be greater than zero.";
                 return false;
             }
-            if (!TryRuntimeStorage(Value(values, "runtime-storage"), out var runtimeStorage))
+            if (!TryOptionalEnum(Value(values, "runtime-storage"), out RuntimeStorageKind? runtimeStorage))
             {
                 parsed = null!;
                 error = "--runtime-storage must be Ephemeral, MemoryOptimized, Durable, or ServiceBroker.";
+                return false;
+            }
+            if (!TryEnum(Value(values, "execution") ?? nameof(RuntimeExecutionKind.Auto), out RuntimeExecutionKind execution))
+            {
+                parsed = null!;
+                error = "--execution must be Auto, Inline, or ServiceBroker.";
+                return false;
+            }
+            if (!TryEnum(Value(values, "durability") ?? nameof(RuntimeDurabilityKind.Ephemeral), out RuntimeDurabilityKind durability))
+            {
+                parsed = null!;
+                error = "--durability must be Ephemeral or Durable.";
+                return false;
+            }
+            if (!TryBool(Value(values, "memory-optimized"), out var useMemoryOptimizedTables))
+            {
+                parsed = null!;
+                error = "--memory-optimized must be true or false.";
                 return false;
             }
 
@@ -258,6 +358,9 @@ public static class Program
                 Value(values, "configuration") ?? "Release",
                 Value(values, "framework"),
                 Value(values, "entry"),
+                execution,
+                durability,
+                useMemoryOptimizedTables,
                 runtimeStorage,
                 Value(values, "connection-name"),
                 Value(values, "connection-string-environment"),
@@ -289,19 +392,35 @@ public static class Program
         private static bool BoolValue(IReadOnlyDictionary<string, string> values, string name) =>
             bool.TryParse(Value(values, name), out var value) && value;
 
-        private static bool TryRuntimeStorage(string? configured, out RuntimeStorageKind runtimeStorage)
+        private static bool TryBool(string? configured, out bool value)
         {
-            configured ??= nameof(RuntimeStorageKind.Ephemeral);
-            foreach (var candidate in Enum.GetValues<RuntimeStorageKind>())
+            if (configured is null)
             {
-                if (!string.Equals(configured, candidate.ToString(), StringComparison.OrdinalIgnoreCase))
-                    continue;
-                runtimeStorage = candidate;
+                value = false;
                 return true;
             }
+            return bool.TryParse(configured, out value);
+        }
 
-            runtimeStorage = default;
+        private static bool TryOptionalEnum<T>(string? configured, out T? value)
+            where T : struct, Enum
+        {
+            if (configured is null)
+            {
+                value = null;
+                return true;
+            }
+            if (TryEnum(configured, out T parsed))
+            {
+                value = parsed;
+                return true;
+            }
+            value = null;
             return false;
         }
+
+        private static bool TryEnum<T>(string configured, out T value)
+            where T : struct, Enum =>
+            Enum.TryParse(configured, ignoreCase: true, out value) && Enum.IsDefined(value);
     }
 }

@@ -106,6 +106,120 @@ public sealed class BuildHostTests
     }
 
     [Fact]
+    public async Task AutoSelectsServiceBrokerForAnAsyncProject()
+    {
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-build-{Guid.NewGuid():N}.sql");
+        try
+        {
+            var exitCode = await BuildProgram.RunAsync(
+                [
+                    "--project", ServiceBrokerProjectPath,
+                    "--output", outputPath,
+                    "--configuration", "Release",
+                    "--framework", "net10.0",
+                    "--entry", "ServiceBrokerProject.SqlJob::Main"
+                ],
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exitCode);
+            var sql = await File.ReadAllTextAsync(outputPath, TestContext.Current.CancellationToken);
+            Assert.Contains("CREATE OR ALTER PROCEDURE [SharpSql].[Program_", sql);
+            Assert.Contains("EXEC [SharpSql].[ScheduleTask]", sql);
+        }
+        finally
+        {
+            File.Delete(outputPath);
+        }
+    }
+
+    [Fact]
+    public async Task AcceptsIndependentRuntimeOptions()
+    {
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-build-{Guid.NewGuid():N}.sql");
+        try
+        {
+            var exitCode = await BuildProgram.RunAsync(
+                [
+                    "--project", MemoryOptimizedProjectPath,
+                    "--output", outputPath,
+                    "--configuration", "Release",
+                    "--framework", "net10.0",
+                    "--entry", "MemoryOptimizedProject.SqlJob::Run",
+                    "--execution", "Inline",
+                    "--durability", "Durable",
+                    "--memory-optimized", "true"
+                ],
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(outputPath));
+        }
+        finally
+        {
+            File.Delete(outputPath);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyRuntimeStorageOverridesSplitDefaults()
+    {
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-build-{Guid.NewGuid():N}.sql");
+        try
+        {
+            var exitCode = await BuildProgram.RunAsync(
+                [
+                    "--project", ServiceBrokerProjectPath,
+                    "--output", outputPath,
+                    "--configuration", "Release",
+                    "--framework", "net10.0",
+                    "--entry", "ServiceBrokerProject.SqlJob::Main",
+                    "--execution", "Inline",
+                    "--durability", "Ephemeral",
+                    "--memory-optimized", "false",
+                    "--runtime-storage", "ServiceBroker"
+                ],
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exitCode);
+            var sql = await File.ReadAllTextAsync(outputPath, TestContext.Current.CancellationToken);
+            Assert.Contains("SharpSql Service Broker program worker", sql, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(outputPath);
+        }
+    }
+
+    [Theory]
+    [InlineData("--execution", "Background", "--execution must be Auto, Inline, or ServiceBroker.")]
+    [InlineData("--durability", "Permanent", "--durability must be Ephemeral or Durable.")]
+    [InlineData("--memory-optimized", "sometimes", "--memory-optimized must be true or false.")]
+    public async Task RejectsInvalidIndependentRuntimeOptions(
+        string option,
+        string value,
+        string expectedError)
+    {
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-build-{Guid.NewGuid():N}.sql");
+        var previousError = Console.Error;
+        using var error = new StringWriter();
+        try
+        {
+            Console.SetError(error);
+            var exitCode = await BuildProgram.RunAsync(
+                ["--project", ProjectPath, "--output", outputPath, option, value],
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(2, exitCode);
+            Assert.Contains(expectedError, error.ToString(), StringComparison.Ordinal);
+            Assert.False(File.Exists(outputPath));
+        }
+        finally
+        {
+            Console.SetError(previousError);
+        }
+    }
+
+    [Fact]
     public async Task GeneratesSqlForMemoryOptimizedRuntimeStorage()
     {
         var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-build-{Guid.NewGuid():N}.sql");
@@ -125,11 +239,11 @@ public sealed class BuildHostTests
             Assert.Equal(0, exitCode);
             var sql = await File.ReadAllTextAsync(outputPath, TestContext.Current.CancellationToken);
             Assert.Contains(
-                "DECLARE @__sharpsql_memory_stack [SharpSql].[MemoryVmStackV1];",
+                "[SharpSql].[__sharpsql_memory_vm_stack_ephemeral_v1]",
                 sql,
                 StringComparison.Ordinal);
             Assert.Contains(
-                "DECLARE @__sharpsql_memory_slots [SharpSql].[MemoryVmSlotsV1];",
+                "[SharpSql].[__sharpsql_memory_vm_slots_ephemeral_v1]",
                 sql,
                 StringComparison.Ordinal);
         }

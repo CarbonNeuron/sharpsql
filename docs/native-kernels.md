@@ -23,7 +23,7 @@ Enable the experiment with the memory-optimized runtime:
 
 ```bash
 sharpsql transpile Program.cs \
-  --runtime-storage MemoryOptimized \
+  --execution Inline --memory-optimized \
   --native-kernels \
   --output Program.sql
 ```
@@ -33,7 +33,7 @@ Or through the compiler API:
 ```csharp
 new TranspileOptions
 {
-    RuntimeStorage = RuntimeStorageKind.MemoryOptimized,
+    UseMemoryOptimizedTables = true,
     EnableNativeKernels = true
 };
 ```

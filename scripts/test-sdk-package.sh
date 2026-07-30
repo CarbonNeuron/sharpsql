@@ -134,7 +134,17 @@ dotnet build "$work_dir/async/SdkConsumer.csproj" \
     --no-restore >/dev/null
 if [[ ! -s "$work_dir/async/generated.sql" ]] || \
    ! grep -q 'CREATE OR ALTER PROCEDURE \[SharpSql\]\.\[Program_' "$work_dir/async/generated.sql"; then
-    printf 'The SDK package did not lower the Service Broker async project.\n' >&2
+    printf 'The SDK package did not auto-select Service Broker for the async project.\n' >&2
+    exit 1
+fi
+dotnet build "$work_dir/async/SdkConsumer.csproj" \
+    --configuration Release \
+    --no-restore \
+    -p:SharpSqlRuntimeStorage=ServiceBroker \
+    -p:SharpSqlExecution=Inline >/dev/null
+if [[ ! -s "$work_dir/async/generated.sql" ]] || \
+   ! grep -q 'CREATE OR ALTER PROCEDURE \[SharpSql\]\.\[Program_' "$work_dir/async/generated.sql"; then
+    printf 'The legacy runtime-storage property did not override split SDK defaults.\n' >&2
     exit 1
 fi
 if invalid_storage_output="$(dotnet build "$work_dir/async/SdkConsumer.csproj" \
@@ -147,6 +157,18 @@ fi
 if [[ "$invalid_storage_output" != *"SharpSqlRuntimeStorage must be Ephemeral, MemoryOptimized, Durable, or ServiceBroker"* ]]; then
     printf '%s\n' "$invalid_storage_output" >&2
     printf 'The SDK package did not explain the invalid SharpSqlRuntimeStorage value.\n' >&2
+    exit 1
+fi
+if invalid_execution_output="$(dotnet build "$work_dir/async/SdkConsumer.csproj" \
+    --configuration Release \
+    --no-restore \
+    -p:SharpSqlExecution=Background 2>&1)"; then
+    printf 'The SDK package accepted an invalid SharpSqlExecution value.\n' >&2
+    exit 1
+fi
+if [[ "$invalid_execution_output" != *"SharpSqlExecution must be Auto, Inline, or ServiceBroker"* ]]; then
+    printf '%s\n' "$invalid_execution_output" >&2
+    printf 'The SDK package did not explain the invalid SharpSqlExecution value.\n' >&2
     exit 1
 fi
 

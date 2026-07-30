@@ -16,6 +16,12 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
     public const string EntryPointProperty = "build_property.SharpSqlEntryPoint";
     /// <summary>The analyzer configuration property that selects runtime storage.</summary>
     public const string RuntimeStorageProperty = "build_property.SharpSqlRuntimeStorage";
+    /// <summary>The analyzer configuration property that selects runtime execution.</summary>
+    public const string ExecutionProperty = "build_property.SharpSqlExecution";
+    /// <summary>The analyzer configuration property that selects runtime durability.</summary>
+    public const string DurabilityProperty = "build_property.SharpSqlDurability";
+    /// <summary>The analyzer configuration property that enables memory-optimized tables.</summary>
+    public const string MemoryOptimizedProperty = "build_property.SharpSqlMemoryOptimized";
     /// <summary>The diagnostic identifier used for unexpected analyzer failures.</summary>
     public const string InternalErrorId = "SSA0001";
 
@@ -31,29 +37,64 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
     {
         context.EnableConcurrentExecution();
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
-        context.RegisterCompilationAction(AnalyzeCompilation);
+        context.RegisterCompilationStartAction(StartCompilationAnalysis);
     }
 
-    private static void AnalyzeCompilation(CompilationAnalysisContext context)
+    private static void StartCompilationAnalysis(CompilationStartAnalysisContext context)
     {
         if (context.Compilation is not CSharpCompilation compilation ||
-            !AnalyzerEnabled(context.Options.AnalyzerConfigOptionsProvider.GlobalOptions) ||
-            compilation.GetDiagnostics(context.CancellationToken)
-                .Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+            !AnalyzerEnabled(context.Options.AnalyzerConfigOptionsProvider.GlobalOptions))
         {
             return;
         }
 
-        var options = context.Options.AnalyzerConfigOptionsProvider.GlobalOptions;
+        var analysis = new Lazy<ImmutableArray<Diagnostic>>(
+            () => AnalyzeCompilation(
+                compilation,
+                context.Options.AnalyzerConfigOptionsProvider.GlobalOptions),
+            LazyThreadSafetyMode.ExecutionAndPublication);
+
+        context.RegisterSemanticModelAction(semanticContext =>
+        {
+            var tree = semanticContext.SemanticModel.SyntaxTree;
+            foreach (var diagnostic in analysis.Value)
+            {
+                if (diagnostic.Location.SourceTree == tree)
+                    semanticContext.ReportDiagnostic(diagnostic);
+            }
+        });
+
+        // Diagnostics without a source location cannot be reported by a document-scoped
+        // action. Keep those in a compilation-end action while source diagnostics flow
+        // through semantic analysis so IDEs can display them as the user edits a file.
+        context.RegisterCompilationEndAction(compilationContext =>
+        {
+            foreach (var diagnostic in analysis.Value)
+            {
+                if (diagnostic.Location == Location.None)
+                    compilationContext.ReportDiagnostic(diagnostic);
+            }
+        });
+    }
+
+    private static ImmutableArray<Diagnostic> AnalyzeCompilation(
+        CSharpCompilation compilation,
+        AnalyzerConfigOptions options)
+    {
+        if (compilation.GetDiagnostics()
+            .Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+        {
+            return ImmutableArray<Diagnostic>.Empty;
+        }
+
         options.TryGetValue(EntryPointProperty, out var entryPoint);
         entryPoint = string.IsNullOrWhiteSpace(entryPoint) ? null : entryPoint;
-        if (!TryGetRuntimeStorage(options, out var runtimeStorage))
+        if (!TryGetRuntimeConfiguration(options, out var runtime, out var configurationError))
         {
-            context.ReportDiagnostic(Diagnostic.Create(
+            return [Diagnostic.Create(
                 Descriptors[InternalErrorId],
                 Location.None,
-                "SharpSqlRuntimeStorage must be Ephemeral, MemoryOptimized, Durable, or ServiceBroker."));
-            return;
+                configurationError)];
         }
 
         TranspileResult result;
@@ -62,26 +103,29 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
             result = new SharpSqlCompiler().Transpile(
                 compilation,
                 entryPoint,
-                new TranspileOptions { RuntimeStorage = runtimeStorage });
+                new TranspileOptions
+                {
+                    Execution = runtime.Execution,
+                    Durability = runtime.Durability,
+                    UseMemoryOptimizedTables = runtime.UseMemoryOptimizedTables
+                });
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            context.ReportDiagnostic(Diagnostic.Create(
+            return [Diagnostic.Create(
                 Descriptors[InternalErrorId],
                 Location.None,
-                exception.Message));
-            return;
+                exception.Message)];
         }
 
-        foreach (var diagnostic in result.Diagnostics.Where(item => item.Code.StartsWith("SS", StringComparison.Ordinal)))
-        {
-            if (!Descriptors.TryGetValue(diagnostic.Code, out var descriptor))
-                descriptor = Descriptors[InternalErrorId];
-            context.ReportDiagnostic(Diagnostic.Create(
-                descriptor,
+        return [.. result.Diagnostics
+            .Where(item => item.Code.StartsWith("SS", StringComparison.Ordinal))
+            .Select(diagnostic => Diagnostic.Create(
+                Descriptors.TryGetValue(diagnostic.Code, out var descriptor)
+                    ? descriptor
+                    : Descriptors[InternalErrorId],
                 FindLocation(compilation, diagnostic),
-                diagnostic.Message));
-        }
+                diagnostic.Message))];
     }
 
     private static bool AnalyzerEnabled(AnalyzerConfigOptions options) =>
@@ -89,28 +133,81 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
         !bool.TryParse(configured, out var enabled) ||
         enabled;
 
-    private static bool TryGetRuntimeStorage(
+    private static bool TryGetRuntimeConfiguration(
         AnalyzerConfigOptions options,
-        out RuntimeStorageKind runtimeStorage)
+        out RuntimeConfiguration runtime,
+        out string error)
     {
-        if (!options.TryGetValue(RuntimeStorageProperty, out var configured) ||
-            string.IsNullOrWhiteSpace(configured))
+        if (options.TryGetValue(RuntimeStorageProperty, out var legacy) &&
+            !string.IsNullOrWhiteSpace(legacy))
         {
-            runtimeStorage = RuntimeStorageKind.Ephemeral;
+            if (!TryParseEnum(legacy, out RuntimeStorageKind storage))
+            {
+                runtime = default!;
+                error = "SharpSqlRuntimeStorage must be Ephemeral, MemoryOptimized, Durable, or ServiceBroker.";
+                return false;
+            }
+
+            runtime = storage switch
+            {
+                RuntimeStorageKind.MemoryOptimized => new RuntimeConfiguration(
+                    RuntimeExecutionKind.Inline,
+                    RuntimeDurabilityKind.Ephemeral,
+                    UseMemoryOptimizedTables: true),
+                RuntimeStorageKind.Durable => new RuntimeConfiguration(
+                    RuntimeExecutionKind.Inline,
+                    RuntimeDurabilityKind.Durable,
+                    UseMemoryOptimizedTables: false),
+                RuntimeStorageKind.ServiceBroker => new RuntimeConfiguration(
+                    RuntimeExecutionKind.ServiceBroker,
+                    RuntimeDurabilityKind.Durable,
+                    UseMemoryOptimizedTables: false),
+                _ => new RuntimeConfiguration(
+                    RuntimeExecutionKind.Inline,
+                    RuntimeDurabilityKind.Ephemeral,
+                    UseMemoryOptimizedTables: false)
+            };
+            error = string.Empty;
             return true;
         }
 
-        foreach (var name in Enum.GetNames(typeof(RuntimeStorageKind)))
+        var executionValue = Value(options, ExecutionProperty) ?? nameof(RuntimeExecutionKind.Auto);
+        if (!TryParseEnum(executionValue, out RuntimeExecutionKind execution))
         {
-            if (!string.Equals(name, configured, StringComparison.OrdinalIgnoreCase))
-                continue;
-            runtimeStorage = (RuntimeStorageKind)Enum.Parse(typeof(RuntimeStorageKind), name);
-            return true;
+            runtime = default!;
+            error = "SharpSqlExecution must be Auto, Inline, or ServiceBroker.";
+            return false;
         }
 
-        runtimeStorage = default;
-        return false;
+        var durabilityValue = Value(options, DurabilityProperty) ?? nameof(RuntimeDurabilityKind.Ephemeral);
+        if (!TryParseEnum(durabilityValue, out RuntimeDurabilityKind durability))
+        {
+            runtime = default!;
+            error = "SharpSqlDurability must be Ephemeral or Durable.";
+            return false;
+        }
+
+        var memoryValue = Value(options, MemoryOptimizedProperty) ?? bool.FalseString;
+        if (!bool.TryParse(memoryValue, out var memoryOptimized))
+        {
+            runtime = default!;
+            error = "SharpSqlMemoryOptimized must be true or false.";
+            return false;
+        }
+
+        runtime = new RuntimeConfiguration(execution, durability, memoryOptimized);
+        error = string.Empty;
+        return true;
     }
+
+    private static string? Value(AnalyzerConfigOptions options, string property) =>
+        options.TryGetValue(property, out var configured) && !string.IsNullOrWhiteSpace(configured)
+            ? configured
+            : null;
+
+    private static bool TryParseEnum<T>(string configured, out T value)
+        where T : struct, Enum =>
+        Enum.TryParse(configured, ignoreCase: true, out value) && Enum.IsDefined(typeof(T), value);
 
     private static Location FindLocation(CSharpCompilation compilation, CompilerDiagnostic diagnostic)
     {
@@ -163,7 +260,7 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
             "SS5001", "SS6001", "SS6003", "SS6004", "SS6005", "SS6006",
             "SS6101", "SS6102", "SS6201", "SS6202", "SS6301", "SS6302",
             "SS6401", "SS6402", "SS6403", "SS6410", "SS6411",
-            "SS7001", "SS7002", "SS7003", "SS7004", "SS7005", "SS8201", InternalErrorId
+            "SS7001", "SS7002", "SS7003", "SS7004", "SS7005", "SS7006", "SS8201", InternalErrorId
         ];
 
         return ids.ToImmutableDictionary(

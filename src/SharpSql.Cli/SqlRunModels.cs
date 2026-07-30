@@ -18,7 +18,9 @@ public sealed record SqlRunRequest(
     string SqlServerImage,
     string DatabaseName,
     int CommandTimeoutSeconds,
-    RuntimeStorageKind RuntimeStorage = RuntimeStorageKind.Ephemeral,
+    RuntimeExecutionKind Execution = RuntimeExecutionKind.Auto,
+    RuntimeDurabilityKind Durability = RuntimeDurabilityKind.Ephemeral,
+    bool UseMemoryOptimizedTables = false,
     bool Debug = false,
     bool Profile = false,
     string? OutputPath = null,
@@ -26,6 +28,7 @@ public sealed record SqlRunRequest(
     bool EnableNativeKernels = false)
 {
     public bool IsProject => Sql is null;
+    public RuntimeConfiguration RequestedRuntime { get; } = new(Execution, Durability, UseMemoryOptimizedTables);
 }
 
 /// <summary>Contains timing samples collected while executing SQL.</summary>
@@ -45,7 +48,8 @@ public sealed record SqlRunResult(
     string? GeneratedSql = null,
     string? InstallerSql = null,
     SqlBatchDebugInfo? DebugInfo = null,
-    SqlRunProfile? Profile = null);
+    SqlRunProfile? Profile = null,
+    RuntimeConfiguration? EffectiveRuntime = null);
 
 /// <summary>Transpiles and executes SharpSql programs in SQL Server.</summary>
 public interface ISqlRunService
@@ -97,6 +101,7 @@ public sealed class SqlRunService : ISqlRunService
         string sql;
         IReadOnlyList<CompilerDiagnostic> diagnostics;
         var transpileSucceeded = true;
+        var effectiveRuntime = CliRuntimeOptions.ResolveSqlInput(request.RequestedRuntime);
         if (request.IsProject)
         {
             var transpileResult = await new SharpSqlProjectCompiler().TranspileAsync(
@@ -108,7 +113,9 @@ public sealed class SqlRunService : ISqlRunService
                     TargetFramework = request.TargetFramework,
                     CompilerOptions = new TranspileOptions
                     {
-                        RuntimeStorage = request.RuntimeStorage,
+                        Execution = request.Execution,
+                        Durability = request.Durability,
+                        UseMemoryOptimizedTables = request.UseMemoryOptimizedTables,
                         EmitRuntimeDiagnostics = request.Debug,
                         EnableNativeKernels = request.EnableNativeKernels
                     }
@@ -117,6 +124,7 @@ public sealed class SqlRunService : ISqlRunService
             sql = transpileResult.Sql;
             diagnostics = transpileResult.Diagnostics;
             transpileSucceeded = transpileResult.Success;
+            effectiveRuntime = transpileResult.EffectiveRuntime;
         }
         else
         {
@@ -124,11 +132,11 @@ public sealed class SqlRunService : ISqlRunService
             diagnostics = [];
         }
 
-        var installerSql = InstallerSql(request.RuntimeStorage);
+        var installerSql = SqlOutputArtifacts.InstallerSql(effectiveRuntime);
         var artifactPaths = SqlOutputArtifacts.ResolvePaths(
             request.OutputPath,
             request.InstallerOutputPath,
-            request.RuntimeStorage);
+            effectiveRuntime);
         await SqlOutputArtifacts.WriteAsync(
             artifactPaths,
             sql,
@@ -143,7 +151,8 @@ public sealed class SqlRunService : ISqlRunService
                 diagnostics,
                 ContainerKept: false,
                 GeneratedSql: sql,
-                InstallerSql: installerSql);
+                InstallerSql: installerSql,
+                EffectiveRuntime: effectiveRuntime);
         }
 
         var connectionString = request.ForceContainer
@@ -182,7 +191,8 @@ public sealed class SqlRunService : ISqlRunService
                     installation.ErrorMessage,
                     sql,
                     installerSql,
-                    installation.DebugInfo);
+                    installation.DebugInfo,
+                    EffectiveRuntime: effectiveRuntime);
             }
         }
 
@@ -213,7 +223,8 @@ public sealed class SqlRunService : ISqlRunService
             sql,
             installerSql,
             execution.DebugInfo,
-            profile);
+            profile,
+            effectiveRuntime);
     }
 
     private static async Task<(SqlBatchExecutionResult Execution, SqlRunProfile Profile)> ExecuteProfileAsync(
@@ -310,10 +321,4 @@ public sealed class SqlRunService : ISqlRunService
         }
     }
 
-    private static string? InstallerSql(RuntimeStorageKind runtimeStorage) => runtimeStorage switch
-    {
-        RuntimeStorageKind.MemoryOptimized => SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(),
-        RuntimeStorageKind.ServiceBroker => SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(),
-        _ => null
-    };
 }

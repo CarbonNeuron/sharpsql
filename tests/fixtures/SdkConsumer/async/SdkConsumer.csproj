@@ -5,7 +5,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <SharpSqlEntryPoint>SdkConsumer.SqlJob::Main</SharpSqlEntryPoint>
-    <SharpSqlRuntimeStorage>ServiceBroker</SharpSqlRuntimeStorage>
     <SharpSqlOutputPath>$(MSBuildProjectDirectory)/generated.sql</SharpSqlOutputPath>
   </PropertyGroup>
 </Project>

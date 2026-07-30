@@ -103,25 +103,26 @@ The equivalent manual project configuration is:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="SharpSql.Sdk" Version="0.1.5" PrivateAssets="all" />
+  <PackageReference Include="SharpSql.Sdk" Version="0.1.6" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>
   <!-- Required for libraries; executable projects use their normal entry point. -->
   <SharpSqlEntryPoint>MyApp.SqlJob::Run</SharpSqlEntryPoint>
   <SharpSqlOutputLocation>BuildOutput</SharpSqlOutputLocation>
+  <SharpSqlExecution>Auto</SharpSqlExecution>
+  <SharpSqlDurability>Ephemeral</SharpSqlDurability>
+  <SharpSqlMemoryOptimized>false</SharpSqlMemoryOptimized>
   <SharpSqlKeepContainer>false</SharpSqlKeepContainer>
   <SharpSqlContainerDatabase>SharpSql</SharpSqlContainerDatabase>
 </PropertyGroup>
 ```
 
-Async Service Broker projects opt in with
-`<SharpSqlRuntimeStorage>ServiceBroker</SharpSqlRuntimeStorage>`. The allowed
-values are `Ephemeral` (the default), `MemoryOptimized`, `Durable`, and
-`ServiceBroker`; the same
-setting drives both live analyzer diagnostics and build-time SQL generation.
-The SDK's `SharpSqlRun` target provisions the selected database-scoped runtime
-before executing `MemoryOptimized` or `ServiceBroker` programs.
+`Auto` is the default execution strategy: reachable async/await IR selects Service
+Broker, while synchronous programs execute inline. Durability and memory-optimized
+tables are independent choices. The same properties drive live diagnostics and
+build-time generation, and `SharpSqlRun` provisions the effective runtime before
+execution. The legacy `SharpSqlRuntimeStorage` property remains a compatibility alias.
 
 The SDK also supplies `SharpSql.DatabaseException` for native SQL Server
 failures inside transpiled code. Its `Number`, `Severity`, `State`, `Procedure`,
@@ -239,7 +240,7 @@ three measured SQL runs, and `--output` to retain the generated program SQL:
 
 ```bash
 sharpsql run path/to/MyApp.csproj \
-  --runtime-storage ServiceBroker \
+  --execution ServiceBroker --durability Durable \
   --debug --profile \
   --output out.sql
 ```
@@ -249,7 +250,10 @@ repeats are silent, so program output is shown once. For Service Broker programs
 `--output out.sql` also writes the standalone,
 idempotent runtime installer to `out.installer.sql`. Use `--installer-output` to
 select another path. The installer intentionally does not enable Service Broker
-at the database level.
+at the database level. `--execution Auto` is the default and writes the same
+installer when transpilation selects Service Broker. The legacy
+`--runtime-storage ServiceBroker` spelling remains available as a compatibility
+alias.
 
 Set `SharpSqlGenerateOnBuild` to `false` for IDE/build diagnostics without SQL
 generation, `SharpSqlEnableAnalyzer` to `false` to disable live diagnostics, or
@@ -274,7 +278,7 @@ Compile to a file:
 dotnet run --project src/SharpSql.Cli -- examples/objects.cs -o objects.sql
 ```
 
-When `--runtime-storage MemoryOptimized` or `ServiceBroker` is selected, this also writes the
+When `--memory-optimized` or `--execution ServiceBroker` is selected, this also writes the
 standalone runtime installer beside the program as `objects.installer.sql`.
 
 Verify a source file by running it as C# locally and running its generated SQL
@@ -417,17 +421,17 @@ SQL Server does not support temporary user-defined functions. SharpSql therefore
 
 The fallback stores activation frames and typed slots in local temporary tables. Every static call site receives an integer continuation ID, and all returns share one generated dispatcher that jumps to literal T-SQL labels. Normal completion drops the tables; closing the SQL connection provides failure-path cleanup.
 
-### Memory-optimized legacy VM state
+### Memory-optimized VM state
 
-`RuntimeStorageKind.MemoryOptimized` keeps the same direct SQL and label-based
-legacy lowering, but stores activation frames and spilled slots in execution-local
-memory-optimized table variables instead of tempdb tables. Provision the fixed table
-types once with `SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql()` or use
-the CLI installer output:
+The independent memory-optimized flag keeps the same direct SQL and label-based VM
+lowering, but stores activation frames and spilled slots in database-global,
+execution-partitioned In-Memory OLTP tables. Ephemeral state uses `SCHEMA_ONLY`;
+durable state uses `SCHEMA_AND_DATA`. Provision the tables once with
+`SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(...)` or use the CLI installer:
 
 ```bash
 sharpsql transpile examples/recursion.cs \
-  --runtime-storage MemoryOptimized \
+  --execution Inline --memory-optimized \
   --output recursion.sql
 ```
 

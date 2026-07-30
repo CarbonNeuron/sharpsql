@@ -15,12 +15,21 @@
       <SharpSqlResolvedOutputPath Condition="'$(SharpSqlResolvedOutputPath)' == '' and '$(SharpSqlOutputLocation)' == 'BuildOutput'">$(OutputPath)$(AssemblyName).sql</SharpSqlResolvedOutputPath>
       <SharpSqlResolvedOutputPath Condition="'$(SharpSqlResolvedOutputPath)' == ''">$(IntermediateOutputPath)sharpsql/$(AssemblyName).sql</SharpSqlResolvedOutputPath>
       <_SharpSqlRuntimeStorageLower>$([System.String]::Copy('$(SharpSqlRuntimeStorage)').ToLowerInvariant())</_SharpSqlRuntimeStorageLower>
+      <_SharpSqlExecutionLower>$([System.String]::Copy('$(SharpSqlExecution)').ToLowerInvariant())</_SharpSqlExecutionLower>
+      <_SharpSqlDurabilityLower>$([System.String]::Copy('$(SharpSqlDurability)').ToLowerInvariant())</_SharpSqlDurabilityLower>
+      <_SharpSqlMemoryOptimizedLower>$([System.String]::Copy('$(SharpSqlMemoryOptimized)').ToLowerInvariant())</_SharpSqlMemoryOptimizedLower>
     </PropertyGroup>
     <Error Condition="!Exists('$(SharpSqlBuildHostPath)')"
            Text="SharpSql build host was not found at '$(SharpSqlBuildHostPath)'." />
-    <Error Condition="'$(_SharpSqlRuntimeStorageLower)' != 'ephemeral' and '$(_SharpSqlRuntimeStorageLower)' != 'memoryoptimized' and '$(_SharpSqlRuntimeStorageLower)' != 'durable' and '$(_SharpSqlRuntimeStorageLower)' != 'servicebroker'"
+    <Error Condition="'$(_SharpSqlRuntimeStorageLower)' != '' and '$(_SharpSqlRuntimeStorageLower)' != 'ephemeral' and '$(_SharpSqlRuntimeStorageLower)' != 'memoryoptimized' and '$(_SharpSqlRuntimeStorageLower)' != 'durable' and '$(_SharpSqlRuntimeStorageLower)' != 'servicebroker'"
            Text="SharpSqlRuntimeStorage must be Ephemeral, MemoryOptimized, Durable, or ServiceBroker." />
-    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --project &quot;$(MSBuildProjectFullPath)&quot; --output &quot;$(SharpSqlResolvedOutputPath)&quot; --configuration &quot;$(Configuration)&quot; --framework &quot;$(TargetFramework)&quot; --entry &quot;$(SharpSqlEntryPoint)&quot; --runtime-storage &quot;$(SharpSqlRuntimeStorage)&quot;"
+    <Error Condition="'$(_SharpSqlExecutionLower)' != 'auto' and '$(_SharpSqlExecutionLower)' != 'inline' and '$(_SharpSqlExecutionLower)' != 'servicebroker'"
+           Text="SharpSqlExecution must be Auto, Inline, or ServiceBroker." />
+    <Error Condition="'$(_SharpSqlDurabilityLower)' != 'ephemeral' and '$(_SharpSqlDurabilityLower)' != 'durable'"
+           Text="SharpSqlDurability must be Ephemeral or Durable." />
+    <Error Condition="'$(_SharpSqlMemoryOptimizedLower)' != 'true' and '$(_SharpSqlMemoryOptimizedLower)' != 'false'"
+           Text="SharpSqlMemoryOptimized must be true or false." />
+    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --project &quot;$(MSBuildProjectFullPath)&quot; --output &quot;$(SharpSqlResolvedOutputPath)&quot; --configuration &quot;$(Configuration)&quot; --framework &quot;$(TargetFramework)&quot; --entry &quot;$(SharpSqlEntryPoint)&quot; --execution &quot;$(SharpSqlExecution)&quot; --durability &quot;$(SharpSqlDurability)&quot; --memory-optimized &quot;$(SharpSqlMemoryOptimized)&quot; --runtime-storage &quot;$(SharpSqlRuntimeStorage)&quot;"
           ConsoleToMSBuild="true"
           StandardOutputImportance="High"
           StandardErrorImportance="High" />
@@ -39,7 +48,7 @@
           Condition="'$(SharpSqlEnabled)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
     <Message Text="SharpSql: starting SQL Server execution for $(MSBuildProjectName)..."
              Importance="High" />
-    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --operation run --project &quot;$(MSBuildProjectFullPath)&quot; --sql &quot;$(SharpSqlResolvedOutputPath)&quot; --runtime-storage &quot;$(SharpSqlRuntimeStorage)&quot; --connection-name &quot;$(SharpSqlConnectionName)&quot; --connection-string-environment &quot;$(SharpSqlConnectionStringEnvironment)&quot; --force-container &quot;$(SharpSqlForceContainer)&quot; --keep-container &quot;$(SharpSqlKeepContainer)&quot; --image &quot;$(SharpSqlContainerImage)&quot; --database &quot;$(SharpSqlContainerDatabase)&quot; --timeout &quot;$(SharpSqlCommandTimeoutSeconds)&quot;"
+    <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --operation run --project &quot;$(MSBuildProjectFullPath)&quot; --sql &quot;$(SharpSqlResolvedOutputPath)&quot; --configuration &quot;$(Configuration)&quot; --framework &quot;$(TargetFramework)&quot; --entry &quot;$(SharpSqlEntryPoint)&quot; --execution &quot;$(SharpSqlExecution)&quot; --durability &quot;$(SharpSqlDurability)&quot; --memory-optimized &quot;$(SharpSqlMemoryOptimized)&quot; --runtime-storage &quot;$(SharpSqlRuntimeStorage)&quot; --connection-name &quot;$(SharpSqlConnectionName)&quot; --connection-string-environment &quot;$(SharpSqlConnectionStringEnvironment)&quot; --force-container &quot;$(SharpSqlForceContainer)&quot; --keep-container &quot;$(SharpSqlKeepContainer)&quot; --image &quot;$(SharpSqlContainerImage)&quot; --database &quot;$(SharpSqlContainerDatabase)&quot; --timeout &quot;$(SharpSqlCommandTimeoutSeconds)&quot;"
           ConsoleToMSBuild="true"
           StandardOutputImportance="High"
           StandardErrorImportance="High" />

@@ -64,10 +64,23 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [Description("SQL command timeout in seconds.")]
         public int? CommandTimeoutSeconds { get; init; }
 
+        [CommandOption("--execution <MODE>")]
+        [Description("Runtime execution mode: Auto (default), Inline, or ServiceBroker.")]
+        [DefaultValue(RuntimeExecutionKind.Auto)]
+        public RuntimeExecutionKind Execution { get; init; } = RuntimeExecutionKind.Auto;
+
+        [CommandOption("--durability <MODE>")]
+        [Description("Runtime durability: Ephemeral (default) or Durable.")]
+        [DefaultValue(RuntimeDurabilityKind.Ephemeral)]
+        public RuntimeDurabilityKind Durability { get; init; } = RuntimeDurabilityKind.Ephemeral;
+
+        [CommandOption("--memory-optimized|--memory-optimized-tables")]
+        [Description("Use provisioned memory-optimized runtime tables.")]
+        public bool UseMemoryOptimizedTables { get; init; }
+
         [CommandOption("--runtime-storage <MODE>")]
-        [Description("Runtime state mode: Ephemeral (default), MemoryOptimized, Durable, or ServiceBroker.")]
-        [DefaultValue(RuntimeStorageKind.Ephemeral)]
-        public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;
+        [Description("Compatibility alias for the legacy combined runtime mode.")]
+        public RuntimeStorageKind? RuntimeStorage { get; init; }
 
         [CommandOption("--native-kernels")]
         [Description("Extract supported pure scalar methods into natively compiled procedures.")]
@@ -117,8 +130,19 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 return ValidationResult.Error("--output cannot be empty.");
             if (string.IsNullOrWhiteSpace(InstallerOutputPath) && InstallerOutputPath is not null)
                 return ValidationResult.Error("--installer-output cannot be empty.");
-            if (InstallerOutputPath is not null && !SqlOutputArtifacts.RequiresInstaller(RuntimeStorage))
-                return ValidationResult.Error("--installer-output requires MemoryOptimized or ServiceBroker runtime storage.");
+            if (RuntimeStorage is not null && CliRuntimeOptions.HasSplitConfiguration(
+                    Execution,
+                    Durability,
+                    UseMemoryOptimizedTables))
+                return ValidationResult.Error("--runtime-storage cannot be combined with the split runtime options.");
+            var runtime = CliRuntimeOptions.Resolve(
+                Execution,
+                Durability,
+                UseMemoryOptimizedTables,
+                RuntimeStorage);
+            if (InstallerOutputPath is not null && !SqlOutputArtifacts.MayRequireInstaller(runtime))
+                return ValidationResult.Error(
+                    "--installer-output requires Auto or ServiceBroker execution, or memory-optimized tables.");
             if (OutputPath is not null && InstallerOutputPath is not null &&
                 string.Equals(
                     Path.GetFullPath(OutputPath),
@@ -165,18 +189,13 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             return 1;
         }
 
-        var artifactPaths = SqlOutputArtifacts.ResolvePaths(
-            settings.OutputPath,
-            settings.InstallerOutputPath,
-            settings.RuntimeStorage);
-
         SqlRunResult result;
+        SqlRunRequest request;
         try
         {
-            var request = await CreateRequestAsync(
+            request = await CreateRequestAsync(
                 inputPath,
                 isProject,
-                artifactPaths,
                 settings,
                 cancellationToken);
             result = await (environment.SqlRunService ?? new SqlRunService())
@@ -196,6 +215,11 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             environment.Console.WriteLine(diagnostic.ToString());
         RenderDebugDiagnostics(environment.Console, result);
         RenderProfile(environment.Console, result.Profile);
+        var effectiveRuntime = result.EffectiveRuntime ?? request.RequestedRuntime;
+        var artifactPaths = SqlOutputArtifacts.ResolvePaths(
+            request.OutputPath,
+            request.InstallerOutputPath,
+            effectiveRuntime);
         RenderArtifactPaths(environment.Console, artifactPaths, result);
         if (!result.Success)
         {
@@ -217,7 +241,6 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
     private static async Task<SqlRunRequest> CreateRequestAsync(
         string inputPath,
         bool isProject,
-        SqlOutputArtifactPaths artifactPaths,
         Settings settings,
         CancellationToken cancellationToken)
     {
@@ -226,6 +249,11 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             : SharpSqlRunProjectSettings.Default;
         var keepContainer = settings.KeepContainer ||
                             (!settings.RemoveContainer && projectSettings.KeepContainer);
+        var runtime = CliRuntimeOptions.Resolve(
+            settings.Execution,
+            settings.Durability,
+            settings.UseMemoryOptimizedTables,
+            settings.RuntimeStorage);
         return new SqlRunRequest(
             inputPath,
             isProject ? null : await File.ReadAllTextAsync(inputPath, cancellationToken),
@@ -239,11 +267,13 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             settings.SqlServerImage ?? projectSettings.SqlServerImage,
             settings.DatabaseName ?? projectSettings.DatabaseName,
             settings.CommandTimeoutSeconds ?? projectSettings.CommandTimeoutSeconds,
-            settings.RuntimeStorage,
+            runtime.Execution,
+            runtime.Durability,
+            runtime.UseMemoryOptimizedTables,
             settings.Debug,
             settings.Profile,
-            artifactPaths.ProgramPath,
-            artifactPaths.InstallerPath,
+            settings.OutputPath,
+            settings.InstallerOutputPath,
             settings.EnableNativeKernels);
     }
 
