@@ -7,6 +7,7 @@ public static class CliArgumentRouter
         "transpile",
         "conformance",
         "init",
+        "publish",
         "run",
         "verify",
         "--help",
