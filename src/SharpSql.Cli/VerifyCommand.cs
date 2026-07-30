@@ -6,9 +6,11 @@ using Spectre.Console.Rendering;
 
 namespace SharpSql.Cli;
 
-[Description("Run C# locally and its generated SQL in a Testcontainers SQL Server, then compare outcomes.")]
+/// <summary>Compares local C# execution with generated SQL running in SQL Server.</summary>
+[Description("Run C# locally and generated SQL in a SQL Server Testcontainer, then compare outcomes.")]
 public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
 {
+    /// <summary>Defines the options accepted by the <c>verify</c> command.</summary>
     public sealed class Settings : CommandSettings
     {
         [CommandArgument(0, "[INPUT]")]
@@ -28,12 +30,12 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
         [Description("Target framework to select for a multi-targeted project.")]
         public string? TargetFramework { get; init; }
 
-        [CommandOption("--sql-output <OUTPUT>")]
+        [CommandOption("--sql-output <PATH>")]
         [Description("Write the generated SQL to a file, including when verification fails.")]
         public string? SqlOutputPath { get; init; }
 
         [CommandOption("--image <IMAGE>")]
-        [Description("SQL Server container image.")]
+        [Description("SQL Server Testcontainer image.")]
         [DefaultValue("mcr.microsoft.com/mssql/server:2022-latest")]
         public string SqlServerImage { get; init; } = "mcr.microsoft.com/mssql/server:2022-latest";
 
@@ -43,7 +45,7 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
         public int CommandTimeoutSeconds { get; init; } = 60;
 
         [CommandOption("--keep-container")]
-        [Description("Keep and reuse the SQL Server container across verify runs.")]
+        [Description("Keep and reuse the SQL Server Testcontainer across verify runs.")]
         public bool KeepContainer { get; init; }
 
         [CommandOption("--debug")]
@@ -54,15 +56,28 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
         [Description("Warm up and repeatedly measure the C# and SQL executions.")]
         public bool Profile { get; init; }
 
+        /// <inheritdoc />
         public override ValidationResult Validate()
         {
             var isProject = InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
+            if (string.IsNullOrWhiteSpace(InputPath) && InputPath is not null)
+                return ValidationResult.Error("Input path cannot be empty.");
+            if (string.IsNullOrWhiteSpace(EntryPoint) && EntryPoint is not null)
+                return ValidationResult.Error("--entry cannot be empty.");
+            if (string.IsNullOrWhiteSpace(Configuration))
+                return ValidationResult.Error("--configuration cannot be empty.");
+            if (string.IsNullOrWhiteSpace(TargetFramework) && TargetFramework is not null)
+                return ValidationResult.Error("--framework cannot be empty.");
             if (!isProject && EntryPoint is not null)
                 return ValidationResult.Error("--entry is supported only for .csproj inputs.");
             if (!isProject && TargetFramework is not null)
                 return ValidationResult.Error("--framework is supported only for .csproj inputs.");
             if (InputPath is not null && !File.Exists(InputPath))
                 return ValidationResult.Error($"Input file was not found: {InputPath}");
+            if (string.IsNullOrWhiteSpace(SqlOutputPath) && SqlOutputPath is not null)
+                return ValidationResult.Error("--sql-output cannot be empty.");
+            if (string.IsNullOrWhiteSpace(SqlServerImage))
+                return ValidationResult.Error("--image cannot be empty.");
             if (CommandTimeoutSeconds <= 0)
                 return ValidationResult.Error("--timeout must be greater than zero.");
             return ValidationResult.Success();
@@ -77,28 +92,13 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
         var environment = context.Data as CliExecutionEnvironment ??
                           new CliExecutionEnvironment(AnsiConsole.Console, Console.In, Console.Out, Console.Error);
         var isProject = settings.InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
-        var source = isProject
-            ? null
-            : settings.InputPath is null
-                ? await environment.Input.ReadToEndAsync(cancellationToken)
-                : await File.ReadAllTextAsync(settings.InputPath, cancellationToken);
-        var request = new ParityRunRequest(
-            settings.InputPath ?? "stdin.cs",
-            source,
-            settings.EntryPoint,
-            settings.Configuration,
-            settings.TargetFramework,
-            settings.SqlServerImage,
-            settings.CommandTimeoutSeconds,
-            settings.KeepContainer,
-            settings.Debug,
-            settings.Profile);
         var runner = environment.ParityRunner ?? new TestcontainersParityRunner();
 
         ParityRunResult result;
         var totalTime = Stopwatch.StartNew();
         try
         {
+            var request = await CreateRequestAsync(environment, settings, isProject, cancellationToken);
             result = await environment.Console.Progress()
                 .AutoClear(false)
                 .HideCompleted(false)
@@ -146,7 +146,18 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
         totalTime.Stop();
 
         if (settings.SqlOutputPath is not null)
-            await File.WriteAllTextAsync(settings.SqlOutputPath, result.GeneratedSql, cancellationToken);
+        {
+            try
+            {
+                await File.WriteAllTextAsync(settings.SqlOutputPath, result.GeneratedSql, cancellationToken);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                environment.Console.MarkupLine("[red]✗ Generated SQL could not be written[/]");
+                environment.Console.Write(new Text(exception.Message + Environment.NewLine));
+                return 2;
+            }
+        }
 
         if (settings.KeepContainer)
             environment.Console.MarkupLine("[grey]SQL Server container kept running for reuse.[/]");
@@ -169,6 +180,30 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
                      $"SQL: {FormatOutcome(result.SqlServer)}{Environment.NewLine}";
         environment.Console.Write(new Text(report));
         return 1;
+    }
+
+    private static async Task<ParityRunRequest> CreateRequestAsync(
+        CliExecutionEnvironment environment,
+        Settings settings,
+        bool isProject,
+        CancellationToken cancellationToken)
+    {
+        var source = isProject
+            ? null
+            : settings.InputPath is null
+                ? await environment.Input.ReadToEndAsync(cancellationToken)
+                : await File.ReadAllTextAsync(settings.InputPath, cancellationToken);
+        return new ParityRunRequest(
+            settings.InputPath ?? "stdin.cs",
+            source,
+            settings.EntryPoint,
+            settings.Configuration,
+            settings.TargetFramework,
+            settings.SqlServerImage,
+            settings.CommandTimeoutSeconds,
+            settings.KeepContainer,
+            settings.Debug,
+            settings.Profile);
     }
 
     private static string FormatOutcome(ParityOutcome outcome) => outcome.Failure is null
@@ -253,6 +288,7 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
         private ProgressTask? _active;
         private string? _activeLabel;
 
+        /// <summary>Creates progress tasks for all parity verification stages.</summary>
         public VerificationProgress(ProgressContext context)
         {
             _tasks = Labels.ToDictionary(
@@ -262,6 +298,7 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
                     new ProgressTaskSettings { AutoStart = false, MaxValue = 100 }));
         }
 
+        /// <summary>Advances progress to the specified verification stage.</summary>
         public void Advance(ParityStageUpdate update)
         {
             if (_active == _tasks[update.Stage])
@@ -283,6 +320,7 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
             _active.StartTask();
         }
 
+        /// <summary>Marks the active stage as complete.</summary>
         public void Complete()
         {
             if (_active is null)
@@ -295,6 +333,7 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
             _activeLabel = null;
         }
 
+        /// <summary>Marks the active stage as failed.</summary>
         public void Fail()
         {
             if (_active is null)
@@ -309,6 +348,7 @@ public sealed class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
 
     private sealed class StageDurationColumn : ProgressColumn
     {
+        /// <inheritdoc />
         public override IRenderable Render(
             RenderOptions options,
             ProgressTask task,

@@ -5,9 +5,11 @@ using Spectre.Console.Cli;
 
 namespace SharpSql.Cli;
 
+/// <summary>Measures SharpSql compatibility against the Mono C# compiler test corpus.</summary>
 [Description("Measure SharpSql compatibility against the Mono C# compiler test corpus.")]
 public sealed class ConformanceCommand : AsyncCommand<ConformanceCommand.Settings>
 {
+    /// <summary>Defines the options accepted by the <c>conformance</c> command.</summary>
     public sealed class Settings : CommandSettings
     {
         [CommandOption("-p|--parallel <WORKERS>")]
@@ -31,6 +33,7 @@ public sealed class ConformanceCommand : AsyncCommand<ConformanceCommand.Setting
         [DefaultValue(10)]
         public int TimeoutSeconds { get; init; } = 10;
 
+        /// <inheritdoc />
         public override ValidationResult Validate()
         {
             if (Parallelism <= 0)

@@ -6,6 +6,7 @@ internal sealed record SqlOutputArtifactPaths(
 
 internal static class SqlOutputArtifacts
 {
+    /// <summary>Resolves program and installer output paths for the selected runtime storage.</summary>
     public static SqlOutputArtifactPaths ResolvePaths(
         string? outputPath,
         string? installerOutputPath,
@@ -18,6 +19,7 @@ internal static class SqlOutputArtifacts
             installerOutputPath ?? (outputPath is null ? null : DefaultInstallerPath(outputPath)));
     }
 
+    /// <summary>Writes requested SQL artifacts to disk.</summary>
     public static async Task WriteAsync(
         SqlOutputArtifactPaths paths,
         string? programSql,

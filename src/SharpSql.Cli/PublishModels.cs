@@ -2,6 +2,7 @@ using SharpSql.SqlServer;
 
 namespace SharpSql.Cli;
 
+/// <summary>Describes a SharpSql application publication request.</summary>
 public sealed record PublishRequest(
     string InputPath,
     string SchemaName,
@@ -16,6 +17,7 @@ public sealed record PublishRequest(
     bool MemoryOptimized,
     bool EnableNativeKernels);
 
+/// <summary>Reports the outcome of publishing a SharpSql application.</summary>
 public sealed record PublishResult(
     bool Success,
     string SqlServer,
@@ -23,13 +25,17 @@ public sealed record PublishResult(
     int? ErrorNumber = null,
     string? ErrorMessage = null);
 
+/// <summary>Publishes compiled SharpSql applications to SQL Server.</summary>
 public interface IPublishService
 {
+    /// <summary>Publishes the requested application and returns its result.</summary>
     Task<PublishResult> PublishAsync(PublishRequest request, CancellationToken cancellationToken);
 }
 
+/// <summary>Compiles and publishes SharpSql applications to SQL Server.</summary>
 public sealed class PublishService : IPublishService
 {
+    /// <inheritdoc />
     public async Task<PublishResult> PublishAsync(
         PublishRequest request,
         CancellationToken cancellationToken)

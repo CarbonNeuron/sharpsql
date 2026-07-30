@@ -5,12 +5,14 @@ using Spectre.Console.Cli;
 
 namespace SharpSql.Cli;
 
-[Description("Transpile and execute a project in SQL Server, using a configured connection or Testcontainers.")]
+/// <summary>Transpiles and executes a project or generated SQL in SQL Server.</summary>
+[Description("Transpile and execute a project or generated SQL using a SQL Server connection or Testcontainer.")]
 public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
 {
     internal const string DefaultImage = "mcr.microsoft.com/mssql/server:2022-latest";
     internal const string DefaultDatabase = "SharpSql";
 
+    /// <summary>Defines the options accepted by the <c>run</c> command.</summary>
     public sealed class Settings : CommandSettings
     {
         [CommandArgument(0, "[INPUT]")]
@@ -47,7 +49,7 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public bool KeepContainer { get; init; }
 
         [CommandOption("--remove-container")]
-        [Description("Remove the Testcontainer after execution, overriding project configuration.")]
+        [Description("Remove the SQL Server Testcontainer after execution, overriding project configuration.")]
         public bool RemoveContainer { get; init; }
 
         [CommandOption("--image <IMAGE>")]
@@ -55,7 +57,7 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public string? SqlServerImage { get; init; }
 
         [CommandOption("--database <DATABASE>")]
-        [Description("Database created and selected inside a Testcontainer.")]
+        [Description("Database created and selected inside the SQL Server Testcontainer.")]
         public string? DatabaseName { get; init; }
 
         [CommandOption("--timeout <SECONDS>")]
@@ -71,11 +73,11 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [Description("Extract supported pure scalar methods into natively compiled procedures.")]
         public bool EnableNativeKernels { get; init; }
 
-        [CommandOption("-o|--output <OUTPUT>")]
+        [CommandOption("-o|--output <PATH>")]
         [Description("Write the generated program SQL to a file before reporting the result.")]
         public string? OutputPath { get; init; }
 
-        [CommandOption("--installer-output <OUTPUT>")]
+        [CommandOption("--installer-output <PATH>")]
         [Description("Write standalone runtime provisioning SQL to this file.")]
         public string? InstallerOutputPath { get; init; }
 
@@ -87,8 +89,17 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [Description("Warm up and repeatedly measure SQL execution.")]
         public bool Profile { get; init; }
 
+        /// <inheritdoc />
         public override ValidationResult Validate()
         {
+            if (string.IsNullOrWhiteSpace(InputPath) && InputPath is not null)
+                return ValidationResult.Error("Input path cannot be empty.");
+            if (string.IsNullOrWhiteSpace(EntryPoint) && EntryPoint is not null)
+                return ValidationResult.Error("--entry cannot be empty.");
+            if (string.IsNullOrWhiteSpace(Configuration))
+                return ValidationResult.Error("--configuration cannot be empty.");
+            if (string.IsNullOrWhiteSpace(TargetFramework) && TargetFramework is not null)
+                return ValidationResult.Error("--framework cannot be empty.");
             if (KeepContainer && RemoveContainer)
                 return ValidationResult.Error("--keep-container and --remove-container cannot be combined.");
             if (string.IsNullOrWhiteSpace(ConnectionName) && ConnectionName is not null)
@@ -135,6 +146,12 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             environment.Console.MarkupLine($"[red]{Markup.Escape(exception.Message)}[/]");
             return 1;
         }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            environment.Console.MarkupLine("[red]Run input could not be resolved.[/]");
+            environment.Console.Write(new Text(exception.Message + Environment.NewLine));
+            return 2;
+        }
 
         var isProject = inputPath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase);
         if (!isProject && !inputPath.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
@@ -148,38 +165,20 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             return 1;
         }
 
-        var projectSettings = isProject
-            ? SharpSqlRunProjectSettings.Load(inputPath)
-            : SharpSqlRunProjectSettings.Default;
         var artifactPaths = SqlOutputArtifacts.ResolvePaths(
             settings.OutputPath,
             settings.InstallerOutputPath,
             settings.RuntimeStorage);
-        var keepContainer = settings.KeepContainer ||
-                            (!settings.RemoveContainer && projectSettings.KeepContainer);
-        var request = new SqlRunRequest(
-            inputPath,
-            isProject ? null : await File.ReadAllTextAsync(inputPath, cancellationToken),
-            settings.EntryPoint ?? projectSettings.EntryPoint,
-            settings.Configuration,
-            settings.TargetFramework,
-            settings.ConnectionName ?? projectSettings.ConnectionName,
-            settings.ConnectionStringEnvironmentVariable ?? projectSettings.ConnectionStringEnvironmentVariable,
-            settings.ForceContainer,
-            keepContainer,
-            settings.SqlServerImage ?? projectSettings.SqlServerImage,
-            settings.DatabaseName ?? projectSettings.DatabaseName,
-            settings.CommandTimeoutSeconds ?? projectSettings.CommandTimeoutSeconds,
-            settings.RuntimeStorage,
-            settings.Debug,
-            settings.Profile,
-            artifactPaths.ProgramPath,
-            artifactPaths.InstallerPath,
-            settings.EnableNativeKernels);
 
         SqlRunResult result;
         try
         {
+            var request = await CreateRequestAsync(
+                inputPath,
+                isProject,
+                artifactPaths,
+                settings,
+                cancellationToken);
             result = await (environment.SqlRunService ?? new SqlRunService())
                 .RunAsync(
                     request,
@@ -213,6 +212,39 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         if (result.ContainerKept)
             environment.Console.MarkupLine("[grey]SQL Server container kept running for reuse.[/]");
         return 0;
+    }
+
+    private static async Task<SqlRunRequest> CreateRequestAsync(
+        string inputPath,
+        bool isProject,
+        SqlOutputArtifactPaths artifactPaths,
+        Settings settings,
+        CancellationToken cancellationToken)
+    {
+        var projectSettings = isProject
+            ? SharpSqlRunProjectSettings.Load(inputPath)
+            : SharpSqlRunProjectSettings.Default;
+        var keepContainer = settings.KeepContainer ||
+                            (!settings.RemoveContainer && projectSettings.KeepContainer);
+        return new SqlRunRequest(
+            inputPath,
+            isProject ? null : await File.ReadAllTextAsync(inputPath, cancellationToken),
+            settings.EntryPoint ?? projectSettings.EntryPoint,
+            settings.Configuration,
+            settings.TargetFramework,
+            settings.ConnectionName ?? projectSettings.ConnectionName,
+            settings.ConnectionStringEnvironmentVariable ?? projectSettings.ConnectionStringEnvironmentVariable,
+            settings.ForceContainer,
+            keepContainer,
+            settings.SqlServerImage ?? projectSettings.SqlServerImage,
+            settings.DatabaseName ?? projectSettings.DatabaseName,
+            settings.CommandTimeoutSeconds ?? projectSettings.CommandTimeoutSeconds,
+            settings.RuntimeStorage,
+            settings.Debug,
+            settings.Profile,
+            artifactPaths.ProgramPath,
+            artifactPaths.InstallerPath,
+            settings.EnableNativeKernels);
     }
 
     private static void RenderArtifactPaths(
@@ -313,6 +345,7 @@ internal sealed record SharpSqlRunProjectSettings(
     string DatabaseName,
     int CommandTimeoutSeconds)
 {
+    /// <summary>Gets default settings used when running an existing SQL file.</summary>
     public static SharpSqlRunProjectSettings Default { get; } = new(
         null,
         null,
@@ -322,6 +355,7 @@ internal sealed record SharpSqlRunProjectSettings(
         RunCommand.DefaultDatabase,
         60);
 
+    /// <summary>Loads SharpSql run settings from a project file.</summary>
     public static SharpSqlRunProjectSettings Load(string projectPath)
     {
         var document = XDocument.Load(projectPath);

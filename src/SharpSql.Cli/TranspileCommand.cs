@@ -4,20 +4,22 @@ using Spectre.Console.Cli;
 
 namespace SharpSql.Cli;
 
+/// <summary>Transpiles C# source or a .NET project into T-SQL.</summary>
 [Description("Transpile a C# source file or SDK-style project into a T-SQL program batch.")]
 public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
 {
+    /// <summary>Defines the options accepted by the <c>transpile</c> command.</summary>
     public sealed class Settings : CommandSettings
     {
         [CommandArgument(0, "[INPUT]")]
         [Description("A .cs or .csproj input. Reads C# from standard input when omitted.")]
         public string? InputPath { get; init; }
 
-        [CommandOption("-o|--output <OUTPUT>")]
+        [CommandOption("-o|--output <PATH>")]
         [Description("Write generated SQL to a file instead of standard output.")]
         public string? OutputPath { get; init; }
 
-        [CommandOption("--installer-output <OUTPUT>")]
+        [CommandOption("--installer-output <PATH>")]
         [Description("Write standalone runtime provisioning SQL to this file.")]
         public string? InstallerOutputPath { get; init; }
 
@@ -43,9 +45,18 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         [Description("Extract supported pure scalar methods into natively compiled procedures.")]
         public bool EnableNativeKernels { get; init; }
 
+        /// <inheritdoc />
         public override ValidationResult Validate()
         {
             var isProject = InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
+            if (string.IsNullOrWhiteSpace(InputPath) && InputPath is not null)
+                return ValidationResult.Error("Input path cannot be empty.");
+            if (string.IsNullOrWhiteSpace(EntryPoint) && EntryPoint is not null)
+                return ValidationResult.Error("--entry cannot be empty.");
+            if (string.IsNullOrWhiteSpace(Configuration))
+                return ValidationResult.Error("--configuration cannot be empty.");
+            if (string.IsNullOrWhiteSpace(TargetFramework) && TargetFramework is not null)
+                return ValidationResult.Error("--framework cannot be empty.");
             if (!isProject && EntryPoint is not null)
                 return ValidationResult.Error("--entry is supported only for .csproj inputs.");
             if (!isProject && TargetFramework is not null)
@@ -75,6 +86,26 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
     {
         var environment = context.Data as CliExecutionEnvironment ??
                           new CliExecutionEnvironment(AnsiConsole.Console, Console.In);
+        try
+        {
+            return await ExecuteCoreAsync(environment, settings, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            var message = $"Transpilation could not complete: {exception.Message}";
+            if (environment.Error is null)
+                environment.Console.MarkupLine($"[red]{Markup.Escape(message)}[/]");
+            else
+                await environment.Error.WriteLineAsync(message.AsMemory(), cancellationToken);
+            return 2;
+        }
+    }
+
+    private static async Task<int> ExecuteCoreAsync(
+        CliExecutionEnvironment environment,
+        Settings settings,
+        CancellationToken cancellationToken)
+    {
         var isProject = settings.InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
         var compilerOptions = new TranspileOptions
         {

@@ -2,6 +2,7 @@ using Spectre.Console;
 
 namespace SharpSql.Cli;
 
+/// <summary>Provides console streams and replaceable services to CLI commands.</summary>
 public sealed record CliExecutionEnvironment(
     IAnsiConsole Console,
     TextReader Input,

@@ -4,6 +4,7 @@ using SharpSql.SqlServer;
 
 namespace SharpSql.Cli;
 
+/// <summary>Describes a request to transpile and execute SQL.</summary>
 public sealed record SqlRunRequest(
     string InputPath,
     string? Sql,
@@ -27,10 +28,12 @@ public sealed record SqlRunRequest(
     public bool IsProject => Sql is null;
 }
 
+/// <summary>Contains timing samples collected while executing SQL.</summary>
 public sealed record SqlRunProfile(
     int WarmupRuns,
     IReadOnlyList<TimeSpan> SqlServerSamples);
 
+/// <summary>Reports the outcome of transpiling and executing SQL.</summary>
 public sealed record SqlRunResult(
     bool Success,
     string SqlServer,
@@ -44,10 +47,13 @@ public sealed record SqlRunResult(
     SqlBatchDebugInfo? DebugInfo = null,
     SqlRunProfile? Profile = null);
 
+/// <summary>Transpiles and executes SharpSql programs in SQL Server.</summary>
 public interface ISqlRunService
 {
+    /// <summary>Runs the request and returns its execution result.</summary>
     Task<SqlRunResult> RunAsync(SqlRunRequest request, CancellationToken cancellationToken);
 
+    /// <summary>Runs the request, reporting SQL messages as they are observed.</summary>
     async Task<SqlRunResult> RunAsync(
         SqlRunRequest request,
         Action<string>? reportMessage,
@@ -72,14 +78,17 @@ public interface ISqlRunService
     }
 }
 
+/// <summary>Transpiles and executes SharpSql programs in SQL Server.</summary>
 public sealed class SqlRunService : ISqlRunService
 {
     private const int ProfileWarmupRuns = 1;
     private const int ProfileSampleRuns = 3;
 
+    /// <inheritdoc />
     public async Task<SqlRunResult> RunAsync(SqlRunRequest request, CancellationToken cancellationToken)
         => await RunAsync(request, reportMessage: null, cancellationToken);
 
+    /// <inheritdoc />
     public async Task<SqlRunResult> RunAsync(
         SqlRunRequest request,
         Action<string>? reportMessage,

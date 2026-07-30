@@ -5,6 +5,7 @@ namespace SharpSql.Cli;
 
 internal static class MonoTestCorpus
 {
+    /// <summary>Finds the SharpSql repository containing the specified directory.</summary>
     public static string FindRepositoryRoot(string startDirectory)
     {
         var directory = new DirectoryInfo(Path.GetFullPath(startDirectory));
@@ -19,6 +20,7 @@ internal static class MonoTestCorpus
             "Could not locate the SharpSql repository. Run this command from inside a SharpSql checkout.");
     }
 
+    /// <summary>Downloads the Mono test corpus when it is not already available.</summary>
     public static async Task EnsureDownloadedAsync(
         string repositoryRoot,
         string testsDirectory,

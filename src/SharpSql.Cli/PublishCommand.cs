@@ -5,9 +5,11 @@ using Spectre.Console.Cli;
 
 namespace SharpSql.Cli;
 
+/// <summary>Compiles and publishes a versioned SharpSql application to SQL Server.</summary>
 [Description("Compile and publish a versioned SharpSql application to SQL Server.")]
 public sealed partial class PublishCommand : AsyncCommand<PublishCommand.Settings>
 {
+    /// <summary>Defines the options accepted by the <c>publish</c> command.</summary>
     public sealed class Settings : CommandSettings
     {
         [CommandArgument(0, "<INPUT>")]
@@ -58,9 +60,10 @@ public sealed partial class PublishCommand : AsyncCommand<PublishCommand.Setting
         public bool MemoryOptimized { get; init; }
 
         [CommandOption("--native-kernels")]
-        [Description("Extract supported pure scalar methods into natively compiled procedures.")]
+        [Description("Extract supported pure scalar methods into natively compiled procedures; requires --memory-optimized.")]
         public bool EnableNativeKernels { get; init; }
 
+        /// <inheritdoc />
         public override ValidationResult Validate()
         {
             if (string.IsNullOrWhiteSpace(InputPath))
