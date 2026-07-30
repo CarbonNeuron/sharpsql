@@ -90,11 +90,13 @@ cases, and concurrent execution isolation tests.
 
 ## Current boundary
 
-Managed object headers, per-type object rows, collection/dictionary storage, and LINQ
-buffers still use local temporary tables. Moving the fixed-shape object and indexed
-item tables is a reasonable next experiment. Per-program object tables have dynamic,
-strongly typed columns and need a separate provisioning/versioning design rather than
-being forced into an untyped shared heap.
+Managed object headers now use a database-global, execution-partitioned memory-optimized
+table with the selected durability. Per-type object rows, collection/dictionary storage,
+and LINQ buffers still use ordinary temporary or durable rowstore tables. Indexed items
+need an encoded scalar representation because In-Memory OLTP does not support
+`SQL_VARIANT`; per-program object tables have dynamic, strongly typed columns and need a
+separate provisioning/versioning design rather than being forced into an untyped shared
+heap.
 
 Service Broker can provision and address either memory-table durability. Its current
 worker continuation slice still rejects calls that require the VM fallback (`SS7005`),

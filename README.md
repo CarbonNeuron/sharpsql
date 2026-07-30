@@ -438,8 +438,9 @@ sharpsql transpile examples/recursion.cs \
 SQL Server requires the target database to already have a
 `MEMORY_OPTIMIZED_DATA` filegroup and physical container. SharpSql deliberately
 does not create that deployment-specific, effectively irreversible infrastructure.
-The current experiment optimizes legacy VM frames and slots; managed heap and LINQ
-buffer tables remain ordinary local temporary tables. Scalar slot values use a
+The current experiment optimizes legacy VM frames, slots, and the fixed-shape managed
+heap object registry. Typed object payloads, collection/dictionary rows, and LINQ buffer
+tables remain ordinary temporary or durable rowstore tables. Scalar slot values use a
 typed binary round-trip because In-Memory OLTP does not support `SQL_VARIANT`.
 See the [memory-optimized runtime guide](docs/memory-optimized-runtime.md) for
 provisioning, measurements, and the current storage boundary.

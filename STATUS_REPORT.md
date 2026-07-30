@@ -118,7 +118,7 @@ SharpSql emits explicit C#-style guards for empty sequences, multiple `Single` v
 
 - Preserves the same direct SQL and label VM. Only VM frame and slot tables become execution-local variables of provisioned `MemoryVmStackV1` and `MemoryVmSlotsV1` memory-optimized table types (`src/SharpSql/MemoryOptimizedRuntimeSqlEmitter.cs:10-68`).
 - Because memory-optimized tables cannot store `SQL_VARIANT`, ordinary scalars round-trip through `VARBINARY(8000)` using their statically known type.
-- Managed heap, typed object tables, collections, dictionaries, and LINQ buffers still use local temporary tables (`docs/memory-optimized-runtime.md:77-83`).
+- Managed object headers use a shared memory-optimized registry; typed object payloads, collections, dictionaries, and LINQ buffers remain ordinary temporary or durable rowstore tables (`docs/memory-optimized-runtime.md`).
 - The database operator must create a `MEMORY_OPTIMIZED_DATA` filegroup/container; SharpSql intentionally emits only the idempotent schema/type provisioning.
 
 #### Native kernels
@@ -470,7 +470,7 @@ Publishing is functional and tested but still a first deployment slice:
 
 ### 7.3 Memory-optimized runtime
 
-The mode is explicitly experimental and only optimizes two VM tables. It does not make the managed heap or LINQ memory-optimized, cannot provision the physical filegroup/container, and is accidentally inaccessible from SDK targets. Its documented benchmark (roughly 32% lower elapsed time on recursive Fibonacci) is a microbenchmark, not a general performance guarantee (`docs/memory-optimized-runtime.md:61-75`).
+The mode is explicitly experimental and optimizes VM frames/slots plus the fixed-shape heap object registry. Typed heap payloads and LINQ buffers are not yet memory-optimized, and SharpSql does not provision the physical filegroup/container. Its documented benchmark (roughly 32% lower elapsed time on recursive Fibonacci) is a microbenchmark, not a general performance guarantee (`docs/memory-optimized-runtime.md`).
 
 ### 7.4 Native kernels
 

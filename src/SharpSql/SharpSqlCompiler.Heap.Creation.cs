@@ -242,7 +242,7 @@ public sealed partial class SharpSqlCompiler
                     context);
                 objectSql = ReadVmTemporary(objectStorage);
             }
-            _sql.Line($"INSERT INTO {HeapObjects} ({HeapInsertColumns("__type_id")}) VALUES ({HeapInsertValues($"{heapType.Id}")});");
+            _sql.Line($"INSERT INTO {HeapObjects} ({HeapObjectInsertColumns("__type_id")}) VALUES ({HeapObjectInsertValues($"{heapType.Id}")});");
             if (objectStorage is null)
                 _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
             else
@@ -515,7 +515,7 @@ public sealed partial class SharpSqlCompiler
                 var list = AllocateHeapHeader(ListHeapTypeId, "__count", "0");
                 InsertIndexedItems(list, elementType, captured);
                 if (captured.Count > 0)
-                    _sql.Line($"UPDATE {HeapObjects} SET __count = {captured.Count} WHERE {HeapExecutionFilter()}__id = {list};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = {captured.Count} WHERE {HeapObjectExecutionFilter()}__id = {list};");
                 continuation(list);
                 return;
             }
@@ -628,7 +628,7 @@ public sealed partial class SharpSqlCompiler
             {
                 var objectSql = _names.Allocate("_object");
                 _sql.Line($"DECLARE {objectSql} INT;");
-                _sql.Line($"INSERT INTO {HeapObjects} ({HeapInsertColumns("__type_id")}) VALUES ({HeapInsertValues($"{heapType.Id}")});");
+                _sql.Line($"INSERT INTO {HeapObjects} ({HeapObjectInsertColumns("__type_id")}) VALUES ({HeapObjectInsertValues($"{heapType.Id}")});");
                 _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
                 foreach (var allocatedType in hierarchy)
                 {

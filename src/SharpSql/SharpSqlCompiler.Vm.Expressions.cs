@@ -117,7 +117,7 @@ public sealed partial class SharpSqlCompiler
                 (IsArrayType(receiverType.Name) && member.MemberName == "Length") ||
                 (IsDictionaryType(receiverType.Name) && member.MemberName == "Count"))
             {
-                continuation($"(SELECT __count FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {receiver})");
+                continuation($"(SELECT __count FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {receiver})");
                 return;
             }
             if (TryResolveHeapField(
@@ -438,7 +438,7 @@ public sealed partial class SharpSqlCompiler
                 $"WHEN {target.RuntimeTypeId} THEN {_vmMethods[target.Method.Id].Id}");
             StoreVmTemporary(
                 functionId,
-                $"CASE (SELECT __type_id FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {receiver}) {string.Join(" ", cases)} END");
+                $"CASE (SELECT __type_id FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {receiver}) {string.Join(" ", cases)} END");
             var selectedFunction = ReadVmTemporary(functionId);
             _sql.Line($"IF {selectedFunction} IS NULL THROW 51007, 'Virtual dispatch target was not found.', 1;");
 

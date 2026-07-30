@@ -17,7 +17,7 @@ public sealed partial class SharpSqlCompiler
         var count = query.Source switch
         {
             SqlLinqHeapQuerySource heap =>
-                $"(SELECT __count FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {heap.OwnerSql})",
+                $"(SELECT __count FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {heap.OwnerSql})",
             SqlLinqRangeQuerySource range => range.CountSql,
             SqlLinqRepeatQuerySource repeat => repeat.CountSql,
             _ => null
@@ -685,7 +685,7 @@ public sealed partial class SharpSqlCompiler
             $"FROM ({querySql}) AS {sourceAlias};");
         var materializedCount = _names.Allocate("_linq_materialized_count");
         _sql.Line($"DECLARE {materializedCount} INT = @@ROWCOUNT;");
-        _sql.Line($"UPDATE {HeapObjects} SET __count = {materializedCount} WHERE {HeapExecutionFilter()}__id = {collection};");
+        _sql.Line($"UPDATE {HeapObjects} SET __count = {materializedCount} WHERE {HeapObjectExecutionFilter()}__id = {collection};");
         continuation(collection);
         return true;
     }
@@ -727,7 +727,7 @@ public sealed partial class SharpSqlCompiler
             $"FROM ({querySql}) AS {alias};");
         var count = _names.Allocate("_linq_materialized_count");
         _sql.Line($"DECLARE {count} INT = @@ROWCOUNT;");
-        _sql.Line($"UPDATE {HeapObjects} SET __count = {count} WHERE {HeapExecutionFilter()}__id = {collection};");
+        _sql.Line($"UPDATE {HeapObjects} SET __count = {count} WHERE {HeapObjectExecutionFilter()}__id = {collection};");
         continuation(collection);
         return true;
     }
@@ -944,4 +944,3 @@ public sealed partial class SharpSqlCompiler
     }
 
 }
-

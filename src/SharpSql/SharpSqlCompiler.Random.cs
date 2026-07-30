@@ -433,13 +433,13 @@ public sealed partial class SharpSqlCompiler
         var next = _names.Allocate("_random_inext");
         var nextPartner = _names.Allocate("_random_inextp");
         var sample = _names.Allocate("_random_sample");
-        _sql.Line($"DECLARE {next} INT = (SELECT __state0 FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {random}) % 55 + 1;");
-        _sql.Line($"DECLARE {nextPartner} INT = (SELECT __state1 FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {random}) % 55 + 1;");
+        _sql.Line($"DECLARE {next} INT = (SELECT __state0 FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {random}) % 55 + 1;");
+        _sql.Line($"DECLARE {nextPartner} INT = (SELECT __state1 FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {random}) % 55 + 1;");
         _sql.Line($"DECLARE {sample} BIGINT = CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = {next})) - CONVERT(BIGINT, (SELECT __value FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = {nextPartner}));");
         _sql.Line($"SET {sample} = (({sample} + 2147483648) % 4294967296 + 4294967296) % 4294967296 - 2147483648;");
         _sql.Line($"SET {sample} = CASE WHEN {sample} = {RandomMax} THEN {sample} - 1 WHEN {sample} < 0 THEN {sample} + {RandomMax} ELSE {sample} END;");
         _sql.Line($"UPDATE {HeapIndexedItems} SET __value = CONVERT(SQL_VARIANT, CONVERT(INT, {sample})) WHERE {HeapExecutionFilter()}__owner_id = {random} AND __index = {next};");
-        _sql.Line($"UPDATE {HeapObjects} SET __state0 = {next}, __state1 = {nextPartner} WHERE {HeapExecutionFilter()}__id = {random};");
+        _sql.Line($"UPDATE {HeapObjects} SET __state0 = {next}, __state1 = {nextPartner} WHERE {HeapObjectExecutionFilter()}__id = {random};");
         if (releaseSessionLock)
         {
             _sql.Line($"EXEC sys.sp_releaseapplock @Resource = {lockResource}, @LockOwner = 'Session';");

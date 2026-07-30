@@ -157,7 +157,7 @@ public sealed partial class SharpSqlCompiler
         {
             var objectSql = _names.Allocate("_object");
             _sql.Line($"DECLARE {objectSql} INT;");
-            _sql.Line($"INSERT INTO {HeapObjects} ({HeapInsertColumns("__type_id")}) VALUES ({HeapInsertValues($"{heapType.Id}")});");
+            _sql.Line($"INSERT INTO {HeapObjects} ({HeapObjectInsertColumns("__type_id")}) VALUES ({HeapObjectInsertValues($"{heapType.Id}")});");
             _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
             var columns = new List<string> { "__object_id" };
             var values = new List<string> { objectSql };
@@ -264,7 +264,7 @@ public sealed partial class SharpSqlCompiler
             {
                 var objectSql = _names.Allocate("_object");
                 _sql.Line($"DECLARE {objectSql} INT;");
-                _sql.Line($"INSERT INTO {HeapObjects} ({HeapInsertColumns("__type_id")}) VALUES ({HeapInsertValues($"{heapType.Id}")});");
+                _sql.Line($"INSERT INTO {HeapObjects} ({HeapObjectInsertColumns("__type_id")}) VALUES ({HeapObjectInsertValues($"{heapType.Id}")});");
                 _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
                 var columns = new List<string> { "__object_id" };
                 var values = new List<string> { objectSql };
@@ -320,7 +320,7 @@ public sealed partial class SharpSqlCompiler
             var listSql = AllocateHeapHeader(ListHeapTypeId, "__count", "0");
             InsertIndexedItems(listSql, elementType, captured);
             if (captured.Count > 0)
-                _sql.Line($"UPDATE {HeapObjects} SET __count = {captured.Count} WHERE {HeapExecutionFilter()}__id = {listSql};");
+                _sql.Line($"UPDATE {HeapObjects} SET __count = {captured.Count} WHERE {HeapObjectExecutionFilter()}__id = {listSql};");
             continuation(listSql);
         }
     }
@@ -348,7 +348,7 @@ public sealed partial class SharpSqlCompiler
         _sql.Line($"DECLARE {objectSql} INT;");
         var columns = new[] { "__type_id" }.Concat(state.Select(item => item.Column));
         var values = new[] { typeId.ToString() }.Concat(state.Select(item => item.Value));
-        _sql.Line($"INSERT INTO {HeapObjects} ({HeapInsertColumns(string.Join(", ", columns))}) VALUES ({HeapInsertValues(string.Join(", ", values))});");
+        _sql.Line($"INSERT INTO {HeapObjects} ({HeapObjectInsertColumns(string.Join(", ", columns))}) VALUES ({HeapObjectInsertValues(string.Join(", ", values))});");
         _sql.Line($"SET {objectSql} = CONVERT(INT, SCOPE_IDENTITY());");
         return objectSql;
     }

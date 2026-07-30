@@ -27,12 +27,12 @@ public sealed partial class SharpSqlCompiler
         {
             if ((IsListType(receiverType.Name) && member.Name.Identifier.ValueText == "Count") ||
                 (IsArrayType(receiverType.Name) && member.Name.Identifier.ValueText == "Length"))
-                return SqlScalarExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {receiver})");
+                return SqlScalarExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {receiver})");
         }
         else if (IsDictionaryType(receiverType.Name))
         {
             if (member.Name.Identifier.ValueText == "Count")
-                return SqlScalarExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {receiver})");
+                return SqlScalarExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {receiver})");
         }
         else if (TryResolveHeapField(member, scope, substitutions, out var type, out var field))
         {
@@ -484,7 +484,7 @@ public sealed partial class SharpSqlCompiler
         : GenericArguments(name)[0];
 
     private string SequenceCountSql(string collection) =>
-        $"(SELECT __count FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {collection})";
+        $"(SELECT __count FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {collection})";
 
     private string SequenceElementSql(string collection, string index, IrType itemType) =>
         $"(SELECT {CollectionReadValue(itemType, false)} FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {collection} AND __index = {index})";
@@ -523,4 +523,3 @@ public sealed partial class SharpSqlCompiler
     private static string QuoteIdentifier(string identifier) => $"[{identifier.Replace("]", "]]", StringComparison.Ordinal)}]";
 
 }
-

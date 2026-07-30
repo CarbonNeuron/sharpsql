@@ -33,7 +33,13 @@ public sealed partial class SharpSqlCompiler
     private const int RandomHeapTypeId = 1004;
 
     private bool UsesDurableHeapStorage => UsesDurableRuntime;
-    private string HeapObjects => UsesDurableHeapStorage ? DurableHeapObjects : EphemeralHeapObjects;
+    private bool UsesSharedHeapObjectStorage => UsesDurableHeapStorage || UsesMemoryOptimizedRuntime;
+    private string MemoryOptimizedHeapObjects =>
+        $"{SqlIdentifier.Quote(_options.ApplicationSchema, nameof(TranspileOptions.ApplicationSchema))}." +
+        $"[{MemoryOptimizedRuntimeSqlEmitter.HeapObjectsTableName(_effectiveRuntime.Durability)}]";
+    private string HeapObjects => UsesMemoryOptimizedRuntime
+        ? MemoryOptimizedHeapObjects
+        : UsesDurableHeapStorage ? DurableHeapObjects : EphemeralHeapObjects;
     private string HeapIndexedItems => UsesDurableHeapStorage ? DurableHeapIndexedItems : EphemeralHeapIndexedItems;
     private string HeapDictionaryEntries => UsesDurableHeapStorage ? DurableHeapDictionaryEntries : EphemeralHeapDictionaryEntries;
 
@@ -46,6 +52,18 @@ public sealed partial class SharpSqlCompiler
         : columns;
 
     private string HeapInsertValues(string values) => UsesDurableHeapStorage
+        ? $"{RuntimeExecutionId}, {values}"
+        : values;
+
+    private string HeapObjectExecutionFilter(string? alias = null) => UsesSharedHeapObjectStorage
+        ? $"{(alias is null ? string.Empty : alias + ".")}__execution_id = {RuntimeExecutionId} AND "
+        : string.Empty;
+
+    private string HeapObjectInsertColumns(string columns) => UsesSharedHeapObjectStorage
+        ? $"__execution_id, {columns}"
+        : columns;
+
+    private string HeapObjectInsertValues(string values) => UsesSharedHeapObjectStorage
         ? $"{RuntimeExecutionId}, {values}"
         : values;
 
@@ -395,18 +413,24 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"DROP TABLE IF EXISTS {HeapDictionaryEntries};");
         if (_usesIndexedItems)
             _sql.Line($"DROP TABLE IF EXISTS {HeapIndexedItems};");
-        _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
-
-        _sql.Line($"CREATE TABLE {HeapObjects} (");
-        using (_sql.Indent())
+        if (UsesMemoryOptimizedRuntime)
         {
-            _sql.Line("__id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
-            _sql.Line("__type_id INT NOT NULL,");
-            _sql.Line("__count INT NULL,");
-            _sql.Line("__state0 INT NULL,");
-            _sql.Line("__state1 INT NULL");
+            EmitMemoryOptimizedHeapObjectsPrerequisite();
         }
-        _sql.Line(");");
+        else
+        {
+            _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
+            _sql.Line($"CREATE TABLE {HeapObjects} (");
+            using (_sql.Indent())
+            {
+                _sql.Line("__id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
+                _sql.Line("__type_id INT NOT NULL,");
+                _sql.Line("__count INT NULL,");
+                _sql.Line("__state0 INT NULL,");
+                _sql.Line("__state1 INT NULL");
+            }
+            _sql.Line(");");
+        }
 
         foreach (var type in UsedHeapTypes())
         {
@@ -435,26 +459,33 @@ public sealed partial class SharpSqlCompiler
     private void EmitDurableHeapPreamble()
     {
         _sql.Line("-- SharpSql durable managed heap");
-        _sql.Line($"IF OBJECT_ID(N'{DurableHeapObjects}', N'U') IS NULL");
-        _sql.Line("BEGIN");
-        using (_sql.Indent())
+        if (UsesMemoryOptimizedRuntime)
         {
-            _sql.Line($"CREATE TABLE {DurableHeapObjects} (");
+            EmitMemoryOptimizedHeapObjectsPrerequisite();
+        }
+        else
+        {
+            _sql.Line($"IF OBJECT_ID(N'{DurableHeapObjects}', N'U') IS NULL");
+            _sql.Line("BEGIN");
             using (_sql.Indent())
             {
-                _sql.Line("__execution_id UNIQUEIDENTIFIER NOT NULL,");
-                _sql.Line("__id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
-                _sql.Line("__type_id INT NOT NULL,");
-                _sql.Line("__count INT NULL,");
-                _sql.Line("__state0 INT NULL,");
-                _sql.Line("__state1 INT NULL");
+                _sql.Line($"CREATE TABLE {DurableHeapObjects} (");
+                using (_sql.Indent())
+                {
+                    _sql.Line("__execution_id UNIQUEIDENTIFIER NOT NULL,");
+                    _sql.Line("__id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
+                    _sql.Line("__type_id INT NOT NULL,");
+                    _sql.Line("__count INT NULL,");
+                    _sql.Line("__state0 INT NULL,");
+                    _sql.Line("__state1 INT NULL");
+                }
+                _sql.Line(");");
             }
-            _sql.Line(");");
+            _sql.Line("END;");
+            _sql.Line($"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'{DurableHeapObjects}') AND name = N'IX___sharpsql_objects_execution')");
+            using (_sql.Indent())
+                _sql.Line($"CREATE INDEX [IX___sharpsql_objects_execution] ON {DurableHeapObjects} (__execution_id);");
         }
-        _sql.Line("END;");
-        _sql.Line($"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'{DurableHeapObjects}') AND name = N'IX___sharpsql_objects_execution')");
-        using (_sql.Indent())
-            _sql.Line($"CREATE INDEX [IX___sharpsql_objects_execution] ON {DurableHeapObjects} (__execution_id);");
 
         foreach (var type in UsedHeapTypes())
         {
@@ -486,6 +517,14 @@ public sealed partial class SharpSqlCompiler
         if (_usesDictionaries)
             EmitDurableDictionaryTable();
         _sql.Line();
+    }
+
+    private void EmitMemoryOptimizedHeapObjectsPrerequisite()
+    {
+        _sql.Line("-- SharpSql database-global memory-optimized heap object registry");
+        _sql.Line($"IF OBJECT_ID({SqlIdentifier.UnicodeLiteral(MemoryOptimizedHeapObjects)}, N'U') IS NULL");
+        using (_sql.Indent())
+            _sql.Line($"THROW {MemoryOptimizedRuntimeSqlEmitter.MissingPhysicalTableErrorNumber}, 'Provision the SharpSql memory-optimized runtime before executing this program.', 1;");
     }
 
     private void EmitDurableIndexedItemsTable()
@@ -601,7 +640,7 @@ public sealed partial class SharpSqlCompiler
         }
 
         EmitHeapDiagnostics(
-            UsesDurableHeapStorage
+            UsesSharedHeapObjectStorage
                 ? $"(SELECT COUNT_BIG(*) FROM {HeapObjects} WHERE __execution_id = {RuntimeExecutionId})"
                 : $"(SELECT COUNT_BIG(*) FROM {HeapObjects})",
             _usesIndexedItems
@@ -627,20 +666,26 @@ public sealed partial class SharpSqlCompiler
             _sql.Line($"DROP TABLE IF EXISTS {HeapDictionaryEntries};");
         if (_usesIndexedItems)
             _sql.Line($"DROP TABLE IF EXISTS {HeapIndexedItems};");
-        _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
+        if (UsesMemoryOptimizedRuntime)
+            _sql.Line($"DELETE FROM {HeapObjects} WHERE __execution_id = {RuntimeExecutionId};");
+        else
+            _sql.Line($"DROP TABLE IF EXISTS {HeapObjects};");
     }
 
     private void EmitDurableHeapCleanup()
     {
-        if (!UsesDurableHeapStorage || !_heapRuntimeNeeded)
+        if (!UsesSharedHeapObjectStorage || !_heapRuntimeNeeded)
             return;
 
-        foreach (var type in UsedHeapTypes().Reverse())
-            _sql.Line($"DELETE FROM {type.TableName} WHERE __execution_id = {RuntimeExecutionId};");
-        if (_usesDictionaries)
-            _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE __execution_id = {RuntimeExecutionId};");
-        if (_usesIndexedItems)
-            _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE __execution_id = {RuntimeExecutionId};");
+        if (UsesDurableHeapStorage)
+        {
+            foreach (var type in UsedHeapTypes().Reverse())
+                _sql.Line($"DELETE FROM {type.TableName} WHERE __execution_id = {RuntimeExecutionId};");
+            if (_usesDictionaries)
+                _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE __execution_id = {RuntimeExecutionId};");
+            if (_usesIndexedItems)
+                _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE __execution_id = {RuntimeExecutionId};");
+        }
         _sql.Line($"DELETE FROM {HeapObjects} WHERE __execution_id = {RuntimeExecutionId};");
     }
 

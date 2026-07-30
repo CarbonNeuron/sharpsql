@@ -35,7 +35,8 @@ public sealed class MemoryOptimizedRuntimeTests
         Assert.Equal(2, Count(sql, "WITH (MEMORY_OPTIMIZED = ON)"));
         Assert.Contains("CREATE TABLE [SharpSql].[__sharpsql_memory_vm_stack_ephemeral_v1]", sql, StringComparison.Ordinal);
         Assert.Contains("CREATE TABLE [SharpSql].[__sharpsql_memory_vm_slots_ephemeral_v1]", sql, StringComparison.Ordinal);
-        Assert.Equal(2, Count(sql, "DURABILITY = SCHEMA_ONLY"));
+        Assert.Contains("CREATE TABLE [SharpSql].[__sharpsql_memory_heap_objects_ephemeral_v1]", sql, StringComparison.Ordinal);
+        Assert.Equal(3, Count(sql, "DURABILITY = SCHEMA_ONLY"));
         Assert.Contains("[__scalar_value] VARBINARY(8000) NULL", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SQL_VARIANT", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("ADD FILEGROUP", sql, StringComparison.OrdinalIgnoreCase);
@@ -58,8 +59,12 @@ public sealed class MemoryOptimizedRuntimeTests
             $"CREATE TABLE [SharpSql].[{MemoryOptimizedRuntimeSqlEmitter.VmSlotsTableName(durability)}]",
             sql,
             StringComparison.Ordinal);
-        Assert.Equal(2, Count(sql, $"WITH (MEMORY_OPTIMIZED = ON, DURABILITY = {expectedDurability})"));
-        Assert.Equal(2, Count(sql, "[__execution_id] UNIQUEIDENTIFIER NOT NULL"));
+        Assert.Contains(
+            $"CREATE TABLE [SharpSql].[{MemoryOptimizedRuntimeSqlEmitter.HeapObjectsTableName(durability)}]",
+            sql,
+            StringComparison.Ordinal);
+        Assert.Equal(3, Count(sql, $"WITH (MEMORY_OPTIMIZED = ON, DURABILITY = {expectedDurability})"));
+        Assert.Equal(3, Count(sql, "[__execution_id] UNIQUEIDENTIFIER NOT NULL"));
         Assert.Contains(
             "PRIMARY KEY NONCLUSTERED HASH ([__execution_id], [__id])",
             sql,
@@ -77,8 +82,8 @@ public sealed class MemoryOptimizedRuntimeTests
         var sql = MemoryOptimizedRuntimeSqlEmitter.EmitPhysicalTables(RuntimeDurabilityKind.Ephemeral);
 
         Assert.Equal(51935, RuntimeTableSqlEmitter.IncompatibleTableErrorNumber);
-        Assert.Equal(2, Count(sql, "[is_memory_optimized] = 1 AND [durability_desc] = N'SCHEMA_ONLY'"));
-        Assert.Equal(2, Count(sql, "THROW 51935, 'The existing SharpSql runtime table has incompatible physical storage.'"));
+        Assert.Equal(3, Count(sql, "[is_memory_optimized] = 1 AND [durability_desc] = N'SCHEMA_ONLY'"));
+        Assert.Equal(3, Count(sql, "THROW 51935, 'The existing SharpSql runtime table has incompatible physical storage.'"));
         Assert.DoesNotContain("DROP TABLE", sql, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -90,9 +95,11 @@ public sealed class MemoryOptimizedRuntimeTests
 
         Assert.Contains("[SharpSql].[__sharpsql_memory_vm_stack_ephemeral_v1]", ephemeral, StringComparison.Ordinal);
         Assert.Contains("[SharpSql].[__sharpsql_memory_vm_slots_ephemeral_v1]", ephemeral, StringComparison.Ordinal);
+        Assert.Contains("[SharpSql].[__sharpsql_memory_heap_objects_ephemeral_v1]", ephemeral, StringComparison.Ordinal);
         Assert.DoesNotContain("_durable_v1]", ephemeral, StringComparison.Ordinal);
         Assert.Contains("[SharpSql].[__sharpsql_memory_vm_stack_durable_v1]", durable, StringComparison.Ordinal);
         Assert.Contains("[SharpSql].[__sharpsql_memory_vm_slots_durable_v1]", durable, StringComparison.Ordinal);
+        Assert.Contains("[SharpSql].[__sharpsql_memory_heap_objects_durable_v1]", durable, StringComparison.Ordinal);
         Assert.DoesNotContain("_ephemeral_v1]", durable, StringComparison.Ordinal);
     }
 
@@ -113,7 +120,7 @@ public sealed class MemoryOptimizedRuntimeTests
 
         var sql = SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(runtime);
 
-        Assert.Equal(2, Count(sql, $"WITH (MEMORY_OPTIMIZED = ON, DURABILITY = {expectedDurability})"));
+        Assert.Equal(3, Count(sql, $"WITH (MEMORY_OPTIMIZED = ON, DURABILITY = {expectedDurability})"));
     }
 
     [Fact]
@@ -199,7 +206,7 @@ public sealed class MemoryOptimizedRuntimeTests
     }
 
     [Fact]
-    public void MemoryOptimizedModeLeavesManagedHeapTemporaryForNow()
+    public void MemoryOptimizedModeUsesSharedObjectRegistryAndTemporaryCollectionPayloads()
     {
         const string source = """
             var values = new List<int>();
@@ -212,7 +219,12 @@ public sealed class MemoryOptimizedRuntimeTests
             new TranspileOptions { RuntimeStorage = RuntimeStorageKind.MemoryOptimized });
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
-        Assert.Contains("CREATE TABLE #__sharpsql_objects", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("[SharpSql].[__sharpsql_memory_heap_objects_ephemeral_v1]", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("INSERT INTO [SharpSql].[__sharpsql_memory_heap_objects_ephemeral_v1] (__execution_id, __type_id, __count)", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE __execution_id = @__sharpsql_execution_id AND __id", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE #__sharpsql_indexed_items", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("DELETE FROM [SharpSql].[__sharpsql_memory_heap_objects_ephemeral_v1] WHERE __execution_id = @__sharpsql_execution_id", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("CREATE TABLE #__sharpsql_objects", result.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SharpSql durable managed heap", result.Sql, StringComparison.Ordinal);
     }
 

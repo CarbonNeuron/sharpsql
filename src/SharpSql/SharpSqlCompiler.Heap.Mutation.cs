@@ -39,13 +39,13 @@ public sealed partial class SharpSqlCompiler
                 if (IsListType(receiverType.Name))
                 {
                     _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {receiver};");
-                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapExecutionFilter()}__id = {receiver};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                     return true;
                 }
                 if (IsDictionaryType(receiverType.Name))
                 {
                     _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver};");
-                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapExecutionFilter()}__id = {receiver};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                     return true;
                 }
             }
@@ -58,7 +58,7 @@ public sealed partial class SharpSqlCompiler
                     _sql.Line($"IF {index} < 0 OR {index} >= {SequenceCountSql(receiver)} THROW 51002, 'List index was out of range.', 1;");
                     _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {receiver} AND __index = {index};");
                     _sql.Line($"UPDATE {HeapIndexedItems} SET __index = __index - 1 WHERE {HeapExecutionFilter()}__owner_id = {receiver} AND __index > {index};");
-                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE {HeapExecutionFilter()}__id = {receiver};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                 });
                 return true;
             }
@@ -74,7 +74,7 @@ public sealed partial class SharpSqlCompiler
                     _sql.Line("IF @@ROWCOUNT > 0");
                     _sql.Line("BEGIN");
                     using (_sql.Indent())
-                        _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE {HeapExecutionFilter()}__id = {receiver};");
+                        _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                     _sql.Line("END;");
                 });
                 return true;
@@ -153,13 +153,13 @@ public sealed partial class SharpSqlCompiler
                 if (IsListType(receiverType.Name))
                 {
                     _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {receiver};");
-                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapExecutionFilter()}__id = {receiver};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                     return true;
                 }
                 if (IsDictionaryType(receiverType.Name))
                 {
                     _sql.Line($"DELETE FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {receiver};");
-                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapExecutionFilter()}__id = {receiver};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                     return true;
                 }
             }
@@ -172,7 +172,7 @@ public sealed partial class SharpSqlCompiler
                     _sql.Line($"IF {index} < 0 OR {index} >= {SequenceCountSql(receiver)} THROW 51002, 'List index was out of range.', 1;");
                     _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {receiver} AND __index = {index};");
                     _sql.Line($"UPDATE {HeapIndexedItems} SET __index = __index - 1 WHERE {HeapExecutionFilter()}__owner_id = {receiver} AND __index > {index};");
-                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE {HeapExecutionFilter()}__id = {receiver};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                 });
                 return true;
             }
@@ -188,7 +188,7 @@ public sealed partial class SharpSqlCompiler
                     _sql.Line("IF @@ROWCOUNT > 0");
                     _sql.Line("BEGIN");
                     using (_sql.Indent())
-                        _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE {HeapExecutionFilter()}__id = {receiver};");
+                        _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                     _sql.Line("END;");
                 });
                 return true;
@@ -358,9 +358,9 @@ public sealed partial class SharpSqlCompiler
         EmitVmExpression(arguments[0].Expression, scope, context, value =>
         {
             var list = EmitScalar(receiver, scope);
-            var index = $"(SELECT __count FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {list})";
+            var index = $"(SELECT __count FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {list})";
             InsertIndexedItem(list, index, elementType, value);
-            _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapExecutionFilter()}__id = {list};");
+            _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapObjectExecutionFilter()}__id = {list};");
         });
     }
 
@@ -381,9 +381,9 @@ public sealed partial class SharpSqlCompiler
         EmitVmExpression(arguments[0], scope, context, value =>
         {
             var list = EmitScalar(receiver, scope);
-            var index = $"(SELECT __count FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {list})";
+            var index = $"(SELECT __count FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {list})";
             InsertIndexedItem(list, index, elementType, value);
-            _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapExecutionFilter()}__id = {list};");
+            _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapObjectExecutionFilter()}__id = {list};");
         });
     }
 
@@ -480,7 +480,7 @@ public sealed partial class SharpSqlCompiler
                 var savedKey = ReadVmTemporary(keyStore);
                 _sql.Line($"IF EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {dictionary} AND {DictionaryKeyPredicate(types[0], savedKey)}) THROW 51001, 'Duplicate dictionary key.', 1;");
                 InsertDictionaryEntry(dictionary, types[0], savedKey, types[1], value);
-                _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapExecutionFilter()}__id = {dictionary};");
+                _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapObjectExecutionFilter()}__id = {dictionary};");
             });
         });
     }
@@ -509,7 +509,7 @@ public sealed partial class SharpSqlCompiler
                 var savedKey = ReadVmTemporary(keyStore);
                 _sql.Line($"IF EXISTS (SELECT 1 FROM {HeapDictionaryEntries} WHERE {HeapExecutionFilter()}__dictionary_id = {dictionary} AND {DictionaryKeyPredicate(types[0], savedKey)}) THROW 51001, 'Duplicate dictionary key.', 1;");
                 InsertDictionaryEntry(dictionary, types[0], savedKey, types[1], value);
-                _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapExecutionFilter()}__id = {dictionary};");
+                _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapObjectExecutionFilter()}__id = {dictionary};");
             });
         });
     }
@@ -538,7 +538,7 @@ public sealed partial class SharpSqlCompiler
                 using (_sql.Indent())
                 {
                     InsertDictionaryEntry(dictionary, types[0], savedKey, types[1], value);
-                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapExecutionFilter()}__id = {dictionary};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapObjectExecutionFilter()}__id = {dictionary};");
                 }
                 _sql.Line("END;");
             });
@@ -568,7 +568,7 @@ public sealed partial class SharpSqlCompiler
                 using (_sql.Indent())
                 {
                     InsertDictionaryEntry(dictionary, types[0], savedKey, types[1], value);
-                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapExecutionFilter()}__id = {dictionary};");
+                    _sql.Line($"UPDATE {HeapObjects} SET __count = __count + 1 WHERE {HeapObjectExecutionFilter()}__id = {dictionary};");
                 }
                 _sql.Line("END;");
             });
@@ -591,4 +591,3 @@ public sealed partial class SharpSqlCompiler
     }
 
 }
-

@@ -156,6 +156,41 @@ public sealed class MemoryOptimizedLegacyIntegrationTests(SqlServerFixture sqlSe
         });
     }
 
+    [Fact]
+    public async Task ConcurrentExecutionsKeepHeapObjectHeadersIsolatedAndReclaimThem()
+    {
+        const string source = """
+            var values = new List<int> { 2, 3, 5 };
+            values.Add(7);
+            Console.WriteLine(values.Count);
+            Console.WriteLine(values[0] + values[3]);
+            """;
+        var sql = Compile(source, RuntimeStorageKind.MemoryOptimized);
+        var connectionString = await sqlServer.GetMemoryOptimizedConnectionStringAsync(
+            TestContext.Current.CancellationToken);
+
+        var executions = Enumerable.Range(0, 8).Select(async _ =>
+        {
+            await using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            return await ExecuteAsync(connection, sql);
+        });
+        var results = await Task.WhenAll(executions);
+
+        Assert.All(results, result =>
+        {
+            Assert.True(result.Success, result.ErrorMessage);
+            Assert.Equal(["4", "9"], result.Messages);
+        });
+
+        await using var verification = new SqlConnection(connectionString);
+        await verification.OpenAsync(TestContext.Current.CancellationToken);
+        await using var command = verification.CreateCommand();
+        command.CommandText = "SELECT COUNT_BIG(*) FROM [SharpSql].[__sharpsql_memory_heap_objects_ephemeral_v1];";
+        var remaining = Convert.ToInt64(await command.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(0, remaining);
+    }
+
     private static string Compile(string source, RuntimeStorageKind runtimeStorage)
     {
         var result = new SharpSqlCompiler().Transpile(

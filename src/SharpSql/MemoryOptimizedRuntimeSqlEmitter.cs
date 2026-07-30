@@ -11,6 +11,9 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
     internal static string VmSlotsTableName(RuntimeDurabilityKind durability) =>
         $"__sharpsql_memory_vm_slots_{DurabilityName(durability)}_v1";
 
+    internal static string HeapObjectsTableName(RuntimeDurabilityKind durability) =>
+        $"__sharpsql_memory_heap_objects_{DurabilityName(durability)}_v1";
+
     internal static string Emit(string schemaName = "SharpSql")
     {
         schemaName = SqlIdentifier.Validate(schemaName, nameof(schemaName));
@@ -103,6 +106,8 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
         RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, VmStackTable(durability), durability);
         sql.Line();
         RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, VmSlotsTable(durability), durability);
+        sql.Line();
+        RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, HeapObjectsTable(durability), durability);
         return sql.ToString();
     }
 
@@ -131,6 +136,20 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
         ],
         $"PK_sharpsql_memory_vm_slots_{DurabilityName(durability)}_v1",
         "[__execution_id], [__frame_id], [__slot_id]",
+        524_288);
+
+    private static RuntimeTableDefinition HeapObjectsTable(RuntimeDurabilityKind durability) => new(
+        HeapObjectsTableName(durability),
+        [
+            "[__execution_id] UNIQUEIDENTIFIER NOT NULL",
+            "[__id] INT IDENTITY(1,1) NOT NULL",
+            "[__type_id] INT NOT NULL",
+            "[__count] INT NULL",
+            "[__state0] INT NULL",
+            "[__state1] INT NULL"
+        ],
+        $"PK_sharpsql_memory_heap_objects_{DurabilityName(durability)}_v1",
+        "[__execution_id], [__id]",
         524_288);
 
     private static string DurabilityName(RuntimeDurabilityKind durability) => durability switch

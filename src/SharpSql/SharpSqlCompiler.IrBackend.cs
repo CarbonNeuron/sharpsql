@@ -346,7 +346,7 @@ public sealed partial class SharpSqlCompiler
         if ((IsListType(receiverType.Name) && member.MemberName == "Count") ||
             (IsArrayType(receiverType.Name) && member.MemberName == "Length") ||
             (IsDictionaryType(receiverType.Name) && member.MemberName == "Count"))
-            return SqlScalarExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE {HeapExecutionFilter()}__id = {receiver})");
+            return SqlScalarExpression.Primary($"(SELECT __count FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {receiver})");
         if (TryResolveHeapField(
                 receiverType,
                 member.MemberName,
