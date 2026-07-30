@@ -160,6 +160,7 @@ public sealed partial class SharpSqlCompiler
         {
             HeapTypes = heapTypeDefinitions
         };
+        ValidateNativeKernelOptions(_boundProgram.EntryPoint.Source);
         PrepareHeapRuntime(_boundProgram);
         _methodGraph = MethodGraph.Create(_boundProgram.Methods, _boundProgram.EntryPoint);
         PrepareVmMethods();
@@ -199,7 +200,7 @@ public sealed partial class SharpSqlCompiler
         EmitHeapEpilogue();
         EmitDurableExecutionBodyEpilogue();
 
-        return new TranspileResult(_sql.ToString(), _diagnostics.AsReadOnly());
+        return new TranspileResult(CompleteSql(), _diagnostics.AsReadOnly());
     }
 
     internal TranspileResult Transpile(IrProgram program, TranspileOptions? options = null)
@@ -212,6 +213,7 @@ public sealed partial class SharpSqlCompiler
             _methods.TryAdd(method, out _);
         AnalyzeMethodBehaviors();
         _boundProgram = program with { Methods = _methods.Values.ToArray() };
+        ValidateNativeKernelOptions(_boundProgram.EntryPoint.Source);
         PrepareHeapRuntime(_boundProgram);
         _methodGraph = MethodGraph.Create(_boundProgram.Methods, _boundProgram.EntryPoint);
         PrepareVmMethods();
@@ -235,7 +237,7 @@ public sealed partial class SharpSqlCompiler
         EmitDurableExecutionCleanupLabel();
         EmitHeapEpilogue();
         EmitDurableExecutionBodyEpilogue();
-        return new TranspileResult(_sql.ToString(), _diagnostics.AsReadOnly());
+        return new TranspileResult(CompleteSql(), _diagnostics.AsReadOnly());
     }
 
     private void AddParseDiagnostics(SyntaxTree tree)
@@ -1192,6 +1194,9 @@ public sealed partial class SharpSqlCompiler
         IrType targetType,
         bool declareTarget)
     {
+        if (TryEmitNativeKernelCall(method, arguments, callerScope, targetSql, targetType, declareTarget))
+            return;
+
         if (!CanInline(method, arguments.Count))
             return;
 

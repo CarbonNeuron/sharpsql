@@ -67,6 +67,10 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [DefaultValue(RuntimeStorageKind.Ephemeral)]
         public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;
 
+        [CommandOption("--native-kernels")]
+        [Description("Extract supported pure scalar methods into natively compiled procedures.")]
+        public bool EnableNativeKernels { get; init; }
+
         [CommandOption("-o|--output <OUTPUT>")]
         [Description("Write the generated program SQL to a file before reporting the result.")]
         public string? OutputPath { get; init; }
@@ -170,7 +174,8 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             settings.Debug,
             settings.Profile,
             artifactPaths.ProgramPath,
-            artifactPaths.InstallerPath);
+            artifactPaths.InstallerPath,
+            settings.EnableNativeKernels);
 
         SqlRunResult result;
         try

@@ -45,7 +45,7 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
             context.ReportDiagnostic(Diagnostic.Create(
                 Descriptors[InternalErrorId],
                 Location.None,
-                "SharpSqlRuntimeStorage must be Ephemeral, Durable, or ServiceBroker."));
+                "SharpSqlRuntimeStorage must be Ephemeral, MemoryOptimized, Durable, or ServiceBroker."));
             return;
         }
 
@@ -156,7 +156,7 @@ public sealed class SharpSqlCompatibilityAnalyzer : DiagnosticAnalyzer
             "SS5001", "SS6001", "SS6003", "SS6004", "SS6005", "SS6006",
             "SS6101", "SS6102", "SS6201", "SS6202", "SS6301", "SS6302",
             "SS6401", "SS6402", "SS6403", "SS6410", "SS6411",
-            "SS7001", "SS7002", "SS7003", "SS7004", "SS7005", InternalErrorId
+            "SS7001", "SS7002", "SS7003", "SS7004", "SS7005", "SS8201", InternalErrorId
         ];
 
         return ids.ToImmutableDictionary(

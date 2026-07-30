@@ -21,7 +21,8 @@ public sealed record SqlRunRequest(
     bool Debug = false,
     bool Profile = false,
     string? OutputPath = null,
-    string? InstallerOutputPath = null)
+    string? InstallerOutputPath = null,
+    bool EnableNativeKernels = false)
 {
     public bool IsProject => Sql is null;
 }
@@ -99,7 +100,8 @@ public sealed class SqlRunService : ISqlRunService
                     CompilerOptions = new TranspileOptions
                     {
                         RuntimeStorage = request.RuntimeStorage,
-                        EmitRuntimeDiagnostics = request.Debug
+                        EmitRuntimeDiagnostics = request.Debug,
+                        EnableNativeKernels = request.EnableNativeKernels
                     }
                 },
                 cancellationToken);

@@ -415,6 +415,12 @@ typed binary round-trip because In-Memory OLTP does not support `SQL_VARIANT`.
 See the [memory-optimized runtime guide](docs/memory-optimized-runtime.md) for
 provisioning, measurements, and the current storage boundary.
 
+Supported pure scalar loop methods can additionally be extracted into natively
+compiled stored-procedure kernels with `--native-kernels`. The interpreted legacy
+batch passes live values as scalar arguments and receives the result through an
+`OUTPUT` parameter. See the [native kernel prototype](docs/native-kernels.md) for
+the measured call-boundary result and current extraction limits.
+
 ## Managed objects and collections
 
 References are represented by `INT` object IDs. Each reachable class or record receives a typed local temporary table. A shared object header holds identity, collection counts, and small intrinsic metadata; arrays, lists, and `Random` state reuse one indexed runtime table. Dictionaries add an entry table only when needed. Copying a class variable copies its ID, so aliases observe the same mutations.

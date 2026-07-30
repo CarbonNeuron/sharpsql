@@ -209,6 +209,36 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task TranspileEnablesNativeKernelExtraction()
+    {
+        var tester = CreateTester("""
+            long Sum(int count)
+            {
+                long result = 0;
+                int index = 0;
+                while (index < count)
+                {
+                    result += index;
+                    index++;
+                }
+                return result;
+            }
+
+            long output = Sum(100);
+            Console.WriteLine(output);
+            """);
+
+        var result = await tester.RunAsync(
+            ["--runtime-storage", "MemoryOptimized", "--native-kernels"],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("WITH NATIVE_COMPILATION, SCHEMABINDING", result.Output);
+        var settings = Assert.IsType<TranspileCommand.Settings>(result.Settings);
+        Assert.True(settings.EnableNativeKernels);
+    }
+
+    [Fact]
     public async Task RendersGeneratedSpectreHelp()
     {
         var tester = CreateRoutedTester();

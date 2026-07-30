@@ -39,6 +39,10 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         [DefaultValue(RuntimeStorageKind.Ephemeral)]
         public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;
 
+        [CommandOption("--native-kernels")]
+        [Description("Extract supported pure scalar methods into natively compiled procedures.")]
+        public bool EnableNativeKernels { get; init; }
+
         public override ValidationResult Validate()
         {
             var isProject = InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
@@ -72,7 +76,11 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         var environment = context.Data as CliExecutionEnvironment ??
                           new CliExecutionEnvironment(AnsiConsole.Console, Console.In);
         var isProject = settings.InputPath?.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) == true;
-        var compilerOptions = new TranspileOptions { RuntimeStorage = settings.RuntimeStorage };
+        var compilerOptions = new TranspileOptions
+        {
+            RuntimeStorage = settings.RuntimeStorage,
+            EnableNativeKernels = settings.EnableNativeKernels
+        };
 
         TranspileResult result;
         if (isProject)

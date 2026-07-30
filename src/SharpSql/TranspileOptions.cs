@@ -29,6 +29,12 @@ public sealed record TranspileOptions
     public bool EmitRuntimeDiagnostics { get; init; }
 
     /// <summary>
+    /// Extract supported pure scalar methods into natively compiled stored-procedure kernels.
+    /// This experimental optimization requires <see cref="RuntimeStorageKind.MemoryOptimized"/>.
+    /// </summary>
+    public bool EnableNativeKernels { get; init; }
+
+    /// <summary>
     /// Gets the runtime storage and execution strategy. The default preserves the ephemeral SQL contract.
     /// </summary>
     public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;
