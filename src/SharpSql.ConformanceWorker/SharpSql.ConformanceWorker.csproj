@@ -2,6 +2,9 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <UseAppHost>false</UseAppHost>
+    <!-- The tool launches this portable worker with `dotnet`; it must not inherit
+         the platform tool package's RuntimeIdentifier through project references. -->
+    <IsRidAgnostic>true</IsRidAgnostic>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
