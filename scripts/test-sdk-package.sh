@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+validation_stage="startup"
+report_failure() {
+    local exit_code="$?"
+    printf 'SharpSql SDK package validation failed during %s at line %s: %s (exit %s).\n' \
+        "$validation_stage" "${BASH_LINENO[0]}" "$BASH_COMMAND" "$exit_code" >&2
+    exit "$exit_code"
+}
+stage() {
+    validation_stage="$1"
+    printf 'SharpSql SDK package validation: %s\n' "$validation_stage"
+}
+trap report_failure ERR
+
 if [[ "$#" -lt 2 || "$#" -gt 3 ]]; then
     printf 'Usage: %s PACKAGE_DIRECTORY VERSION [SHARPSQL_TOOL]\n' "$0" >&2
     exit 2
@@ -36,6 +49,7 @@ cp -R "$repo_root/tests/fixtures/SdkConsumer/invalid" "$work_dir/invalid"
 cp -R "$repo_root/tests/fixtures/SdkConsumer/async" "$work_dir/async"
 cp -R "$repo_root/tests/fixtures/SdkConsumer/memory" "$work_dir/memory"
 
+stage "default SDK build output"
 dotnet new console --name PackageDefault --output "$work_dir/package-default" --no-restore >/dev/null
 dotnet add "$work_dir/package-default/PackageDefault.csproj" package SharpSql.Sdk \
     --version "$version" \
@@ -51,6 +65,7 @@ if [[ ! -s "$work_dir/package-default/obj/Release/net10.0/sharpsql/PackageDefaul
 fi
 
 if [[ -n "$tool_path" ]]; then
+    stage "init command and IDE profile"
     dotnet new console --name InitDefault --output "$work_dir/default" --no-restore >/dev/null
     "$tool_path" init "$work_dir/default/InitDefault.csproj" \
         --sdk-version "$version" \
@@ -75,6 +90,7 @@ if [[ -n "$tool_path" ]]; then
         printf 'The SQL Server IDE launch profile is not project-relative.\n' >&2
         exit 1
     fi
+    stage "initialized project SQL execution"
     default_run_output="$(cd "$work_dir/default" && dotnet msbuild "InitDefault.csproj" \
         -t:SharpSqlRun \
         -p:Configuration=Release \
@@ -91,6 +107,7 @@ if [[ -n "$tool_path" ]]; then
     fi
 fi
 
+stage "fixture initialization and restore"
 for project in \
     "$work_dir/valid/SdkConsumer.csproj" \
     "$work_dir/invalid/SdkConsumer.csproj" \
@@ -107,6 +124,7 @@ for project in \
     dotnet restore "$project" --source "$package_dir" >/dev/null
 done
 
+stage "SDK fixture build and lowering"
 dotnet build "$work_dir/valid/SdkConsumer.csproj" \
     --configuration Release \
     --no-restore >/dev/null
@@ -170,6 +188,7 @@ if [[ "$run_output" != *"answer=42"* ]] || [[ "$run_output" != *"SharpSql: SQL e
     exit 1
 fi
 
+stage "memory-optimized container preparation"
 memory_database="SharpSqlMemorySdk${RANDOM}${RANDOM}"
 memory_prime_output="$(dotnet msbuild "$work_dir/memory/SdkConsumer.csproj" \
     -t:SharpSqlRun \
@@ -217,6 +236,7 @@ docker exec "$memory_container_id" /bin/bash -c '
     "$sqlcmd_path" -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -b -Q "$1"
 ' _ "$memory_filegroup_sql" >/dev/null
 
+stage "memory-optimized provisioning and execution"
 memory_run_output="$(dotnet msbuild "$work_dir/memory/SdkConsumer.csproj" \
     -t:SharpSqlRun \
     -p:Configuration=Release \
@@ -234,6 +254,7 @@ if [[ "$memory_run_output" != *"memory-answer=42"* ]] || \
 fi
 memory_container_id=""
 
+stage "Service Broker provisioning and execution"
 async_run_output="$(dotnet msbuild "$work_dir/async/SdkConsumer.csproj" \
     -t:SharpSqlRun \
     -p:Configuration=Release \
@@ -248,6 +269,7 @@ if [[ "$async_run_output" != *"done"* ]] || \
     exit 1
 fi
 
+stage "analyzer diagnostics"
 if invalid_output="$(dotnet build "$work_dir/invalid/SdkConsumer.csproj" --no-restore 2>&1)"; then
     printf 'The analyzer accepted an unsupported multidimensional array.\n' >&2
     exit 1
