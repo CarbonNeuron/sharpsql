@@ -193,12 +193,17 @@ public static class Program
     private static TranspileOptions CompilerOptions(BuildArguments parsed)
     {
         if (parsed.CompatibilityStorage is { } compatibilityStorage)
-            return new TranspileOptions { RuntimeStorage = compatibilityStorage };
+            return new TranspileOptions
+            {
+                RuntimeStorage = compatibilityStorage,
+                ManagedFallback = parsed.ManagedFallback
+            };
         return new TranspileOptions
         {
             Execution = parsed.Execution,
             Durability = parsed.Durability,
-            UseMemoryOptimizedTables = parsed.UseMemoryOptimizedTables
+            UseMemoryOptimizedTables = parsed.UseMemoryOptimizedTables,
+            ManagedFallback = parsed.ManagedFallback
         };
     }
 
@@ -270,6 +275,7 @@ public static class Program
         RuntimeDurabilityKind Durability,
         bool UseMemoryOptimizedTables,
         RuntimeStorageKind? CompatibilityStorage,
+        ManagedFallbackKind ManagedFallback,
         string? ConnectionName,
         string? ConnectionStringEnvironmentVariable,
         bool ForceContainer,
@@ -349,6 +355,12 @@ public static class Program
                 error = "--memory-optimized must be true or false.";
                 return false;
             }
+            if (!TryEnum(Value(values, "managed-fallback") ?? nameof(ManagedFallbackKind.Auto), out ManagedFallbackKind managedFallback))
+            {
+                parsed = null!;
+                error = "--managed-fallback must be Auto, Legacy, or Bytecode.";
+                return false;
+            }
 
             parsed = new BuildArguments(
                 operation,
@@ -362,6 +374,7 @@ public static class Program
                 durability,
                 useMemoryOptimizedTables,
                 runtimeStorage,
+                managedFallback,
                 Value(values, "connection-name"),
                 Value(values, "connection-string-environment"),
                 BoolValue(values, "force-container"),

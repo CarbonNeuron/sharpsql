@@ -338,6 +338,7 @@ public sealed partial class SharpSqlCompiler
                 IrConstantExpression { Value: null } => "NULL",
                 IrConstantExpression { Value: bool value } => value ? "CAST(1 AS BIT)" : "CAST(0 AS BIT)",
                 IrConstantExpression { Value: IFormattable value } => value.ToString(null, CultureInfo.InvariantCulture),
+                IrDefaultValueExpression defaultValue => DefaultSql(defaultValue.Type),
                 IrVariableExpression variable when symbols.TryGetValue(variable.Symbol.Id, out var name) => name,
                 IrConversionExpression conversion when Render(conversion.Operand, symbols) is { } operand =>
                     $"CONVERT({conversion.TargetType.SqlType()}, {operand})",

@@ -202,7 +202,7 @@ public sealed class AsyncStateMachinePlanTests
             new TranspileOptions { RuntimeStorage = RuntimeStorageKind.ServiceBroker });
 
         var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == "SS7005");
-        Assert.Contains("stack-machine", diagnostic.Message);
+        Assert.Contains("managed fallback", diagnostic.Message);
         Assert.DoesNotContain("CREATE OR ALTER PROCEDURE [SharpSql].[Program_", result.Sql);
     }
 

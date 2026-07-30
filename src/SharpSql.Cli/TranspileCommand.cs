@@ -58,6 +58,11 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         [Description("Extract supported pure scalar methods into natively compiled procedures.")]
         public bool EnableNativeKernels { get; init; }
 
+        [CommandOption("--managed-fallback <MODE>")]
+        [Description("Managed fallback: Auto (default), Legacy, or Bytecode.")]
+        [DefaultValue(ManagedFallbackKind.Auto)]
+        public ManagedFallbackKind ManagedFallback { get; init; } = ManagedFallbackKind.Auto;
+
         /// <inheritdoc />
         public override ValidationResult Validate()
         {
@@ -141,7 +146,8 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
             Execution = requestedRuntime.Execution,
             Durability = requestedRuntime.Durability,
             UseMemoryOptimizedTables = requestedRuntime.UseMemoryOptimizedTables,
-            EnableNativeKernels = settings.EnableNativeKernels
+            EnableNativeKernels = settings.EnableNativeKernels,
+            ManagedFallback = settings.ManagedFallback
         };
 
         TranspileResult result;

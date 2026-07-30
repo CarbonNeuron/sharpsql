@@ -86,6 +86,11 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         [Description("Extract supported pure scalar methods into natively compiled procedures.")]
         public bool EnableNativeKernels { get; init; }
 
+        [CommandOption("--managed-fallback <MODE>")]
+        [Description("Managed fallback: Auto (default), Legacy, or Bytecode.")]
+        [DefaultValue(ManagedFallbackKind.Auto)]
+        public ManagedFallbackKind ManagedFallback { get; init; } = ManagedFallbackKind.Auto;
+
         [CommandOption("-o|--output <PATH>")]
         [Description("Write the generated program SQL to a file before reporting the result.")]
         public string? OutputPath { get; init; }
@@ -274,7 +279,8 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
             settings.Profile,
             settings.OutputPath,
             settings.InstallerOutputPath,
-            settings.EnableNativeKernels);
+            settings.EnableNativeKernels,
+            settings.ManagedFallback);
     }
 
     private static void RenderArtifactPaths(

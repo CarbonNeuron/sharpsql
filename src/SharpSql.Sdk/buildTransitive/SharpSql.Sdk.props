@@ -4,6 +4,7 @@
     <SharpSqlEnableAnalyzer Condition="'$(SharpSqlEnableAnalyzer)' == ''">true</SharpSqlEnableAnalyzer>
     <SharpSqlGenerateOnBuild Condition="'$(SharpSqlGenerateOnBuild)' == ''">true</SharpSqlGenerateOnBuild>
     <SharpSqlExecution Condition="'$(SharpSqlExecution)' == ''">Auto</SharpSqlExecution>
+    <SharpSqlManagedFallback Condition="'$(SharpSqlManagedFallback)' == ''">Auto</SharpSqlManagedFallback>
     <SharpSqlDurability Condition="'$(SharpSqlDurability)' == ''">Ephemeral</SharpSqlDurability>
     <SharpSqlMemoryOptimized Condition="'$(SharpSqlMemoryOptimized)' == ''">false</SharpSqlMemoryOptimized>
     <SharpSqlOutputLocation Condition="'$(SharpSqlOutputLocation)' == ''">Intermediate</SharpSqlOutputLocation>
@@ -18,6 +19,7 @@
     <CompilerVisibleProperty Include="SharpSqlEnableAnalyzer" />
     <CompilerVisibleProperty Include="SharpSqlEntryPoint" />
     <CompilerVisibleProperty Include="SharpSqlExecution" />
+    <CompilerVisibleProperty Include="SharpSqlManagedFallback" />
     <CompilerVisibleProperty Include="SharpSqlDurability" />
     <CompilerVisibleProperty Include="SharpSqlMemoryOptimized" />
     <CompilerVisibleProperty Include="SharpSqlRuntimeStorage" />

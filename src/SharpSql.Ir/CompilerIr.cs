@@ -97,6 +97,8 @@ internal enum IrBinaryOperator
     BitwiseAnd,
     BitwiseOr,
     ExclusiveOr,
+    LeftShift,
+    RightShift,
     LogicalAnd,
     LogicalOr,
     Equal,
@@ -143,6 +145,10 @@ internal sealed record IrConstantExpression(
     ExpressionFacts Facts,
     object? Value,
     string SourceText) : IrExpression(Source, Facts);
+
+internal sealed record IrDefaultValueExpression(
+    IrSource Source,
+    ExpressionFacts Facts) : IrExpression(Source, Facts);
 
 internal sealed record IrVariableExpression(
     IrSource Source,
@@ -328,4 +334,5 @@ internal sealed record IrProgram(
     IReadOnlyList<IrComment> FileComments)
 {
     public IReadOnlyList<IrHeapTypeDefinition> HeapTypes { get; init; } = [];
+    public IrType EntryPointReturnType { get; init; } = IrType.Void;
 }

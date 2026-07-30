@@ -206,6 +206,14 @@ internal static class CoreIrLowerer
                     _current.Instructions.Add(new CoreConstantInstruction(value, constant.Type, constant.Value));
                     return true;
 
+                case IrDefaultValueExpression defaultValue:
+                    value = AllocateValue();
+                    _current.Instructions.Add(new CoreConstantInstruction(
+                        value,
+                        defaultValue.Type,
+                        DefaultCoreValue(defaultValue.Type)));
+                    return true;
+
                 case IrVariableExpression variable when _symbols.TryGetValue(variable.Symbol.Id, out value):
                     return true;
 
@@ -246,10 +254,61 @@ internal static class CoreIrLowerer
 
                 case IrAssignmentExpression assignment:
                     return LowerAssignment(assignment, out value);
+
+                case IrConditionalExpression conditional:
+                    return LowerConditional(conditional, out value);
             }
 
             value = default;
             return Fail($"Expression '{expression.GetType().Name}' is not supported by Core IR lowering.");
+        }
+
+        private bool LowerConditional(IrConditionalExpression expression, out CoreValueId value)
+        {
+            value = default;
+            if (!LowerExpression(expression.Condition, out var condition))
+                return false;
+
+            value = AllocateValue();
+            _locals.Add(new CoreLocal(value, expression.Type));
+            var predecessor = _current;
+            var whenTrue = CreateBlock();
+            var whenFalse = CreateBlock();
+            var continuation = CreateBlock();
+            predecessor.Terminator = new CoreBranch(condition, whenTrue.Id, whenFalse.Id);
+
+            _current = whenTrue;
+            if (!LowerExpression(expression.WhenTrue, out var trueValue))
+                return false;
+            _current.Instructions.Add(new CoreMoveInstruction(value, expression.Type, trueValue));
+            _current.Terminator = new CoreJump(continuation.Id);
+
+            _current = whenFalse;
+            if (!LowerExpression(expression.WhenFalse, out var falseValue))
+                return false;
+            _current.Instructions.Add(new CoreMoveInstruction(value, expression.Type, falseValue));
+            _current.Terminator = new CoreJump(continuation.Id);
+
+            _current = continuation;
+            return true;
+        }
+
+        private static object? DefaultCoreValue(IrType type)
+        {
+            if (type.IsReference || type.IsString)
+                return null;
+            if (type.IsBoolean)
+                return false;
+            return type.Name switch
+            {
+                "char" => '\0',
+                "float" => 0f,
+                "double" => 0d,
+                "decimal" => 0m,
+                "long" or "uint" => 0L,
+                "ulong" => 0UL,
+                _ => 0
+            };
         }
 
         private bool LowerAssignment(IrAssignmentExpression assignment, out CoreValueId value)

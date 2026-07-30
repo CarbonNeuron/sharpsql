@@ -1,5 +1,18 @@
 namespace SharpSql;
 
+/// <summary>Selects the managed-control-flow fallback used after relational and inline lowering.</summary>
+public enum ManagedFallbackKind
+{
+    /// <summary>Use compact register bytecode when it is supported and the legacy VM otherwise.</summary>
+    Auto = 0,
+
+    /// <summary>Always use the mature label-based VM for managed fallback methods.</summary>
+    Legacy = 1,
+
+    /// <summary>Require every managed fallback method to lower to compact register bytecode.</summary>
+    Bytecode = 2
+}
+
 /// <summary>Controls how a SharpSql program is executed.</summary>
 public enum RuntimeExecutionKind
 {
@@ -62,6 +75,9 @@ public sealed record TranspileOptions
     private RuntimeDurabilityKind? _durability;
     private bool? _useMemoryOptimizedTables;
     private RuntimeStorageKind? _runtimeStorage;
+
+    /// <summary>Gets the managed fallback selection. Relational SQL and inlining are unaffected.</summary>
+    public ManagedFallbackKind ManagedFallback { get; init; } = ManagedFallbackKind.Auto;
 
     /// <summary>Gets the maximum method statement count eligible for inline expansion.</summary>
     public int MaxInlineStatements { get; init; } = 40;

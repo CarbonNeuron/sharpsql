@@ -103,6 +103,15 @@ public sealed partial class SharpSqlCompiler
             (InferType(binary.Left, scope, substitutions).IsString || InferType(binary.Right, scope, substitutions).IsString))
             return SqlScalarExpression.Primary(
                 $"CONCAT({EmitScalar(binary.Left, scope, substitutions)}, {EmitScalar(binary.Right, scope, substitutions)})");
+        if (binary.Kind() is SyntaxKind.LeftShiftExpression or SyntaxKind.RightShiftExpression)
+        {
+            var type = InferType(binary, scope, substitutions);
+            var shiftLeft = EmitScalar(binary.Left, scope, substitutions);
+            var shiftRight = EmitScalar(binary.Right, scope, substitutions);
+            return SqlScalarExpression.Primary(binary.IsKind(SyntaxKind.LeftShiftExpression)
+                ? LeftShiftSql(type, shiftLeft, shiftRight)
+                : RightShiftSql(type, shiftLeft, shiftRight));
+        }
 
         var op = SqlOperator(binary.Kind());
         if (op.Length == 0)
@@ -586,6 +595,8 @@ public sealed partial class SharpSqlCompiler
         SyntaxKind.BitwiseAndExpression => "&",
         SyntaxKind.BitwiseOrExpression => "|",
         SyntaxKind.ExclusiveOrExpression => "^",
+        SyntaxKind.LeftShiftExpression => "<<",
+        SyntaxKind.RightShiftExpression => ">>",
         SyntaxKind.EqualsExpression => "=",
         SyntaxKind.NotEqualsExpression => "<>",
         SyntaxKind.LessThanExpression => "<",
@@ -599,6 +610,7 @@ public sealed partial class SharpSqlCompiler
     {
         SyntaxKind.MultiplyExpression or SyntaxKind.DivideExpression or SyntaxKind.ModuloExpression =>
             PrecedenceMultiplicative,
+        SyntaxKind.LeftShiftExpression or SyntaxKind.RightShiftExpression => PrecedenceShift,
         _ => PrecedenceAdditive
     };
 

@@ -167,6 +167,17 @@ public sealed partial class SharpSqlCompiler
         expression = StripParentheses(expression);
         var source = ToIrSource(expression);
         var facts = AnalyzeExpression(expression, scope);
+        if (expression is DefaultExpressionSyntax || expression.IsKind(SyntaxKind.DefaultLiteralExpression))
+            return new IrDefaultValueExpression(source, facts);
+        if (facts.HasConstantValue && expression is
+            IdentifierNameSyntax or MemberAccessExpressionSyntax or InvocationExpressionSyntax)
+        {
+            return new IrConstantExpression(
+                source,
+                facts,
+                facts.ConstantValue,
+                expression.ToString());
+        }
         return expression switch
         {
             LiteralExpressionSyntax literal => new IrConstantExpression(
@@ -211,6 +222,7 @@ public sealed partial class SharpSqlCompiler
                 BindIrExpression(conditional.Condition, scope),
                 BindIrExpression(conditional.WhenTrue, scope),
                 BindIrExpression(conditional.WhenFalse, scope)),
+            SwitchExpressionSyntax switchExpression => BindSwitchExpression(switchExpression, source, facts, scope),
             MemberAccessExpressionSyntax member => BindMemberExpression(member, source, facts, scope),
             ElementAccessExpressionSyntax element => new IrElementExpression(
                 source,
@@ -264,6 +276,104 @@ public sealed partial class SharpSqlCompiler
             _ => new IrUnsupportedExpression(source, facts, expression.Kind().ToString())
         };
     }
+
+    private IrExpression BindSwitchExpression(
+        SwitchExpressionSyntax expression,
+        IrSource source,
+        ExpressionFacts facts,
+        VariableScope scope)
+    {
+        var governing = BindIrExpression(expression.GoverningExpression, scope);
+        if (!SwitchGoverningCanRepeat(governing))
+            return new IrUnsupportedExpression(source, facts, "effectful switch governing expression");
+
+        IrExpression? result = null;
+        for (var index = expression.Arms.Count - 1; index >= 0; index--)
+        {
+            var arm = expression.Arms[index];
+            var value = BindIrExpression(arm.Expression, scope);
+            var condition = BindSwitchPattern(arm.Pattern, governing, scope);
+            if (condition is null)
+                return new IrUnsupportedExpression(source, facts, $"switch pattern {arm.Pattern.Kind()}");
+            if (arm.WhenClause is not null)
+            {
+                condition = BooleanBinary(
+                    condition.Source,
+                    IrBinaryOperator.LogicalAnd,
+                    condition,
+                    BindIrExpression(arm.WhenClause.Condition, scope));
+            }
+
+            if (IsTrueConstant(condition))
+                result = value;
+            else if (result is not null)
+                result = new IrConditionalExpression(value.Source, facts, condition, value, result);
+            else
+                return new IrUnsupportedExpression(source, facts, "non-exhaustive switch expression");
+        }
+        return result ?? new IrUnsupportedExpression(source, facts, "empty switch expression");
+    }
+
+    private IrExpression? BindSwitchPattern(PatternSyntax pattern, IrExpression governing, VariableScope scope) =>
+        pattern switch
+        {
+            DiscardPatternSyntax => BooleanConstant(governing.Source, true),
+            ConstantPatternSyntax constant => BooleanBinary(
+                governing.Source,
+                IrBinaryOperator.Equal,
+                governing,
+                BindIrExpression(constant.Expression, scope)),
+            RelationalPatternSyntax relational when RelationalPatternOperator(relational.OperatorToken.Kind()) is { } operation =>
+                BooleanBinary(governing.Source, operation, governing, BindIrExpression(relational.Expression, scope)),
+            ParenthesizedPatternSyntax parenthesized => BindSwitchPattern(parenthesized.Pattern, governing, scope),
+            UnaryPatternSyntax unary when unary.IsKind(SyntaxKind.NotPattern) &&
+                BindSwitchPattern(unary.Pattern, governing, scope) is { } operand =>
+                new IrUnaryExpression(governing.Source, BooleanFacts(), IrUnaryOperator.LogicalNot, operand),
+            BinaryPatternSyntax binary when binary.Kind() is SyntaxKind.AndPattern or SyntaxKind.OrPattern &&
+                BindSwitchPattern(binary.Left, governing, scope) is { } left &&
+                BindSwitchPattern(binary.Right, governing, scope) is { } right =>
+                BooleanBinary(
+                    governing.Source,
+                    binary.IsKind(SyntaxKind.AndPattern)
+                        ? IrBinaryOperator.LogicalAnd
+                        : IrBinaryOperator.LogicalOr,
+                    left,
+                    right),
+            _ => null
+        };
+
+    private IrExpression BooleanBinary(
+        IrSource source,
+        IrBinaryOperator operation,
+        IrExpression left,
+        IrExpression right) =>
+        new IrBinaryExpression(source, BooleanFacts(), operation, left, right);
+
+    private static IrExpression BooleanConstant(IrSource source, bool value) =>
+        new IrConstantExpression(source, BooleanFacts(value), value, value ? "true" : "false");
+
+    private static ExpressionFacts BooleanFacts(bool? constant = null) =>
+        new(IrType.Bool, ScalarNullability.NonNull, constant.HasValue, constant);
+
+    private static bool IsTrueConstant(IrExpression expression) =>
+        expression is IrConstantExpression { Value: true };
+
+    private static bool SwitchGoverningCanRepeat(IrExpression expression) => expression switch
+    {
+        IrConstantExpression or IrDefaultValueExpression or IrVariableExpression => true,
+        IrConversionExpression conversion => SwitchGoverningCanRepeat(conversion.Operand),
+        IrMemberExpression member => SwitchGoverningCanRepeat(member.Receiver),
+        _ => false
+    };
+
+    private static IrBinaryOperator? RelationalPatternOperator(SyntaxKind kind) => kind switch
+    {
+        SyntaxKind.LessThanToken => IrBinaryOperator.LessThan,
+        SyntaxKind.LessThanEqualsToken => IrBinaryOperator.LessThanOrEqual,
+        SyntaxKind.GreaterThanToken => IrBinaryOperator.GreaterThan,
+        SyntaxKind.GreaterThanEqualsToken => IrBinaryOperator.GreaterThanOrEqual,
+        _ => null
+    };
 
     private IrMemberExpression BindMemberExpression(
         MemberAccessExpressionSyntax member,
@@ -852,6 +962,8 @@ public sealed partial class SharpSqlCompiler
             SyntaxKind.BitwiseAndExpression => IrBinaryOperator.BitwiseAnd,
             SyntaxKind.BitwiseOrExpression => IrBinaryOperator.BitwiseOr,
             SyntaxKind.ExclusiveOrExpression => IrBinaryOperator.ExclusiveOr,
+            SyntaxKind.LeftShiftExpression => IrBinaryOperator.LeftShift,
+            SyntaxKind.RightShiftExpression => IrBinaryOperator.RightShift,
             SyntaxKind.LogicalAndExpression => IrBinaryOperator.LogicalAnd,
             SyntaxKind.LogicalOrExpression => IrBinaryOperator.LogicalOr,
             SyntaxKind.EqualsExpression => IrBinaryOperator.Equal,

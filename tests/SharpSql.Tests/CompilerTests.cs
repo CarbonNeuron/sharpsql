@@ -5,6 +5,134 @@ namespace SharpSql.Tests;
 public sealed class CompilerTests
 {
     [Fact]
+    public void ExplicitBytecodeUsesCompactRegisterImageForEligibleFallbackMethods()
+    {
+        const string source = """
+            int SumTo(int limit)
+            {
+                int sum = 0;
+                while (limit > 0)
+                {
+                    sum += limit;
+                    limit--;
+                }
+                return sum;
+            }
+
+            Console.WriteLine(SumTo(5));
+            """;
+
+        var result = new SharpSqlCompiler().Transpile(source, new TranspileOptions
+        {
+            MaxInlineStatements = 1,
+            ManagedFallback = ManagedFallbackKind.Bytecode
+        });
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.True(result.UsesRegisterBytecode);
+        Assert.Contains("compact register-bytecode runtime ABI 1.0", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("#__sharpsql_bc_program", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SharpSql stack-machine runtime", result.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AutoDoesNotEnlargeSmallFallbackMethodsForInterpreterOverhead()
+    {
+        const string source = "int Work(int value) { value++; return value; } Console.WriteLine(Work(1));";
+
+        var result = new SharpSqlCompiler().Transpile(source, new TranspileOptions
+        {
+            MaxInlineStatements = 1,
+            ManagedFallback = ManagedFallbackKind.Auto
+        });
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.False(result.UsesRegisterBytecode);
+        Assert.Contains("SharpSql stack-machine runtime", result.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RequiredBytecodeReportsWhyAnIneligibleFallbackCannotLower()
+    {
+        const string source = """
+            int Recurse(int value) => value == 0 ? 0 : Recurse(value - 1);
+            Console.WriteLine(Recurse(2));
+            """;
+
+        var result = new SharpSqlCompiler().Transpile(source, new TranspileOptions
+        {
+            MaxInlineStatements = 1,
+            ManagedFallback = ManagedFallbackKind.Bytecode
+        });
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "SS8001");
+    }
+
+    [Fact]
+    public void EntryPointReturnEmitsAConsumableResultMarker()
+    {
+        var compiler = new SharpSqlCompiler();
+        var result = compiler.Transpile("return 7;");
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Equal("int", Assert.IsType<IrProgram>(compiler.BoundProgram).EntryPointReturnType.Name);
+        Assert.Contains("DECLARE @_entry_result INT", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("SET @_entry_result = 7", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("__SHARPSQL_RESULT__|%s", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SS2003", string.Join(Environment.NewLine, result.Diagnostics), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConstantLanguageFormsAndShiftsLowerWithoutDedicatedRuntimeNodes()
+    {
+        const string source = """
+            int zero = default;
+            bool flag = default(bool);
+            string? text = default;
+            string member = nameof(zero);
+            int source = 3;
+            int negative = -8;
+            int left = source << 2;
+            int right = negative >> 1;
+            Console.WriteLine($"{zero}:{flag}:{text}:{member}:{left}:{right}");
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("DECLARE @zero INT = 0", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("DECLARE @flag BIT = CAST(0 AS BIT)", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("DECLARE @text NVARCHAR(MAX) = NULL", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("DECLARE @member NVARCHAR(MAX) = N'zero'", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("(@source) << ((2) & 31)", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("FLOOR(CONVERT(DECIMAL(38,0), (@negative))", result.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SwitchExpressionsNormalizeToExistingConditionalAndComparisonIr()
+    {
+        const string source = """
+            int value = 7;
+            string category = value switch
+            {
+                < 0 => "negative",
+                0 => "zero",
+                > 0 and < 10 => "small",
+                _ => "large"
+            };
+            Console.WriteLine(category);
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("CASE WHEN", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("@value > 0", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("@value < 10", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SS4002", string.Join(Environment.NewLine, result.Diagnostics), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ExplicitInlineReportsOnePreciseDiagnosticForAwait()
     {
         const string source = "int value = await System.Threading.Tasks.Task.FromResult(42);";

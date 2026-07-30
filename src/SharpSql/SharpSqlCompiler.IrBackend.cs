@@ -73,6 +73,9 @@ public sealed partial class SharpSqlCompiler
             case IrInvocationExpression invocation when
                 TryGetMethod(invocation, out var vmMethod) && _vmMethods.ContainsKey(vmMethod.Id):
                 return true;
+            case IrInvocationExpression invocation when
+                TryGetMethod(invocation, out var bytecodeMethod) && _bytecodeMethods.ContainsKey(bytecodeMethod.Id):
+                return true;
             case IrInvocationExpression invocation when invocation.Target is IrMemberExpression member:
                 var method = invocation.MethodName ?? string.Empty;
                 var receiverType = member.Receiver.Type.Name;
@@ -221,6 +224,7 @@ public sealed partial class SharpSqlCompiler
         var result = expression switch
         {
             IrConstantExpression constant => SqlScalarExpression.Primary(EmitIrConstant(constant)),
+            IrDefaultValueExpression => SqlScalarExpression.Primary(DefaultSql(expression.Type)),
             IrVariableExpression variable => EmitIrVariable(variable, scope, substitutions),
             IrThisExpression @this => substitutions is not null && substitutions.TryGetValue("this", out var thisValue)
                 ? thisValue.Expression
@@ -478,6 +482,14 @@ public sealed partial class SharpSqlCompiler
         if (binary.Operator == IrBinaryOperator.Add &&
             (binary.Left.Type.IsString || binary.Right.Type.IsString))
             return SqlScalarExpression.Primary($"CONCAT({EmitScalar(binary.Left, scope, substitutions)}, {EmitScalar(binary.Right, scope, substitutions)})");
+        if (binary.Operator is IrBinaryOperator.LeftShift or IrBinaryOperator.RightShift)
+        {
+            var shiftLeft = EmitScalar(binary.Left, scope, substitutions);
+            var shiftRight = EmitScalar(binary.Right, scope, substitutions);
+            return SqlScalarExpression.Primary(binary.Operator == IrBinaryOperator.LeftShift
+                ? LeftShiftSql(binary.Type, shiftLeft, shiftRight)
+                : RightShiftSql(binary.Type, shiftLeft, shiftRight));
+        }
 
         var precedence = BinaryPrecedence(binary.Operator);
         var left = EmitScalarExpression(binary.Left, scope, substitutions).Render(precedence);
@@ -594,6 +606,8 @@ public sealed partial class SharpSqlCompiler
         IrBinaryOperator.BitwiseAnd => "&",
         IrBinaryOperator.BitwiseOr => "|",
         IrBinaryOperator.ExclusiveOr => "^",
+        IrBinaryOperator.LeftShift => "<<",
+        IrBinaryOperator.RightShift => ">>",
         IrBinaryOperator.Equal => "=",
         IrBinaryOperator.NotEqual => "<>",
         IrBinaryOperator.LessThan => "<",
@@ -607,6 +621,21 @@ public sealed partial class SharpSqlCompiler
     {
         IrBinaryOperator.Multiply or IrBinaryOperator.Divide or IrBinaryOperator.Remainder => PrecedenceMultiplicative,
         IrBinaryOperator.Add or IrBinaryOperator.Subtract => PrecedenceAdditive,
+        IrBinaryOperator.LeftShift or IrBinaryOperator.RightShift => PrecedenceShift,
         _ => 50
     };
+
+    private static string LeftShiftSql(IrType type, string left, string right) =>
+        $"CONVERT({type.SqlType()}, ({left}) << (({right}) & {ShiftMask(type)}))";
+
+    private static string RightShiftSql(IrType type, string left, string right)
+    {
+        var shift = $"(({right}) & {ShiftMask(type)})";
+        if (type.Name is "uint" or "ulong")
+            return $"({left}) >> {shift}";
+        return $"CONVERT({type.SqlType()}, FLOOR(CONVERT(DECIMAL(38,0), ({left})) / " +
+            $"POWER(CONVERT(DECIMAL(38,0), 2), {shift})))";
+    }
+
+    private static int ShiftMask(IrType type) => type.Name is "long" or "ulong" ? 63 : 31;
 }

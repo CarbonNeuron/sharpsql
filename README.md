@@ -245,6 +245,12 @@ sharpsql run path/to/MyApp.csproj \
   --output out.sql
 ```
 
+Managed methods that are too large to inline use automatic fallback selection. To
+compare or pin the implementation, pass `--managed-fallback Auto|Legacy|Bytecode`.
+SDK projects expose the same choice as `<SharpSqlManagedFallback>`. `Bytecode` is
+strict: it reports `SS8001` when a required fallback method is outside the current
+scalar register-bytecode subset instead of silently switching implementations.
+
 Only the warm-up output is streamed during profiling; measured and debug-only
 repeats are silent, so program output is shown once. For Service Broker programs,
 `--output out.sql` also writes the standalone,
@@ -529,6 +535,7 @@ The first typed-IR and data-flow phase is complete:
 - Centralized scalar casts and rendering
 - Typed substitutions shared by method inlining, closures, and LINQ captures
 - One procedural lowering boundary shared by direct/inlined code and the stack-machine backend
+- A compact Core IR and validated eight-family register-bytecode fallback with automatic and explicit selection
 - Roslyn constant-flow facts used during predicate lowering
 - Definite-assignment, use-before-declaration, missing-return, and out-parameter preflight diagnostics
 - An overload-aware, semantic-ID method catalog and IR graph for resolved calls, caller/callee edges, recursion, effects, and VM closure

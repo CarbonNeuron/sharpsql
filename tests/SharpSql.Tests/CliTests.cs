@@ -32,6 +32,21 @@ public sealed class CliTests
         Assert.Equal(RuntimeDurabilityKind.Ephemeral, settings.Durability);
         Assert.False(settings.UseMemoryOptimizedTables);
         Assert.Null(settings.RuntimeStorage);
+        Assert.Equal(ManagedFallbackKind.Auto, settings.ManagedFallback);
+    }
+
+    [Fact]
+    public async Task TranspileBindsManagedFallbackOverride()
+    {
+        var tester = CreateTester("Console.WriteLine(42);");
+
+        var result = await tester.RunAsync(
+            ["--managed-fallback", "Legacy"],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        var settings = Assert.IsType<TranspileCommand.Settings>(result.Settings);
+        Assert.Equal(ManagedFallbackKind.Legacy, settings.ManagedFallback);
     }
 
     [Fact]

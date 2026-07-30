@@ -53,14 +53,16 @@ The decision order is:
 
 1. Substitute a supported, side-effect-free expression. Arguments must either be side-effect-free or materialized once when a parameter is used more than once.
 2. Expand a procedural body with hygienically renamed parameter/local variables. Unique labels and `GOTO` preserve early returns and loop exits without maintaining a returned flag.
-3. Emit recursive strongly connected components and over-budget methods once using the stack-machine backend.
+3. Lower eligible over-budget scalar control flow through compact Core IR into versioned register bytecode; use the label-based VM for richer or recursive fallback methods.
 4. Apply specialized transformations such as tail-recursion elimination later where they outperform the general fallback.
 
 The budget needs both per-method size and total expanded-size limits; a small method called hundreds of times can still cause pathological output growth.
 
 ## Control-flow lowering
 
-Roslyn statements first bind to procedural IR. Both ordinary lowering and the stack-machine fallback switch on the same IR nodes. Neutral source spans and captured comments provide diagnostics and comment placement. Legacy syntax statement emitters have been removed; compatibility fallbacks for a small set of heap and LINQ intrinsics still consult their originating syntax when IR lowering declines them.
+Roslyn statements first bind to procedural IR. Ordinary lowering, Core IR, register bytecode, and the label-based VM consume that shared model. Neutral source spans and captured comments provide diagnostics and comment placement. Legacy syntax statement emitters have been removed; compatibility fallbacks for a small set of heap and LINQ intrinsics still consult their originating syntax when IR lowering declines them.
+
+Core IR is the compact backend boundary: registers, basic blocks, five scalar instruction shapes, and three terminators. Its first executable consumer maps values directly to register bytecode with eight stable instruction families: constant, move, convert, unary, binary, branch, call, and return. The SQL image stores only populated operands, and one generic interpreter handles every selected method. `ManagedFallbackKind.Auto` requires both complete lowering and a projected image-size win; `Legacy` preserves the label VM; strict `Bytecode` reports `SS8001` for any required fallback method outside the current scalar subset. See [register bytecode](register-bytecode.md).
 
 Each inlined method receives a unique end label. A source `return value;` assigns the result and jumps directly to that label. Loops similarly receive condition/body, continue, and break labels. This is a compact target for arbitrary control-flow graphs while keeping source-level `if` statements structured:
 

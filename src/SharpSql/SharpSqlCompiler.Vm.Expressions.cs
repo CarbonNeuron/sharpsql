@@ -46,6 +46,9 @@ public sealed partial class SharpSqlCompiler
             case IrInvocationExpression invocation when TryGetVmMethod(invocation, out var callee):
                 EmitVmInvocation(invocation, callee, scope, context, continuation);
                 return;
+            case IrInvocationExpression invocation when TryGetRegisterBytecodeMethod(invocation, out var bytecode):
+                EmitRegisterBytecodeInvocation(invocation, bytecode, scope, context, continuation);
+                return;
             case IrInvocationExpression invocation when
                 TryGetMethod(invocation, out var inlineMethod) &&
                 inlineMethod.PureExpression is not null:
@@ -294,6 +297,10 @@ public sealed partial class SharpSqlCompiler
             return $"CASE WHEN {left} = 1 AND {right} = 1 THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END";
         if (binary.Operator == IrBinaryOperator.LogicalOr)
             return $"CASE WHEN {left} = 1 OR {right} = 1 THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END";
+        if (binary.Operator == IrBinaryOperator.LeftShift)
+            return LeftShiftSql(binary.Type, left, right);
+        if (binary.Operator == IrBinaryOperator.RightShift)
+            return RightShiftSql(binary.Type, left, right);
         if (binary.Operator is IrBinaryOperator.Equal or IrBinaryOperator.NotEqual &&
             (IsNull(binary.Left) || IsNull(binary.Right)))
         {

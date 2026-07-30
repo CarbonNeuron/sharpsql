@@ -25,7 +25,8 @@ public sealed record SqlRunRequest(
     bool Profile = false,
     string? OutputPath = null,
     string? InstallerOutputPath = null,
-    bool EnableNativeKernels = false)
+    bool EnableNativeKernels = false,
+    ManagedFallbackKind ManagedFallback = ManagedFallbackKind.Auto)
 {
     public bool IsProject => Sql is null;
     public RuntimeConfiguration RequestedRuntime { get; } = new(Execution, Durability, UseMemoryOptimizedTables);
@@ -117,7 +118,8 @@ public sealed class SqlRunService : ISqlRunService
                         Durability = request.Durability,
                         UseMemoryOptimizedTables = request.UseMemoryOptimizedTables,
                         EmitRuntimeDiagnostics = request.Debug,
-                        EnableNativeKernels = request.EnableNativeKernels
+                        EnableNativeKernels = request.EnableNativeKernels,
+                        ManagedFallback = request.ManagedFallback
                     }
                 },
                 cancellationToken);

@@ -7,6 +7,7 @@ namespace SharpSql;
 public sealed partial class SharpSqlCompiler
 {
     private readonly Dictionary<IrMethodId, VmMethod> _vmMethods = [];
+    private readonly Dictionary<IrMethodId, RegisterBytecodeMethod> _bytecodeMethods = [];
     private readonly List<VmContinuation> _vmContinuations = [];
     private int _nextVmMethodId;
     private int _nextVmContinuationId;
@@ -63,7 +64,65 @@ public sealed partial class SharpSqlCompiler
                 !method.IsAbstract && (method.Body is not null || method.ExpressionBody is not null)));
 
         foreach (var method in _methods.Values.Where(method => roots.Contains(method.Id)))
+        {
+            var reason = "Legacy fallback was explicitly selected.";
+            if (_options.ManagedFallback != ManagedFallbackKind.Legacy && TryAddBytecodeMethod(method, out reason))
+                continue;
+            if (_options.ManagedFallback == ManagedFallbackKind.Bytecode)
+            {
+                AddDiagnostic(
+                    "SS8001",
+                    $"Method '{method.Name}' cannot use the required register-bytecode fallback: {reason}",
+                    method.Source);
+            }
             AddVmMethod(method);
+        }
+    }
+
+    private bool TryAddBytecodeMethod(MethodDefinition definition, out string reason)
+    {
+        var core = CoreIrLowerer.Lower(definition);
+        if (core.Method is null)
+        {
+            reason = core.UnsupportedReason ?? "Core IR lowering failed.";
+            return false;
+        }
+
+        var lowered = RegisterBytecodeLowerer.Lower(
+            definition,
+            core.Method,
+            new BytecodeMethodId(_bytecodeMethods.Count + 1));
+        if (lowered.Method is null)
+        {
+            reason = lowered.UnsupportedReason ?? "Register bytecode lowering failed.";
+            return false;
+        }
+
+        if (_options.ManagedFallback == ManagedFallbackKind.Auto &&
+            !RegisterBytecodeIsProjectedSmaller(definition, lowered.Method))
+        {
+            reason = "The compact image is not projected to amortize the interpreter in this program.";
+            return false;
+        }
+
+        _bytecodeMethods.Add(definition.Id, lowered.Method);
+        reason = string.Empty;
+        return true;
+    }
+
+    private static bool RegisterBytecodeIsProjectedSmaller(
+        MethodDefinition definition,
+        RegisterBytecodeMethod bytecode)
+    {
+        // The interpreter is emitted once per program. This deliberately conservative
+        // first cost model prevents Auto from making ordinary small VM methods larger.
+        const int interpreterCost = 12_000;
+        const int encodedInstructionCost = 28;
+        var projectedBytecode = interpreterCost + bytecode.Instructions.Count * encodedInstructionCost;
+        var projectedLegacy = Math.Max(
+            definition.Source.Span.Length,
+            definition.StatementCount * 45);
+        return projectedBytecode < projectedLegacy;
     }
 
     private bool ExceedsInlineBudget(MethodDefinition method) =>

@@ -214,7 +214,7 @@ public sealed class MemoryOptimizedRuntimeTests
             new TranspileOptions { UseMemoryOptimizedTables = true });
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
-        Assert.Contains("GOTO __sharpsql_execution_cleanup", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("GOTO __sharpsql_entry_end", result.Sql, StringComparison.Ordinal);
         Assert.Contains("DELETE FROM [SharpSql].[__sharpsql_memory_vm_stack_ephemeral_v1] WHERE __execution_id = @__sharpsql_execution_id", result.Sql, StringComparison.Ordinal);
     }
 

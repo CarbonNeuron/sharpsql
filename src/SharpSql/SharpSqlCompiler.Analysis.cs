@@ -194,7 +194,7 @@ public sealed partial class SharpSqlCompiler
         {
             switch (expression)
             {
-                case IrConstantExpression:
+                case IrConstantExpression or IrDefaultValueExpression:
                     return AliasValue.None;
                 case IrVariableExpression variable:
                     var variableAlias = _aliases.GetValueOrDefault(variable.Symbol.Id, AliasValue.None);

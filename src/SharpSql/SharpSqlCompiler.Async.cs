@@ -90,11 +90,11 @@ public sealed partial class SharpSqlCompiler
         out ServiceBrokerProgramPlan plan)
     {
         plan = null!;
-        if (_vmMethods.Count > 0)
+        if (_vmMethods.Count > 0 || _bytecodeMethods.Count > 0)
         {
             AddDiagnostic(
                 "SS7005",
-                "The current Service Broker backend cannot call stack-machine fallback methods from worker continuations.",
+                "The current Service Broker backend cannot call managed fallback methods from worker continuations.",
                 program.EntryPoint.Source);
             return false;
         }

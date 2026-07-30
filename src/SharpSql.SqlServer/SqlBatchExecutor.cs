@@ -47,13 +47,15 @@ public sealed record SqlBatchExecutionOptions(
 /// <param name="ErrorMessage">The SQL Server error message, when execution failed.</param>
 /// <param name="RowsAffected">The number of affected rows reported by the command.</param>
 /// <param name="DebugInfo">Collected diagnostics, when requested.</param>
+/// <param name="ReturnValue">The normalized managed entry-point return value, when present.</param>
 public sealed record SqlBatchExecutionResult(
     bool Success,
     IReadOnlyList<string> Messages,
     int? ErrorNumber = null,
     string? ErrorMessage = null,
     int RowsAffected = -1,
-    SqlBatchDebugInfo? DebugInfo = null)
+    SqlBatchDebugInfo? DebugInfo = null,
+    string? ReturnValue = null)
 {
     /// <summary>Gets informational messages as normalized standard output.</summary>
     public string StandardOutput => SqlBatchOutput.FromMessages(Messages);
@@ -75,6 +77,7 @@ public static class SqlBatchOutput
 public static class SqlBatchExecutor
 {
     private const string HeapDebugPrefix = "__SHARPSQL_DEBUG_HEAP__|";
+    private const string ProgramResultPrefix = "__SHARPSQL_RESULT__|";
 
     /// <summary>Executes a SQL batch.</summary>
     /// <param name="connection">An open SQL Server connection.</param>
@@ -116,6 +119,7 @@ public static class SqlBatchExecutor
         long indexedItems = 0;
         long dictionaryEntries = 0;
         var heapDiagnosticsObserved = false;
+        string? returnValue = null;
         void HandleInfoMessage(object sender, SqlInfoMessageEventArgs args)
         {
             foreach (SqlError error in args.Errors)
@@ -125,6 +129,11 @@ public static class SqlBatchExecutor
                     bool isHeapDiagnostic;
                     lock (messageGate)
                     {
+                        if (TryParseProgramResult(error.Message, out var parsedReturnValue))
+                        {
+                            returnValue = parsedReturnValue;
+                            continue;
+                        }
                         isHeapDiagnostic =
                             (options?.CollectDebugInfo == true || options?.ConsumeHeapDiagnostics == true) &&
                             TryParseHeapDiagnostics(
@@ -193,6 +202,7 @@ public static class SqlBatchExecutor
             long indexedItemSnapshot;
             long dictionaryEntrySnapshot;
             bool heapDiagnosticsSnapshot;
+            string? returnValueSnapshot;
             lock (messageGate)
             {
                 messageSnapshot = messages.ToArray();
@@ -201,6 +211,7 @@ public static class SqlBatchExecutor
                 indexedItemSnapshot = indexedItems;
                 dictionaryEntrySnapshot = dictionaryEntries;
                 heapDiagnosticsSnapshot = heapDiagnosticsObserved;
+                returnValueSnapshot = returnValue;
             }
             var debugInfo = options?.CollectDebugInfo == true
                 ? plans.ToDebugInfo(
@@ -223,7 +234,8 @@ public static class SqlBatchExecutor
                 true,
                 messageSnapshot,
                 RowsAffected: rowsAffected,
-                DebugInfo: debugInfo);
+                DebugInfo: debugInfo,
+                ReturnValue: returnValueSnapshot);
         }
         catch (SqlException exception)
         {
@@ -266,6 +278,17 @@ public static class SqlBatchExecutor
             ? errors.Cast<SqlError>().First()
             : errors.Cast<SqlError>().FirstOrDefault(error => preferredErrorNumber(error.Number))
               ?? errors.Cast<SqlError>().First();
+
+    private static bool TryParseProgramResult(string message, out string? value)
+    {
+        if (!message.StartsWith(ProgramResultPrefix, StringComparison.Ordinal))
+        {
+            value = null;
+            return false;
+        }
+        value = message[ProgramResultPrefix.Length..];
+        return true;
+    }
 
     private static bool TryParseHeapDiagnostics(
         string message,

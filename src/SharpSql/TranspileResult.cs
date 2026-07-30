@@ -13,6 +13,9 @@ public sealed record TranspileResult(
         RuntimeDurabilityKind.Ephemeral,
         UseMemoryOptimizedTables: false);
 
+    /// <summary>Gets whether this program image contains compact register bytecode.</summary>
+    public bool UsesRegisterBytecode { get; init; }
+
     /// <summary>Gets whether transpilation completed without diagnostics.</summary>
     public bool Success => Diagnostics.Count == 0;
 }

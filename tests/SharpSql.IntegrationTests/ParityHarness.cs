@@ -109,7 +109,7 @@ public static class ParityHarness
             ? null
             : NormalizeSqlFailure(result.ErrorNumber!.Value, result.ErrorMessage!);
         return new SqlExecutionOutcome(
-            new ExecutionOutcome(result.StandardOutput, null, executionFailure),
+            new ExecutionOutcome(result.StandardOutput, result.ReturnValue, executionFailure),
             transpileResult.Sql);
     }
 

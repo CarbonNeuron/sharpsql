@@ -29,6 +29,7 @@ public sealed partial class SharpSqlCompiler
 
     private const int PrecedenceAdditive = 60;
     private const int PrecedenceMultiplicative = 70;
+    private const int PrecedenceShift = 55;
     private const int PrecedenceUnary = 80;
 
     private readonly List<CompilerDiagnostic> _diagnostics = [];
@@ -40,6 +41,9 @@ public sealed partial class SharpSqlCompiler
     private CSharpCompilation? _compilation;
     private Diagnostic[]? _semanticDiagnostics;
     private string? _selectedEntryPointIdentity;
+    private string? _entryPointEndLabel;
+    private string? _entryPointResultSql;
+    private IrType? _entryPointResultType;
     private TranspileOptions _options = new();
     private IrProgram? _boundProgram;
     private VmMethod? _proceduralVmContext;
@@ -110,6 +114,10 @@ public sealed partial class SharpSqlCompiler
         }
 
         var selectedEntryPoint = SelectEntryPoint(compilation, roots, entryPoint);
+        var selectedEntryPointSymbol = selectedEntryPoint is null
+            ? compilation.GetEntryPoint(default)
+            : SemanticModelFor(selectedEntryPoint)?.GetDeclaredSymbol(selectedEntryPoint) as IMethodSymbol;
+        var entryPointReturnType = EntryPointResultType(selectedEntryPointSymbol?.ReturnType);
         _selectedEntryPointIdentity = selectedEntryPoint is null
             ? "<top-level>"
             : $"{selectedEntryPoint.SyntaxTree.FilePath}|{MethodIdentity(SemanticModelFor(selectedEntryPoint)?.GetDeclaredSymbol(selectedEntryPoint) as IMethodSymbol).Value}";
@@ -147,9 +155,13 @@ public sealed partial class SharpSqlCompiler
                 : selectedEntryPoint.ExpressionBody is not null
                     ? new ProceduralBlock(
                         ToIrSource(selectedEntryPoint),
-                        [new ProceduralExpressionStatement(
-                            ToIrSource(selectedEntryPoint.ExpressionBody.Expression),
-                            BindIrExpression(selectedEntryPoint.ExpressionBody.Expression, scope))])
+                        [entryPointReturnType == IrType.Void
+                            ? new ProceduralExpressionStatement(
+                                ToIrSource(selectedEntryPoint.ExpressionBody.Expression),
+                                BindIrExpression(selectedEntryPoint.ExpressionBody.Expression, scope))
+                            : new ProceduralReturn(
+                                ToIrSource(selectedEntryPoint.ExpressionBody.Expression),
+                                BindIrExpression(selectedEntryPoint.ExpressionBody.Expression, scope))])
                     : new ProceduralBlock(ToIrSource(selectedEntryPoint), []);
         }
         else if (topLevelStatements.Length > 0)
@@ -172,7 +184,8 @@ public sealed partial class SharpSqlCompiler
                 .SelectMany(source => ToIrSource(source).DescendantComments)
                 .ToArray())
         {
-            HeapTypes = heapTypeDefinitions
+            HeapTypes = heapTypeDefinitions,
+            EntryPointReturnType = entryPointReturnType
         };
         _methodGraph = MethodGraph.Create(_boundProgram.Methods, _boundProgram.EntryPoint);
         if (!ResolveRuntimeConfiguration(_boundProgram))
@@ -191,17 +204,21 @@ public sealed partial class SharpSqlCompiler
         }
 
         EmitDurableRuntimePreamble();
+        EmitRegisterBytecodePreamble();
         EmitVmPreamble();
         EmitHeapPreamble();
         EmitDurableRuntimeProvisioningEpilogue();
         EmitDurableExecutionBodyPreamble();
+        var entryReturn = PrepareEntryPointReturn(_boundProgram.EntryPointReturnType);
 
         foreach (var vmMethod in _vmMethods.Values)
             vmMethod.Scope.SetParent(scope);
         if (!TryEmitServiceBrokerProgram(_boundProgram))
-            EmitProceduralStatementSequence(_boundProgram.EntryPoint.Statements, scope, null, null, null);
+            EmitProceduralStatementSequence(_boundProgram.EntryPoint.Statements, scope, entryReturn, null, null);
 
+        EmitEntryPointEndLabel();
         EmitVmEpilogue();
+        EmitRegisterBytecodeEpilogue();
         if (compileReachableOnly)
         {
             foreach (var source in compilationSources.Where(source => !IsGeneratedSource(source.SyntaxTree.GetCompilationUnitRoot())))
@@ -214,6 +231,7 @@ public sealed partial class SharpSqlCompiler
         }
         EmitDurableExecutionCleanupLabel();
         EmitHeapEpilogue();
+        EmitEntryPointResult();
         EmitDurableExecutionBodyEpilogue();
 
         return CreateTranspileResult(CompleteSql());
@@ -246,15 +264,20 @@ public sealed partial class SharpSqlCompiler
 
         var scope = new VariableScope();
         EmitDurableRuntimePreamble();
+        EmitRegisterBytecodePreamble();
         EmitVmPreamble();
         EmitHeapPreamble();
         EmitDurableRuntimeProvisioningEpilogue();
         EmitDurableExecutionBodyPreamble();
+        var entryReturn = PrepareEntryPointReturn(_boundProgram.EntryPointReturnType);
         if (!TryEmitServiceBrokerProgram(_boundProgram))
-            EmitProceduralStatementSequence(program.EntryPoint.Statements, scope, null, null, null);
+            EmitProceduralStatementSequence(program.EntryPoint.Statements, scope, entryReturn, null, null);
+        EmitEntryPointEndLabel();
         EmitVmEpilogue();
+        EmitRegisterBytecodeEpilogue();
         EmitDurableExecutionCleanupLabel();
         EmitHeapEpilogue();
+        EmitEntryPointResult();
         EmitDurableExecutionBodyEpilogue();
         return CreateTranspileResult(CompleteSql());
     }
@@ -262,8 +285,50 @@ public sealed partial class SharpSqlCompiler
     private TranspileResult CreateTranspileResult(string sql) =>
         new(sql, _diagnostics.AsReadOnly())
         {
-            EffectiveRuntime = _effectiveRuntime
+            EffectiveRuntime = _effectiveRuntime,
+            UsesRegisterBytecode = _bytecodeMethods.Count > 0
         };
+
+    private static IrType EntryPointResultType(ITypeSymbol? returnType)
+    {
+        if (returnType is null || returnType.SpecialType == SpecialType.System_Void)
+            return IrType.Void;
+        if (returnType is INamedTypeSymbol { Name: "Task" } task &&
+            task.ContainingNamespace.ToDisplayString() == "System.Threading.Tasks")
+            return task.TypeArguments.Length == 1
+                ? CSharpTypeFactory.From(task.TypeArguments[0])
+                : IrType.Void;
+        return CSharpTypeFactory.From(returnType);
+    }
+
+    private InlineReturn PrepareEntryPointReturn(IrType returnType)
+    {
+        _entryPointEndLabel = _names.AllocateLabel("entry_end");
+        if (returnType != IrType.Void)
+        {
+            _entryPointResultSql = _names.Allocate("_entry_result");
+            _entryPointResultType = returnType;
+            _sql.Line($"DECLARE {_entryPointResultSql} {returnType.SqlType()};");
+        }
+        return new InlineReturn(_entryPointResultSql, _entryPointEndLabel);
+    }
+
+    private void EmitEntryPointEndLabel()
+    {
+        if (_entryPointEndLabel is not null)
+            EmitLabel(_entryPointEndLabel);
+    }
+
+    private void EmitEntryPointResult()
+    {
+        if (_entryPointResultSql is not null)
+        {
+            var text = _names.Allocate("_entry_result_text");
+            var value = FormatTextValue(_entryPointResultType ?? IrType.Unknown, _entryPointResultSql);
+            _sql.Line($"DECLARE {text} NVARCHAR(4000) = CONVERT(NVARCHAR(4000), {value});");
+            _sql.Line($"RAISERROR(N'__SHARPSQL_RESULT__|%s', 0, 1, {text}) WITH NOWAIT;");
+        }
+    }
 
     private void AddParseDiagnostics(SyntaxTree tree)
     {
