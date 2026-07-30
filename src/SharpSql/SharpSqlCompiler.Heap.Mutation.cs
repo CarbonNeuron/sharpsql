@@ -112,6 +112,11 @@ public sealed partial class SharpSqlCompiler
             if (assignment.Left is ElementAccessExpressionSyntax element)
             {
                 var receiverType = InferType(element.Expression, scope);
+                if (receiverType.Name == "byte[]")
+                {
+                    EmitByteArraySet(element, assignment.Right, assignment.Kind(), scope, context);
+                    return true;
+                }
                 if (IsSequenceType(receiverType.Name))
                 {
                     EmitListSet(element, assignment.Right, receiverType, scope, context);
@@ -239,6 +244,12 @@ public sealed partial class SharpSqlCompiler
         if (expression is not IrAssignmentExpression assignment)
             return false;
 
+        if (assignment.Target is IrElementExpression { Receiver.Type.Name: "byte[]" } byteElement)
+        {
+            EmitByteArraySet(byteElement, assignment.Value, assignment.Operator, scope, context);
+            return true;
+        }
+
         if (assignment.Target is IrMemberExpression fieldAccess &&
             TryResolveHeapField(
                 fieldAccess.Receiver.Type,
@@ -287,6 +298,120 @@ public sealed partial class SharpSqlCompiler
         }
         return false;
     }
+
+    private void EmitByteArraySet(
+        ElementAccessExpressionSyntax element,
+        ExpressionSyntax valueExpression,
+        SyntaxKind assignmentKind,
+        VariableScope scope,
+        VmMethod? context)
+    {
+        var indexExpression = element.ArgumentList.Arguments.Single().Expression;
+        EmitVmExpression(element.Expression, scope, context, bytes =>
+            EmitVmExpression(indexExpression, scope, context, index =>
+                EmitVmExpression(valueExpression, scope, context, value =>
+                {
+                    EmitByteArrayIndexGuard(bytes, index);
+                    var assigned = ByteArrayAssignedValue(bytes, index, value, HeapAssignmentOperator(assignmentKind));
+                    EmitByteArrayTargetUpdate(element.Expression, scope, context, ByteArraySetSql(bytes, index, assigned));
+                })));
+    }
+
+    private void EmitByteArraySet(
+        IrElementExpression element,
+        IrExpression valueExpression,
+        IrAssignmentOperator assignmentOperator,
+        VariableScope scope,
+        VmMethod? context)
+    {
+        EmitVmExpression(element.Receiver, scope, context, bytes =>
+            EmitVmExpression(element.Arguments.Single(), scope, context, index =>
+                EmitVmExpression(valueExpression, scope, context, value =>
+                {
+                    EmitByteArrayIndexGuard(bytes, index);
+                    var operation = assignmentOperator switch
+                    {
+                        IrAssignmentOperator.Add => "+",
+                        IrAssignmentOperator.Subtract => "-",
+                        IrAssignmentOperator.Multiply => "*",
+                        IrAssignmentOperator.Divide => "/",
+                        IrAssignmentOperator.Remainder => "%",
+                        IrAssignmentOperator.BitwiseAnd => "&",
+                        IrAssignmentOperator.BitwiseOr => "|",
+                        IrAssignmentOperator.ExclusiveOr => "^",
+                        _ => null
+                    };
+                    var assigned = ByteArrayAssignedValue(bytes, index, value, operation);
+                    EmitByteArrayTargetUpdate(element.Receiver, scope, context, ByteArraySetSql(bytes, index, assigned));
+                })));
+    }
+
+    private void EmitByteArrayTargetUpdate(
+        ExpressionSyntax target,
+        VariableScope scope,
+        VmMethod? context,
+        string value)
+    {
+        if (target is IdentifierNameSyntax identifier &&
+            scope.Find(identifier.Identifier.ValueText) is ScalarVariableBinding binding)
+        {
+            _sql.Line($"SET {binding.SqlName} = {value};");
+            return;
+        }
+        if (target is MemberAccessExpressionSyntax member &&
+            TryResolveHeapField(member, scope, out var heapType, out var field))
+        {
+            EmitHeapFieldUpdate(heapType, field, EmitScalar(member.Expression, scope), value);
+            return;
+        }
+        AddDiagnostic("SS6302", "Byte-array mutation requires a local variable or managed field target.", target);
+    }
+
+    private void EmitByteArrayTargetUpdate(
+        IrExpression target,
+        VariableScope scope,
+        VmMethod? context,
+        string value)
+    {
+        if (target is IrVariableExpression variable)
+        {
+            if (context is not null && context.Variables.TryGetValue(variable.Symbol.Name, out var vmVariable))
+            {
+                _sql.Line($"SET {vmVariable.SqlName} = {value};");
+                return;
+            }
+            if (scope.Find(variable.Symbol) is ScalarVariableBinding binding)
+            {
+                _sql.Line($"SET {binding.SqlName} = {value};");
+                return;
+            }
+        }
+        if (target is IrMemberExpression member &&
+            TryResolveHeapField(
+                member.Receiver.Type,
+                member.MemberName,
+                member.MemberId,
+                out var heapType,
+                out var field))
+        {
+            EmitHeapFieldUpdate(heapType, field, EmitScalar(member.Receiver, scope), value);
+            return;
+        }
+        AddDiagnostic("SS6302", "Byte-array mutation requires a local variable or managed field target.", target.Source);
+    }
+
+    private void EmitByteArrayIndexGuard(string bytes, string index) =>
+        _sql.Line($"IF {index} < 0 OR {index} >= CONVERT(INT, DATALENGTH({bytes})) THROW 51003, 'Array index was out of range.', 1;");
+
+    private static string ByteArrayAssignedValue(string bytes, string index, string value, string? operation) =>
+        operation is null
+            ? value
+            : $"CONVERT(TINYINT, CONVERT(TINYINT, SUBSTRING({bytes}, {index} + 1, 1)) {operation} ({value}))";
+
+    private static string ByteArraySetSql(string bytes, string index, string value) =>
+        $"CONVERT(VARBINARY(MAX), SUBSTRING({bytes}, 1, {index})) + " +
+        $"CONVERT(BINARY(1), {value}) + " +
+        $"CONVERT(VARBINARY(MAX), SUBSTRING({bytes}, {index} + 2, DATALENGTH({bytes})))";
 
     private static string HeapAssignmentValue(
         IrAssignmentOperator assignmentOperator,

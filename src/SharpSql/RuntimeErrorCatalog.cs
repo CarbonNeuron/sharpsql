@@ -22,7 +22,8 @@ internal static class RuntimeErrorCatalog
             "System.InvalidOperationException" => [51007, 51008],
             "System.Collections.Generic.KeyNotFoundException" => [51010],
             "System.NullReferenceException" => [51011],
-            "System.SystemException" => [51001, 51002, 51003, 51004, 51005, 51006, 51007, 51008, 51009, 51010, 51011],
+            "System.OverflowException" => [51013],
+            "System.SystemException" => [51001, 51002, 51003, 51004, 51005, 51006, 51007, 51008, 51009, 51010, 51011, 51013],
             _ => null
         };
 
@@ -34,6 +35,7 @@ internal static class RuntimeErrorCatalog
         51007 or 51008 => nameof(InvalidOperationException),
         51010 => nameof(KeyNotFoundException),
         51011 => nameof(NullReferenceException),
+        51013 => nameof(OverflowException),
         ApplicationExceptionErrorNumber => nameof(ApplicationException),
         _ => null
     };

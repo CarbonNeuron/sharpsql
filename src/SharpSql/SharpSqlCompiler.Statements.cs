@@ -507,7 +507,7 @@ public sealed partial class SharpSqlCompiler
         }
 
         var collectionType = statement.SourceExpression.Facts.Type;
-        if (!IsSequenceType(collectionType.Name))
+        if (!IsSequenceType(collectionType.Name) && collectionType.Name != "byte[]")
         {
             AddDiagnostic("SS6302", "foreach currently supports arrays and List<T>.", statement.SourceExpression.Source);
             return;
@@ -524,13 +524,19 @@ public sealed partial class SharpSqlCompiler
             var continueLabel = _names.AllocateLabel("foreach_continue");
             var breakLabel = _names.AllocateLabel("foreach_break");
 
-            _sql.Line($"DECLARE {collectionSql} INT = {collectionValue};");
+            _sql.Line($"DECLARE {collectionSql} {collectionType.SqlType()} = {collectionValue};");
             _sql.Line($"DECLARE {indexSql} INT = 0;");
             _sql.Line($"DECLARE {itemSql} {itemType.SqlType()};");
             scope.Add(statement.Element, new ScalarVariableBinding(itemSql, itemType));
             EmitLabel(conditionLabel);
-            _sql.Line($"IF {indexSql} >= {SequenceCountSql(collectionSql)} GOTO {breakLabel};");
-            _sql.Line($"SET {itemSql} = {SequenceElementSql(collectionSql, indexSql, itemType)};");
+            var count = collectionType.Name == "byte[]"
+                ? $"CONVERT(INT, DATALENGTH({collectionSql}))"
+                : SequenceCountSql(collectionSql);
+            var item = collectionType.Name == "byte[]"
+                ? $"CONVERT(TINYINT, SUBSTRING({collectionSql}, {indexSql} + 1, 1))"
+                : SequenceElementSql(collectionSql, indexSql, itemType);
+            _sql.Line($"IF {indexSql} >= {count} GOTO {breakLabel};");
+            _sql.Line($"SET {itemSql} = {item};");
             EmitEmbeddedContents(
                 statement.Body,
                 scope,

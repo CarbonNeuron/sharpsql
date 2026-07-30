@@ -426,7 +426,9 @@ public sealed partial class SharpSqlCompiler
                 ((IsDictionaryType(InferType(member.Expression, scope, substitutions).Name) &&
                   member.Name.Identifier.ValueText is "ContainsKey" or "ContainsValue") ||
                  (IsListType(InferType(member.Expression, scope, substitutions).Name) &&
-                  member.Name.Identifier.ValueText == "Contains")) => IrType.Bool,
+                  member.Name.Identifier.ValueText == "Contains") ||
+                 (InferType(member.Expression, scope, substitutions).Name == "byte[]" &&
+                  member.Name.Identifier.ValueText == "SequenceEqual")) => IrType.Bool,
             InvocationExpressionSyntax invocation when TryGetMethod(invocation, out var method) => method.ReturnType,
             _ => IrType.Unknown
         };

@@ -34,17 +34,21 @@ public sealed partial class SharpSqlCompiler
             return true;
         }
 
-        if (expression is ArrayCreationExpressionSyntax arrayCreation &&
-            arrayCreation.Type.ElementType.ToString() != "byte")
+        if (expression is ArrayCreationExpressionSyntax arrayCreation)
         {
-            EmitNewArray(arrayCreation, scope, context, continuation);
+            if (InferType(arrayCreation, scope).Name == "byte[]")
+                EmitNewByteArray(arrayCreation, scope, context, continuation);
+            else
+                EmitNewArray(arrayCreation, scope, context, continuation);
             return true;
         }
 
-        if (expression is ImplicitArrayCreationExpressionSyntax implicitArrayCreation &&
-            InferType(implicitArrayCreation, scope).Name != "byte[]")
+        if (expression is ImplicitArrayCreationExpressionSyntax implicitArrayCreation)
         {
-            EmitNewImplicitArray(implicitArrayCreation, scope, context, continuation);
+            if (InferType(implicitArrayCreation, scope).Name == "byte[]")
+                EmitNewByteArray(implicitArrayCreation, scope, context, continuation);
+            else
+                EmitNewImplicitArray(implicitArrayCreation, scope, context, continuation);
             return true;
         }
 
@@ -73,8 +77,11 @@ public sealed partial class SharpSqlCompiler
         {
             case IrElementExpression element:
                 return TryEmitHeapElementExpression(element, scope, context, continuation);
-            case IrArrayCreationExpression array when array.ElementType.Name != "byte":
-                EmitNewArray(array, scope, context, continuation);
+            case IrArrayCreationExpression array:
+                if (array.ElementType.Name == "byte")
+                    EmitNewByteArray(array, scope, context, continuation);
+                else
+                    EmitNewArray(array, scope, context, continuation);
                 return true;
             case IrObjectCreationExpression creation when IsListType(creation.CreatedType.Name):
                 EmitNewList(creation, scope, context, continuation);
@@ -103,6 +110,58 @@ public sealed partial class SharpSqlCompiler
                 return false;
         }
     }
+
+    private void EmitNewByteArray(
+        IrArrayCreationExpression creation,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        if (creation.Rank != 1)
+        {
+            AddDiagnostic("SS6301", "Only one-dimensional arrays are supported.", creation.Source);
+            continuation("NULL");
+            return;
+        }
+
+        if (creation.Length is not null)
+        {
+            EmitVmExpression(creation.Length, scope, context, size =>
+            {
+                var capturedSize = _names.Allocate("_byte_array_size");
+                _sql.Line($"DECLARE {capturedSize} INT = {size};");
+                _sql.Line($"IF {capturedSize} < 0 THROW 51013, 'Array dimensions exceeded the supported range.', 1;");
+                continuation(ByteArrayWithLengthSql(capturedSize));
+            });
+            return;
+        }
+
+        var values = new List<string>();
+        Evaluate(0);
+
+        void Evaluate(int index)
+        {
+            if (index == creation.Elements.Count)
+            {
+                continuation(ByteArrayInitializerSql(values));
+                return;
+            }
+
+            EmitVmExpression(creation.Elements[index], scope, context, value =>
+            {
+                values.Add(value);
+                Evaluate(index + 1);
+            });
+        }
+    }
+
+    private static string ByteArrayWithLengthSql(string length) =>
+        $"CONVERT(VARBINARY(MAX), REPLICATE(CONVERT(VARCHAR(MAX), CHAR(0)), {length}))";
+
+    private static string ByteArrayInitializerSql(IReadOnlyList<string> values) => values.Count == 0
+        ? "CONVERT(VARBINARY(MAX), 0x)"
+        : string.Join(" + ", values.Select(value =>
+            $"CONVERT(VARBINARY(MAX), CONVERT(BINARY(1), {value}))"));
 
     private void EmitNewArray(
         IrArrayCreationExpression creation,

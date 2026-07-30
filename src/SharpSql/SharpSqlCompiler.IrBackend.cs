@@ -59,8 +59,8 @@ public sealed partial class SharpSqlCompiler
         {
             case IrElementExpression:
                 return true;
-            case IrArrayCreationExpression array:
-                return array.ElementType.Name != "byte";
+            case IrArrayCreationExpression:
+                return true;
             case IrObjectCreationExpression creation:
                 return _heapTypes.ContainsKey(creation.CreatedType.Name) ||
                     KnownTypeFacts.IsList(creation.CreatedType.Name) ||
@@ -343,6 +343,8 @@ public sealed partial class SharpSqlCompiler
             return SqlScalarExpression.Primary(receiver);
         if (receiverType.IsString && member.MemberName == "Length")
             return SqlScalarExpression.Primary($"CONVERT(INT, DATALENGTH({receiver}) / 2)");
+        if (receiverType.Name == "byte[]" && member.MemberName == "Length")
+            return SqlScalarExpression.Primary($"CONVERT(INT, DATALENGTH({receiver}))");
         if ((IsListType(receiverType.Name) && member.MemberName == "Count") ||
             (IsArrayType(receiverType.Name) && member.MemberName == "Length") ||
             (IsDictionaryType(receiverType.Name) && member.MemberName == "Count"))

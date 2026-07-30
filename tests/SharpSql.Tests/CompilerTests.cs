@@ -1307,6 +1307,29 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void ByteArraysLowerToNativeBinaryOperations()
+    {
+        const string source = """
+            byte[] values = new byte[] { 1, 2, 255 };
+            values[0] = 9;
+            values[1] += 3;
+            byte[] expected = new byte[] { 9, 5, 255 };
+            Console.WriteLine($"{values.Length}:{values[0]}:{values.SequenceEqual(expected)}");
+            """;
+
+        var result = Compile(source);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("VARBINARY(MAX)", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CONVERT(BINARY(1), 255)", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CONVERT(INT, DATALENGTH(@values))", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CONVERT(TINYINT, SUBSTRING(@values, 0 + 1, 1))", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("SUBSTRING(@values, 1, 0)", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CONVERT(BINARY(1), 9)", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("#__sharpsql_indexed_items", result.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void InstanceMethodsReceiveThisAndCanMutateFields()
     {
         const string source = """

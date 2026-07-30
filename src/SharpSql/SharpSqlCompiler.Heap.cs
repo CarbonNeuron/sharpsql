@@ -918,9 +918,8 @@ public sealed partial class SharpSqlCompiler
             InvocationExpressionSyntax invocation =>
                 IsRandomInvocation(invocation) || IsLinqMaterialization(invocation),
             ElementAccessExpressionSyntax => true,
-            ArrayCreationExpressionSyntax array => array.Type.ElementType.ToString() != "byte",
-            ImplicitArrayCreationExpressionSyntax array =>
-                InferType(array, new VariableScope()).Name != "byte[]",
+            ArrayCreationExpressionSyntax => true,
+            ImplicitArrayCreationExpressionSyntax => true,
             _ => false
         });
 

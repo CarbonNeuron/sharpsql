@@ -23,6 +23,8 @@ public sealed partial class SharpSqlCompiler
         {
             return SqlScalarExpression.Primary($"CONVERT(INT, DATALENGTH({receiver}) / 2)");
         }
+        if (receiverType.Name == "byte[]" && member.Name.Identifier.ValueText == "Length")
+            return SqlScalarExpression.Primary($"CONVERT(INT, DATALENGTH({receiver}))");
         if (IsSequenceType(receiverType.Name))
         {
             if ((IsListType(receiverType.Name) && member.Name.Identifier.ValueText == "Count") ||
@@ -62,7 +64,8 @@ public sealed partial class SharpSqlCompiler
             return false;
 
         var receiverType = InferType(element.Expression, scope);
-        if (!receiverType.IsString && !IsSequenceType(receiverType.Name) && !IsDictionaryType(receiverType.Name))
+        if (!receiverType.IsString && receiverType.Name != "byte[]" &&
+            !IsSequenceType(receiverType.Name) && !IsDictionaryType(receiverType.Name))
             return false;
 
         EmitVmExpression(element.Expression, scope, context, receiver =>
@@ -70,6 +73,8 @@ public sealed partial class SharpSqlCompiler
             {
                 if (receiverType.IsString)
                     _sql.Line($"IF {key} < 0 OR {key} >= CONVERT(INT, DATALENGTH({receiver}) / 2) THROW 51003, 'String index was out of range.', 1;");
+                else if (receiverType.Name == "byte[]")
+                    _sql.Line($"IF {key} < 0 OR {key} >= CONVERT(INT, DATALENGTH({receiver})) THROW 51003, 'Array index was out of range.', 1;");
                 else if (IsSequenceType(receiverType.Name))
                     EmitSequenceIndexGuard(receiverType, receiver, key);
                 else if (IsDictionaryType(receiverType.Name))
@@ -96,7 +101,8 @@ public sealed partial class SharpSqlCompiler
             return false;
 
         var receiverType = element.Receiver.Type;
-        if (!receiverType.IsString && !IsSequenceType(receiverType.Name) && !IsDictionaryType(receiverType.Name))
+        if (!receiverType.IsString && receiverType.Name != "byte[]" &&
+            !IsSequenceType(receiverType.Name) && !IsDictionaryType(receiverType.Name))
             return false;
 
         EmitVmExpression(element.Receiver, scope, context, receiver =>
@@ -104,6 +110,8 @@ public sealed partial class SharpSqlCompiler
             {
                 if (receiverType.IsString)
                     _sql.Line($"IF {key} < 0 OR {key} >= CONVERT(INT, DATALENGTH({receiver}) / 2) THROW 51003, 'String index was out of range.', 1;");
+                else if (receiverType.Name == "byte[]")
+                    _sql.Line($"IF {key} < 0 OR {key} >= CONVERT(INT, DATALENGTH({receiver})) THROW 51003, 'Array index was out of range.', 1;");
                 else if (IsSequenceType(receiverType.Name))
                     EmitSequenceIndexGuard(receiverType, receiver, key);
                 else
@@ -139,6 +147,11 @@ public sealed partial class SharpSqlCompiler
             value = $"SUBSTRING({receiver}, {key} + 1, 1)";
             return true;
         }
+        if (receiverType.Name == "byte[]")
+        {
+            value = $"CONVERT(TINYINT, SUBSTRING({receiver}, {key} + 1, 1))";
+            return true;
+        }
         if (IsSequenceType(receiverType.Name))
         {
             var itemType = SequenceElementType(receiverType.Name);
@@ -163,6 +176,15 @@ public sealed partial class SharpSqlCompiler
         if (invocation.Expression is MemberAccessExpressionSyntax member)
         {
             var receiverType = InferType(member.Expression, scope);
+            if (receiverType.Name == "byte[]" && member.Name.Identifier.ValueText == "SequenceEqual" &&
+                invocation.ArgumentList.Arguments.Count == 1)
+            {
+                var receiver = EmitScalar(member.Expression, scope);
+                var other = EmitScalar(invocation.ArgumentList.Arguments[0].Expression, scope);
+                expression = SqlScalarExpression.Primary(
+                    $"CASE WHEN {receiver} = {other} THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                return true;
+            }
             if (IsDictionaryType(receiverType.Name) && member.Name.Identifier.ValueText == "ContainsKey" &&
                 invocation.ArgumentList.Arguments.Count == 1)
             {
@@ -204,6 +226,15 @@ public sealed partial class SharpSqlCompiler
         if (invocation.Target is IrMemberExpression member)
         {
             var receiverType = member.Receiver.Type;
+            if (receiverType.Name == "byte[]" && member.MemberName == "SequenceEqual" &&
+                invocation.Arguments.Count == 1)
+            {
+                var receiver = EmitScalar(member.Receiver, scope, substitutions);
+                var other = EmitScalar(invocation.Arguments[0], scope, substitutions);
+                expression = SqlScalarExpression.Primary(
+                    $"CASE WHEN {receiver} = {other} THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                return true;
+            }
             if (IsDictionaryType(receiverType.Name) && member.MemberName == "ContainsKey" &&
                 invocation.Arguments.Count == 1)
             {
@@ -241,7 +272,7 @@ public sealed partial class SharpSqlCompiler
         var receiver = InferType(member.Expression, scope);
         if ((IsListType(receiver.Name) || IsDictionaryType(receiver.Name)) && member.Name.Identifier.ValueText == "Count")
             return IrType.Int;
-        if (IsArrayType(receiver.Name) && member.Name.Identifier.ValueText == "Length")
+        if ((IsArrayType(receiver.Name) || receiver.Name == "byte[]") && member.Name.Identifier.ValueText == "Length")
             return IrType.Int;
         if (TryResolveHeapField(
                 receiver,
@@ -256,6 +287,8 @@ public sealed partial class SharpSqlCompiler
     private IrType InferHeapElementType(ElementAccessExpressionSyntax element, VariableScope scope)
     {
         var receiver = InferType(element.Expression, scope);
+        if (receiver.Name == "byte[]")
+            return new IrType("byte");
         if (IsSequenceType(receiver.Name))
             return SequenceElementType(receiver.Name);
         if (IsDictionaryType(receiver.Name))

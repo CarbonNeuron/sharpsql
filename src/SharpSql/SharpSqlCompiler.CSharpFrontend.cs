@@ -698,6 +698,8 @@ public sealed partial class SharpSqlCompiler
         if (!statement.Type.IsVar)
             return CSharpTypeFactory.From(statement.Type);
         var sourceType = InferType(statement.Expression, scope);
+        if (sourceType.Name == "byte[]")
+            return new IrType("byte");
         return IsSequenceType(sourceType.Name) || IsLinqSequenceType(sourceType.Name)
             ? SequenceElementType(sourceType.Name)
             : IrType.Unknown;

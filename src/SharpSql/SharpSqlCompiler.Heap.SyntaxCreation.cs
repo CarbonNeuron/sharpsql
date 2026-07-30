@@ -4,6 +4,66 @@ namespace SharpSql;
 
 public sealed partial class SharpSqlCompiler
 {
+    private void EmitNewByteArray(
+        ArrayCreationExpressionSyntax creation,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        if (creation.Type.RankSpecifiers.Count != 1 || creation.Type.RankSpecifiers[0].Sizes.Count != 1)
+        {
+            AddDiagnostic("SS6301", "Only one-dimensional arrays are supported.", creation);
+            continuation("NULL");
+            return;
+        }
+
+        if (creation.Initializer is not null)
+        {
+            EmitNewByteArray(creation.Initializer.Expressions.ToArray(), scope, context, continuation);
+            return;
+        }
+
+        EmitVmExpression(creation.Type.RankSpecifiers[0].Sizes[0], scope, context, size =>
+        {
+            var capturedSize = _names.Allocate("_byte_array_size");
+            _sql.Line($"DECLARE {capturedSize} INT = {size};");
+            _sql.Line($"IF {capturedSize} < 0 THROW 51013, 'Array dimensions exceeded the supported range.', 1;");
+            continuation(ByteArrayWithLengthSql(capturedSize));
+        });
+    }
+
+    private void EmitNewByteArray(
+        ImplicitArrayCreationExpressionSyntax creation,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation) =>
+        EmitNewByteArray(creation.Initializer.Expressions.ToArray(), scope, context, continuation);
+
+    private void EmitNewByteArray(
+        IReadOnlyList<ExpressionSyntax> values,
+        VariableScope scope,
+        VmMethod? context,
+        Action<string> continuation)
+    {
+        var captured = new List<string>();
+        Evaluate(0);
+
+        void Evaluate(int index)
+        {
+            if (index == values.Count)
+            {
+                continuation(ByteArrayInitializerSql(captured));
+                return;
+            }
+
+            EmitVmExpression(values[index], scope, context, value =>
+            {
+                captured.Add(value);
+                Evaluate(index + 1);
+            });
+        }
+    }
+
     private void EmitNewArray(
         ArrayCreationExpressionSyntax creation,
         VariableScope scope,

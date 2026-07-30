@@ -113,6 +113,11 @@ public sealed partial class SharpSqlCompiler
                 continuation($"CONVERT(INT, DATALENGTH({receiver}) / 2)");
                 return;
             }
+            if (receiverType.Name == "byte[]" && member.MemberName == "Length")
+            {
+                continuation($"CONVERT(INT, DATALENGTH({receiver}))");
+                return;
+            }
             if ((IsListType(receiverType.Name) && member.MemberName == "Count") ||
                 (IsArrayType(receiverType.Name) && member.MemberName == "Length") ||
                 (IsDictionaryType(receiverType.Name) && member.MemberName == "Count"))

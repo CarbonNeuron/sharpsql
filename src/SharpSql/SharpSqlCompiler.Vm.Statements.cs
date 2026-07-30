@@ -283,7 +283,7 @@ public sealed partial class SharpSqlCompiler
     private void EmitVmForEach(ProceduralForEach statement, VmMethod method)
     {
         var collectionType = statement.SourceExpression.Facts.Type;
-        if (!IsSequenceType(collectionType.Name))
+        if (!IsSequenceType(collectionType.Name) && collectionType.Name != "byte[]")
         {
             AddDiagnostic("SS6302", "foreach currently supports arrays and List<T>.", statement.SourceExpression.Source);
             return;
@@ -303,8 +303,14 @@ public sealed partial class SharpSqlCompiler
             EmitLabel(conditionLabel);
             var collectionValue = ReadVmTemporary(collectionStorage);
             var indexValue = ReadVmTemporary(indexStorage);
-            _sql.Line($"IF {indexValue} >= {SequenceCountSql(collectionValue)} GOTO {breakLabel};");
-            _sql.Line($"SET {item.SqlName} = {SequenceElementSql(collectionValue, indexValue, item.Type)};");
+            var count = collectionType.Name == "byte[]"
+                ? $"CONVERT(INT, DATALENGTH({collectionValue}))"
+                : SequenceCountSql(collectionValue);
+            var itemValue = collectionType.Name == "byte[]"
+                ? $"CONVERT(TINYINT, SUBSTRING({collectionValue}, {indexValue} + 1, 1))"
+                : SequenceElementSql(collectionValue, indexValue, item.Type);
+            _sql.Line($"IF {indexValue} >= {count} GOTO {breakLabel};");
+            _sql.Line($"SET {item.SqlName} = {itemValue};");
             EmitVmEmbeddedContents(statement.Body, method, new LoopContext(breakLabel, continueLabel));
             EmitLabel(continueLabel);
             if (UsesMemoryOptimizedRuntime)

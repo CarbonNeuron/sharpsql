@@ -496,6 +496,67 @@ public sealed class IrBoundaryTests
     }
 
     [Fact]
+    public void SqlBackendLowersByteArraysConstructedWithoutRoslyn()
+    {
+        var source = IrSource.None;
+        var byteType = new IrType("byte");
+        var byteFacts = new ExpressionFacts(byteType, ScalarNullability.NonNull, false, null);
+        var intFacts = new ExpressionFacts(IrType.Int, ScalarNullability.NonNull, false, null);
+        var arrayType = new IrType("byte[]", IsReference: true);
+        var arrayFacts = new ExpressionFacts(arrayType, ScalarNullability.NonNull, false, null);
+        var values = new IrSymbol(new IrSymbolId(1), "values", arrayType);
+        var selected = new IrSymbol(new IrSymbolId(2), "selected", byteType);
+        var length = new IrSymbol(new IrSymbolId(3), "length", IrType.Int);
+        var valuesExpression = new IrVariableExpression(source, arrayFacts, values);
+        IrConstantExpression Byte(int value) => new(source, byteFacts, (byte)value, value.ToString());
+        IrConstantExpression Int(int value) => new(source, intFacts, value, value.ToString());
+        var program = new IrProgram(
+            [],
+            new ProceduralBlock(
+                source,
+                [
+                    new ProceduralDeclarationStatement(
+                        source,
+                        new ProceduralDeclaration(
+                            source,
+                            [new ProceduralVariable(
+                                source,
+                                values,
+                                new IrArrayCreationExpression(
+                                    source,
+                                    arrayFacts,
+                                    byteType,
+                                    null,
+                                    [Byte(4), Byte(9)]))])),
+                    new ProceduralDeclarationStatement(
+                        source,
+                        new ProceduralDeclaration(
+                            source,
+                            [new ProceduralVariable(
+                                source,
+                                selected,
+                                new IrElementExpression(source, byteFacts, valuesExpression, [Int(1)]))])),
+                    new ProceduralDeclarationStatement(
+                        source,
+                        new ProceduralDeclaration(
+                            source,
+                            [new ProceduralVariable(
+                                source,
+                                length,
+                                new IrMemberExpression(source, intFacts, valuesExpression, "Length"))]))
+                ]),
+            []);
+
+        var result = new SharpSqlCompiler().Transpile(program);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("CONVERT(VARBINARY(MAX), CONVERT(BINARY(1), 4))", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CONVERT(TINYINT, SUBSTRING(@values, 1 + 1, 1))", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("DECLARE @length INT = CONVERT(INT, DATALENGTH(@values))", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("#__sharpsql_objects", result.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SqlBackendLowersRuntimeMemberReceiversConstructedWithoutRoslyn()
     {
         var source = IrSource.None;

@@ -353,7 +353,7 @@ integrations.
 - Top-level C# statements and conventional `Main` bodies
 - Multi-file SDK-style C# projects loaded with their real references, generated sources, global usings, language version, and conditional symbols
 - Installable `SharpSql.Sdk` integration with build-time SQL output, explicit transpile/run targets, IDE launch profiles, named development connections, reusable Testcontainers, transpile-only builds, and live Roslyn compatibility diagnostics
-- Core numeric types, `bool`, `char`, `string`, nullable values, date/time types, `Guid`, `byte[]`, and `object`
+- Core numeric types, `bool`, `char`, `string`, nullable values, date/time types, `Guid`, `byte[]`, and `object`; binary arrays support construction, length, indexed reads/writes, iteration, and `SequenceEqual`
 - Declarations, assignment, arithmetic, comparisons, boolean expressions, interpolation, and casts
 - String length/indexing and `string(char[])` construction
 - `if`/`else`, `while`, `do`, `for`, `foreach`, `break`, and `continue`
