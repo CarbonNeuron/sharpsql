@@ -102,17 +102,22 @@ public static class Program
         var executionTime = Stopwatch.StartNew();
         try
         {
-            if (parsed.RuntimeStorage == RuntimeStorageKind.ServiceBroker)
+            if (parsed.RuntimeStorage is RuntimeStorageKind.MemoryOptimized or RuntimeStorageKind.ServiceBroker)
             {
-                WriteProgress("provisioning Service Broker runtime...");
+                var runtimeName = parsed.RuntimeStorage == RuntimeStorageKind.ServiceBroker
+                    ? "Service Broker"
+                    : "memory-optimized";
+                WriteProgress($"provisioning {runtimeName} runtime...");
                 result = await SqlBatchExecutor.ExecuteAsync(
                     session.Connection,
-                    SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(),
+                    parsed.RuntimeStorage == RuntimeStorageKind.ServiceBroker
+                        ? SharpSqlServiceBrokerRuntime.GenerateProvisioningSql()
+                        : SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(),
                     parsed.CommandTimeoutSeconds,
                     new SqlBatchExecutionOptions(MessageReceived: Console.WriteLine),
                     cancellationToken);
                 if (result.Success)
-                    WriteProgress("Service Broker runtime ready.");
+                    WriteProgress($"{runtimeName} runtime ready.");
             }
 
             if (result.Success)

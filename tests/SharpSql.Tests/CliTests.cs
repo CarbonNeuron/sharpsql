@@ -179,6 +179,36 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task WritesMemoryOptimizedProgramAndInstallerToSeparateFiles()
+    {
+        var tester = CreateTester("""
+            int Sum(int value) => value == 0 ? 0 : value + Sum(value - 1);
+            Console.WriteLine(Sum(4));
+            """);
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-{Guid.NewGuid():N}.sql");
+        var installerPath = SqlOutputArtifacts.DefaultInstallerPath(outputPath);
+        try
+        {
+            var result = await tester.RunAsync(
+                ["--runtime-storage", "MemoryOptimized", "--output", outputPath],
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Contains(
+                "DECLARE @__sharpsql_memory_stack [SharpSql].[MemoryVmStackV1]",
+                await File.ReadAllTextAsync(outputPath, TestContext.Current.CancellationToken));
+            var installer = await File.ReadAllTextAsync(installerPath, TestContext.Current.CancellationToken);
+            Assert.Contains("CREATE TYPE [SharpSql].[MemoryVmStackV1]", installer);
+            Assert.Contains("WITH (MEMORY_OPTIMIZED = ON)", installer);
+        }
+        finally
+        {
+            File.Delete(outputPath);
+            File.Delete(installerPath);
+        }
+    }
+
+    [Fact]
     public async Task RendersGeneratedSpectreHelp()
     {
         var tester = CreateRoutedTester();

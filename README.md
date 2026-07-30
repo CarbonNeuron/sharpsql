@@ -112,10 +112,11 @@ The equivalent manual project configuration is:
 
 Async Service Broker projects opt in with
 `<SharpSqlRuntimeStorage>ServiceBroker</SharpSqlRuntimeStorage>`. The allowed
-values are `Ephemeral` (the default), `Durable`, and `ServiceBroker`; the same
+values are `Ephemeral` (the default), `MemoryOptimized`, `Durable`, and
+`ServiceBroker`; the same
 setting drives both live analyzer diagnostics and build-time SQL generation.
-The SDK's `SharpSqlRun` target provisions the Service Broker runtime before it
-executes a `ServiceBroker` program.
+The SDK's `SharpSqlRun` target provisions the selected database-scoped runtime
+before executing `MemoryOptimized` or `ServiceBroker` programs.
 
 The SDK also supplies `SharpSql.DatabaseException` for native SQL Server
 failures inside transpiled code. Its `Number`, `Severity`, `State`, `Procedure`,
@@ -234,7 +235,7 @@ Compile to a file:
 dotnet run --project src/SharpSql.Cli -- examples/objects.cs -o objects.sql
 ```
 
-When `--runtime-storage ServiceBroker` is selected, this also writes the
+When `--runtime-storage MemoryOptimized` or `ServiceBroker` is selected, this also writes the
 standalone runtime installer beside the program as `objects.installer.sql`.
 
 Verify a source file by running it as C# locally and running its generated SQL
@@ -390,6 +391,29 @@ SQL Server does not support temporary user-defined functions. SharpSql therefore
 3. Emit larger or recursive methods once as stack-machine blocks inside the batch.
 
 The fallback stores activation frames and typed slots in local temporary tables. Every static call site receives an integer continuation ID, and all returns share one generated dispatcher that jumps to literal T-SQL labels. Normal completion drops the tables; closing the SQL connection provides failure-path cleanup.
+
+### Memory-optimized legacy VM state
+
+`RuntimeStorageKind.MemoryOptimized` keeps the same direct SQL and label-based
+legacy lowering, but stores activation frames and spilled slots in execution-local
+memory-optimized table variables instead of tempdb tables. Provision the fixed table
+types once with `SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql()` or use
+the CLI installer output:
+
+```bash
+sharpsql transpile examples/recursion.cs \
+  --runtime-storage MemoryOptimized \
+  --output recursion.sql
+```
+
+SQL Server requires the target database to already have a
+`MEMORY_OPTIMIZED_DATA` filegroup and physical container. SharpSql deliberately
+does not create that deployment-specific, effectively irreversible infrastructure.
+The current experiment optimizes legacy VM frames and slots; managed heap and LINQ
+buffer tables remain ordinary local temporary tables. Scalar slot values use a
+typed binary round-trip because In-Memory OLTP does not support `SQL_VARIANT`.
+See the [memory-optimized runtime guide](docs/memory-optimized-runtime.md) for
+provisioning, measurements, and the current storage boundary.
 
 ## Managed objects and collections
 

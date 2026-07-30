@@ -8,7 +8,9 @@ public sealed partial class SharpSqlCompiler
     private const string RuntimeProvisioningLockResource = "SharpSql.Runtime.Provisioning";
     private string? _runtimeCleanupLabel;
 
-    private bool UsesDurableRuntime => _options.RuntimeStorage != RuntimeStorageKind.Ephemeral;
+    private bool UsesMemoryOptimizedRuntime => _options.RuntimeStorage == RuntimeStorageKind.MemoryOptimized;
+    private bool UsesDurableRuntime => _options.RuntimeStorage is
+        RuntimeStorageKind.Durable or RuntimeStorageKind.ServiceBroker;
     private bool UsesServiceBrokerRuntime => _options.RuntimeStorage == RuntimeStorageKind.ServiceBroker;
     private string RuntimeCleanupLabel => _runtimeCleanupLabel ??= _names.AllocateLabel("execution_cleanup");
 

@@ -4,15 +4,21 @@ namespace SharpSql;
 public enum RuntimeStorageKind
 {
     /// <summary>Use execution-local temporary tables and remove them at the end of the batch.</summary>
-    Ephemeral,
+    Ephemeral = 0,
+
+    /// <summary>
+    /// Use execution-local memory-optimized table variables for legacy VM state. The database
+    /// must first be provisioned with <see cref="SharpSqlMemoryOptimizedRuntime"/>.
+    /// </summary>
+    MemoryOptimized = 3,
 
     /// <summary>Use reusable permanent tables in the <c>SharpSql</c> schema, partitioned by execution.</summary>
-    Durable,
+    Durable = 1,
 
     /// <summary>
     /// Use the durable runtime and execute async continuations through SQL Server Service Broker.
     /// </summary>
-    ServiceBroker
+    ServiceBroker = 2
 }
 
 public sealed record TranspileOptions

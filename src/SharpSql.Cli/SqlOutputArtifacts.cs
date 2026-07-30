@@ -11,7 +11,7 @@ internal static class SqlOutputArtifacts
         string? installerOutputPath,
         RuntimeStorageKind runtimeStorage)
     {
-        if (runtimeStorage != RuntimeStorageKind.ServiceBroker)
+        if (!RequiresInstaller(runtimeStorage))
             return new SqlOutputArtifactPaths(outputPath, null);
         return new SqlOutputArtifactPaths(
             outputPath,
@@ -42,4 +42,7 @@ internal static class SqlOutputArtifacts
                 ? $"{fileName}.installer.sql"
                 : $"{fileName}.installer{extension}");
     }
+
+    internal static bool RequiresInstaller(RuntimeStorageKind runtimeStorage) => runtimeStorage is
+        RuntimeStorageKind.MemoryOptimized or RuntimeStorageKind.ServiceBroker;
 }

@@ -63,7 +63,7 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public int? CommandTimeoutSeconds { get; init; }
 
         [CommandOption("--runtime-storage <MODE>")]
-        [Description("Runtime state mode: Ephemeral (default), Durable, or ServiceBroker.")]
+        [Description("Runtime state mode: Ephemeral (default), MemoryOptimized, Durable, or ServiceBroker.")]
         [DefaultValue(RuntimeStorageKind.Ephemeral)]
         public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;
 
@@ -72,7 +72,7 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
         public string? OutputPath { get; init; }
 
         [CommandOption("--installer-output <OUTPUT>")]
-        [Description("Write the standalone Service Broker installer SQL to this file.")]
+        [Description("Write standalone runtime provisioning SQL to this file.")]
         public string? InstallerOutputPath { get; init; }
 
         [CommandOption("--debug")]
@@ -102,8 +102,8 @@ public sealed class RunCommand : AsyncCommand<RunCommand.Settings>
                 return ValidationResult.Error("--output cannot be empty.");
             if (string.IsNullOrWhiteSpace(InstallerOutputPath) && InstallerOutputPath is not null)
                 return ValidationResult.Error("--installer-output cannot be empty.");
-            if (InstallerOutputPath is not null && RuntimeStorage != RuntimeStorageKind.ServiceBroker)
-                return ValidationResult.Error("--installer-output requires --runtime-storage ServiceBroker.");
+            if (InstallerOutputPath is not null && !SqlOutputArtifacts.RequiresInstaller(RuntimeStorage))
+                return ValidationResult.Error("--installer-output requires MemoryOptimized or ServiceBroker runtime storage.");
             if (OutputPath is not null && InstallerOutputPath is not null &&
                 string.Equals(
                     Path.GetFullPath(OutputPath),

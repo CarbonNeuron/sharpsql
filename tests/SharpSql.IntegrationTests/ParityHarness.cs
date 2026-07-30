@@ -77,9 +77,10 @@ public static class ParityHarness
     public static async Task<SqlExecutionOutcome> ExecuteSqlAsync(
         ParityCase testCase,
         string connectionString,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TranspileOptions? options = null)
     {
-        var transpileResult = new SharpSqlCompiler().Transpile(testCase.Source);
+        var transpileResult = new SharpSqlCompiler().Transpile(testCase.Source, options);
         if (!transpileResult.Success)
         {
             var failure = new ExecutionFailure(

@@ -299,8 +299,10 @@ public sealed class SqlRunService : ISqlRunService
         }
     }
 
-    private static string? InstallerSql(RuntimeStorageKind runtimeStorage) =>
-        runtimeStorage == RuntimeStorageKind.ServiceBroker
-            ? SharpSqlServiceBrokerRuntime.GenerateProvisioningSql()
-            : null;
+    private static string? InstallerSql(RuntimeStorageKind runtimeStorage) => runtimeStorage switch
+    {
+        RuntimeStorageKind.MemoryOptimized => SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(),
+        RuntimeStorageKind.ServiceBroker => SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(),
+        _ => null
+    };
 }

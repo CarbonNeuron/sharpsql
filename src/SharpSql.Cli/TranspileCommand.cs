@@ -18,7 +18,7 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         public string? OutputPath { get; init; }
 
         [CommandOption("--installer-output <OUTPUT>")]
-        [Description("Write the standalone Service Broker installer SQL to this file.")]
+        [Description("Write standalone runtime provisioning SQL to this file.")]
         public string? InstallerOutputPath { get; init; }
 
         [CommandOption("--entry <METHOD>")]
@@ -35,7 +35,7 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         public string? TargetFramework { get; init; }
 
         [CommandOption("--runtime-storage <MODE>")]
-        [Description("Runtime state mode: Ephemeral (default), Durable, or ServiceBroker.")]
+        [Description("Runtime state mode: Ephemeral (default), MemoryOptimized, Durable, or ServiceBroker.")]
         [DefaultValue(RuntimeStorageKind.Ephemeral)]
         public RuntimeStorageKind RuntimeStorage { get; init; } = RuntimeStorageKind.Ephemeral;
 
@@ -52,8 +52,8 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
                 return ValidationResult.Error("--output cannot be empty.");
             if (string.IsNullOrWhiteSpace(InstallerOutputPath) && InstallerOutputPath is not null)
                 return ValidationResult.Error("--installer-output cannot be empty.");
-            if (InstallerOutputPath is not null && RuntimeStorage != RuntimeStorageKind.ServiceBroker)
-                return ValidationResult.Error("--installer-output requires --runtime-storage ServiceBroker.");
+            if (InstallerOutputPath is not null && !SqlOutputArtifacts.RequiresInstaller(RuntimeStorage))
+                return ValidationResult.Error("--installer-output requires MemoryOptimized or ServiceBroker runtime storage.");
             if (OutputPath is not null && InstallerOutputPath is not null &&
                 string.Equals(
                     Path.GetFullPath(OutputPath),
@@ -120,17 +120,22 @@ public sealed class TranspileCommand : AsyncCommand<TranspileCommand.Settings>
         await SqlOutputArtifacts.WriteAsync(
             artifactPaths,
             result.Sql,
-            settings.RuntimeStorage == RuntimeStorageKind.ServiceBroker
-                ? SharpSqlServiceBrokerRuntime.GenerateProvisioningSql()
-                : null,
+            InstallerSql(settings.RuntimeStorage),
             cancellationToken);
-        if (settings.RuntimeStorage == RuntimeStorageKind.ServiceBroker && artifactPaths.InstallerPath is null)
+        if (SqlOutputArtifacts.RequiresInstaller(settings.RuntimeStorage) && artifactPaths.InstallerPath is null)
         {
             const string message =
-                "Service Broker installer SQL was not written; use --output or --installer-output to create it.";
+                "Runtime installer SQL was not written; use --output or --installer-output to create it.";
             if (environment.Error is not null)
                 await environment.Error.WriteLineAsync(message.AsMemory(), cancellationToken);
         }
         return 0;
     }
+
+    private static string? InstallerSql(RuntimeStorageKind runtimeStorage) => runtimeStorage switch
+    {
+        RuntimeStorageKind.MemoryOptimized => SharpSqlMemoryOptimizedRuntime.GenerateProvisioningSql(),
+        RuntimeStorageKind.ServiceBroker => SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(),
+        _ => null
+    };
 }
