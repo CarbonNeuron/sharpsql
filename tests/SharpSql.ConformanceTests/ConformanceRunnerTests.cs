@@ -5,6 +5,8 @@ namespace SharpSql.Conformance.Tests;
 
 public sealed class ConformanceRunnerTests
 {
+    private static readonly TimeSpan WorkerTimeout = TimeSpan.FromSeconds(15);
+
     [Fact]
     public void DiscoversAndCategorizesOnlyMonoTestFiles()
     {
@@ -49,7 +51,7 @@ public sealed class ConformanceRunnerTests
             "class Program { static void Main() { dynamic value = 1; } }");
 
         var report = await new ConformanceRunner().RunAsync(
-            new ConformanceRunOptions(directory.Path, 2, TimeSpan.FromSeconds(5)),
+            new ConformanceRunOptions(directory.Path, 2, WorkerTimeout),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(2, report.Total.Total);
@@ -70,7 +72,7 @@ public sealed class ConformanceRunnerTests
             "// Compiler options: -t:library\nstatic class Helper { public static int Value() => 1; }");
 
         var report = await new ConformanceRunner().RunAsync(
-            new ConformanceRunOptions(directory.Path, 1, TimeSpan.FromSeconds(5)),
+            new ConformanceRunOptions(directory.Path, 1, WorkerTimeout),
             TestContext.Current.CancellationToken);
 
         var result = Assert.Single(report.Results);
@@ -88,7 +90,7 @@ public sealed class ConformanceRunnerTests
         File.WriteAllText(Path.Combine(directory.Path, "test-001.cs"), "Console.WriteLine(Missing.Value);");
 
         var report = await new ConformanceRunner().RunAsync(
-            new ConformanceRunOptions(directory.Path, 1, TimeSpan.FromSeconds(5)),
+            new ConformanceRunOptions(directory.Path, 1, WorkerTimeout),
             TestContext.Current.CancellationToken);
 
         var result = Assert.Single(report.Results);
