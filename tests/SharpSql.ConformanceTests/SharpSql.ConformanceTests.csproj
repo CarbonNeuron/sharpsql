@@ -11,5 +11,6 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <ProjectReference Include="../../src/SharpSql/SharpSql.csproj" />
+    <ProjectReference Include="../../src/SharpSql.Conformance/SharpSql.Conformance.csproj" />
   </ItemGroup>
 </Project>

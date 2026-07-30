@@ -40,10 +40,11 @@ public sealed class ServiceBrokerInfrastructureIntegrationTests(SqlServerFixture
             command.Parameters.AddWithValue("@executionId", executionId);
             await using var reader = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken);
             Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
-            Assert.Equal(1L, reader.GetInt64(0));
+            var firstSequence = reader.GetInt64(0);
+            Assert.True(firstSequence > 0);
             Assert.Equal("first", reader.GetString(1));
             Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
-            Assert.Equal(2L, reader.GetInt64(0));
+            Assert.Equal(firstSequence + 1, reader.GetInt64(0));
             Assert.Equal("second", reader.GetString(1));
             Assert.False(await reader.ReadAsync(TestContext.Current.CancellationToken));
         }
@@ -68,10 +69,7 @@ public sealed class ServiceBrokerInfrastructureIntegrationTests(SqlServerFixture
         {
             await using var command = connection.CreateCommand();
             command.CommandText = """
-                INSERT INTO [SharpSql].[Executions] ([ExecutionId], [NextOutputSequence])
-                VALUES (@executionId, 1);
-                INSERT INTO [SharpSql].[OutputEvents] ([ExecutionId], [SequenceNumber], [OutputText])
-                VALUES (@executionId, 1, N'existing');
+                INSERT INTO [SharpSql].[Executions] ([ExecutionId]) VALUES (@executionId);
 
                 DECLARE @caughtError INT;
                 DECLARE @caughtXactState INT;
@@ -80,8 +78,8 @@ public sealed class ServiceBrokerInfrastructureIntegrationTests(SqlServerFixture
                 BEGIN TRANSACTION;
                 BEGIN TRY
                     EXEC [SharpSql].[AppendOutput]
-                        @ExecutionId = @executionId,
-                        @OutputText = N'duplicate sequence';
+                        @ExecutionId = @missingExecutionId,
+                        @OutputText = N'missing execution';
                 END TRY
                 BEGIN CATCH
                     SELECT @caughtError = ERROR_NUMBER(), @caughtXactState = XACT_STATE();
@@ -113,12 +111,13 @@ public sealed class ServiceBrokerInfrastructureIntegrationTests(SqlServerFixture
                 """;
             command.Parameters.AddWithValue("@executionId", executionId);
             command.Parameters.AddWithValue("@persistedExecutionId", persistedExecutionId);
+            command.Parameters.AddWithValue("@missingExecutionId", Guid.NewGuid());
             await using var reader = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken);
             Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
-            Assert.Contains(reader.GetInt32(0), new[] { 2601, 2627 });
+            Assert.Equal(ExecutionInfrastructureSqlEmitter.ExecutionNotFoundErrorNumber, reader.GetInt32(0));
             Assert.Equal(1, reader.GetInt32(1));
             Assert.Equal(1L, reader.GetInt64(2));
-            Assert.Equal(1, reader.GetInt32(3));
+            Assert.Equal(0, reader.GetInt32(3));
             Assert.Equal(1, reader.GetInt32(4));
         }
         finally

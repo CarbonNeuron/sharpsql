@@ -61,6 +61,89 @@ public sealed class NativeCompiledKernelExperimentTests(SqlServerFixture sqlServ
     }
 
     [Fact]
+    public async Task CatalogsPreviewsAndSafelyRemovesUnusedCompiledKernels()
+    {
+        const string source = """
+            int Sum(int count)
+            {
+                int value = 0;
+                int index = 0;
+                while (index < count)
+                {
+                    value += index;
+                    index++;
+                }
+                return value;
+            }
+
+            int result = Sum(10);
+            Console.WriteLine(result);
+            """;
+        var compilation = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions
+            {
+                RuntimeStorage = RuntimeStorageKind.MemoryOptimized,
+                EnableNativeKernels = true
+            });
+        Assert.True(compilation.Success, string.Join(Environment.NewLine, compilation.Diagnostics));
+
+        var connectionString = await sqlServer.GetMemoryOptimizedConnectionStringAsync(
+            TestContext.Current.CancellationToken);
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandTimeout = 120;
+        command.CommandText = compilation.Sql;
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+
+        var kernelName = System.Text.RegularExpressions.Regex.Match(
+            compilation.Sql,
+            @"NativeKernel_[0-9a-f]{32}",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant).Value;
+        Assert.NotEmpty(kernelName);
+        command.CommandText = SharpSqlNativeKernelRuntime.GenerateStatusSql("SharpSql");
+        await using (var status = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken))
+        {
+            var found = false;
+            while (await status.ReadAsync(TestContext.Current.CancellationToken))
+            {
+                if (!string.Equals(status.GetString(0), kernelName, StringComparison.Ordinal))
+                    continue;
+                Assert.True(status.GetBoolean(3));
+                found = true;
+            }
+            Assert.True(found, $"Kernel {kernelName} was not returned by the status query.");
+        }
+
+        command.CommandText = "UPDATE [SharpSql].[NativeKernelCatalog] SET [LastUsedAtUtc] = DATEADD(DAY, -2, SYSUTCDATETIME()) WHERE [KernelName] = @kernelName;";
+        command.Parameters.AddWithValue("@kernelName", kernelName);
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        command.Parameters.Clear();
+
+        command.CommandText = SharpSqlNativeKernelRuntime.GenerateCleanupSql(
+            "SharpSql",
+            TimeSpan.FromMinutes(1),
+            dryRun: true);
+        await using (var preview = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken))
+        {
+            Assert.True(await preview.ReadAsync(TestContext.Current.CancellationToken));
+            Assert.Equal(kernelName, preview.GetString(0));
+            Assert.False(preview.GetBoolean(1));
+        }
+
+        command.CommandText = SharpSqlNativeKernelRuntime.GenerateCleanupSql(
+            "SharpSql",
+            TimeSpan.FromMinutes(1));
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        command.CommandText = "SELECT COUNT_BIG(*) FROM [SharpSql].[NativeKernelCatalog] WHERE [KernelName] = @kernelName;";
+        command.Parameters.AddWithValue("@kernelName", kernelName);
+        Assert.Equal(0L, (long)(await command.ExecuteScalarAsync(TestContext.Current.CancellationToken))!);
+        command.CommandText = "SELECT OBJECT_ID(N'[SharpSql].' + QUOTENAME(@kernelName), N'P');";
+        Assert.Equal(DBNull.Value, await command.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     [Trait("Category", "Performance")]
     public async Task MeasuresNativeScalarKernelCalledByInterpretedWrapper()
     {

@@ -7,6 +7,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Emit;
 using Microsoft.CodeAnalysis.Text;
 using Microsoft.Data.SqlClient;
+using SharpSql.SqlServer;
 
 namespace SharpSql.IntegrationTests;
 
@@ -90,43 +91,25 @@ public static class ParityHarness
             return new SqlExecutionOutcome(new ExecutionOutcome(string.Empty, null, failure), transpileResult.Sql);
         }
 
-        using var output = new StringWriter(CultureInfo.InvariantCulture);
-        var errors = new List<SqlFailure>();
         await using var connection = new SqlConnection(connectionString)
         {
             FireInfoMessageEventOnUserErrors = true
         };
-        connection.InfoMessage += (_, args) =>
-        {
-            foreach (SqlError error in args.Errors)
-            {
-                if (error.Class == 0)
-                    output.WriteLine(error.Message);
-                else
-                    errors.Add(new SqlFailure(error.Number, error.Message));
-            }
-        };
-
         await connection.OpenAsync(cancellationToken);
-        ExecutionFailure? executionFailure = null;
-        try
-        {
-            await using var command = connection.CreateCommand();
-            command.CommandText = transpileResult.Sql;
-            command.CommandTimeout = 60;
-            await command.ExecuteNonQueryAsync(cancellationToken);
-        }
-        catch (SqlException exception)
-        {
-            var error = exception.Errors.Cast<SqlError>()
-                .FirstOrDefault(candidate => RuntimeErrorCatalog.IsSharpSqlRuntimeError(candidate.Number))
-                ?? exception.Errors.Cast<SqlError>().First();
-            executionFailure = NormalizeSqlFailure(new SqlFailure(error.Number, error.Message));
-        }
-
-        executionFailure ??= errors.Count > 0 ? NormalizeSqlFailure(errors[0]) : null;
+        var result = await SqlBatchExecutor.ExecuteAsync(
+            connection,
+            transpileResult.Sql,
+            60,
+            new SqlBatchExecutionOptions
+            {
+                PreferredErrorNumber = RuntimeErrorCatalog.IsSharpSqlRuntimeError
+            },
+            cancellationToken);
+        var executionFailure = result.Success
+            ? null
+            : NormalizeSqlFailure(result.ErrorNumber!.Value, result.ErrorMessage!);
         return new SqlExecutionOutcome(
-            new ExecutionOutcome(NormalizeOutput(output.ToString()), null, executionFailure),
+            new ExecutionOutcome(result.StandardOutput, null, executionFailure),
             transpileResult.Sql);
     }
 
@@ -191,13 +174,13 @@ public static class ParityHarness
             try
             {
                 var returnValue = await action();
-                return new ExecutionOutcome(NormalizeOutput(output.ToString()), returnValue, null);
+                return new ExecutionOutcome(SqlBatchOutput.Normalize(output.ToString()), returnValue, null);
             }
             catch (Exception exception)
             {
                 exception = Unwrap(exception);
                 return new ExecutionOutcome(
-                    NormalizeOutput(output.ToString()),
+                    SqlBatchOutput.Normalize(output.ToString()),
                     null,
                     new ExecutionFailure(FailureCategory.Runtime, exception.GetType().Name, exception.Message));
             }
@@ -230,10 +213,10 @@ public static class ParityHarness
         return exception;
     }
 
-    private static ExecutionFailure NormalizeSqlFailure(SqlFailure failure)
+    private static ExecutionFailure NormalizeSqlFailure(int number, string message)
     {
-        var type = RuntimeErrorCatalog.ExceptionTypeName(failure.Number) ?? nameof(SqlException);
-        return new ExecutionFailure(FailureCategory.Runtime, type, failure.Message, failure.Number);
+        var failure = RuntimeErrorCatalog.NormalizeSqlFailure(number, message);
+        return new ExecutionFailure(FailureCategory.Runtime, failure.Type, failure.Message, failure.Code);
     }
 
     private static string FormatOutcome(ExecutionOutcome outcome) =>
@@ -244,9 +227,4 @@ public static class ParityHarness
               $"; message={Quote(outcome.Failure.Message)}; stdout={Quote(outcome.StandardOutput)}";
 
     private static string Quote(string? value) => value is null ? "<null>" : $"\"{value.Replace("\n", "\\n", StringComparison.Ordinal)}\"";
-
-    private static string NormalizeOutput(string output) =>
-        output.Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd('\r', '\n');
-
-    private sealed record SqlFailure(int Number, string Message);
 }

@@ -7,7 +7,7 @@ namespace SharpSql;
 public sealed partial class SharpSqlCompiler
 {
     private readonly Dictionary<IrMethodId, NativeKernelPlan?> _nativeKernelPlans = [];
-    private readonly List<string> _nativeKernelProvisioning = [];
+    private readonly List<NativeKernelPlan> _nativeKernelProvisioning = [];
 
     private void ValidateNativeKernelOptions(IrSource source)
     {
@@ -36,7 +36,7 @@ public sealed partial class SharpSqlCompiler
             plan = NativeKernelEmitter.TryCreate(method, _methodGraph, _options.ApplicationSchema);
             _nativeKernelPlans.Add(method.Id, plan);
             if (plan is not null)
-                _nativeKernelProvisioning.Add(plan.ProvisioningSql);
+                _nativeKernelProvisioning.Add(plan);
         }
         if (plan is null)
             return false;
@@ -55,14 +55,42 @@ public sealed partial class SharpSqlCompiler
         }
 
         var status = _names.Allocate("_native_kernel_status");
-        _sql.Line($"DECLARE {status} INT;");
-        _sql.Line($"EXEC {status} = {plan.QualifiedName}");
+        var lockResult = _names.Allocate("_native_kernel_lock_result");
+        var lockResource = NativeKernelRuntimeSqlEmitter.KernelLockResource(
+            _options.ApplicationSchema,
+            plan.Name);
+        _sql.Line($"DECLARE {lockResult} INT;");
+        _sql.Line($"EXEC {lockResult} = sys.sp_getapplock");
         using (_sql.Indent())
         {
-            for (var index = 0; index < argumentVariables.Length; index++)
-                _sql.Line($"@p{index} = {argumentVariables[index]},");
-            _sql.Line($"@__result = {result} OUTPUT;");
+            _sql.Line($"@Resource = {SqlIdentifier.UnicodeLiteral(lockResource)},");
+            _sql.Line("@LockMode = N'Shared',");
+            _sql.Line("@LockOwner = N'Session',");
+            _sql.Line("@LockTimeout = 60000,");
+            _sql.Line("@DbPrincipal = N'public';");
         }
+        _sql.Line($"IF {lockResult} < 0 THROW {NativeKernelRuntimeSqlEmitter.LockErrorNumber}, 'Could not acquire the SharpSql native-kernel execution lock.', 1;");
+        _sql.Line($"DECLARE {status} INT;");
+        _sql.Line("BEGIN TRY");
+        using (_sql.Indent())
+        {
+            _sql.Line($"EXEC {status} = {plan.QualifiedName}");
+            using (_sql.Indent())
+            {
+                for (var index = 0; index < argumentVariables.Length; index++)
+                    _sql.Line($"@p{index} = {argumentVariables[index]},");
+                _sql.Line($"@__result = {result} OUTPUT;");
+            }
+            _sql.Line($"EXEC sys.sp_releaseapplock @Resource = {SqlIdentifier.UnicodeLiteral(lockResource)}, @LockOwner = N'Session', @DbPrincipal = N'public';");
+        }
+        _sql.Line("END TRY");
+        _sql.Line("BEGIN CATCH");
+        using (_sql.Indent())
+        {
+            _sql.Line($"EXEC sys.sp_releaseapplock @Resource = {SqlIdentifier.UnicodeLiteral(lockResource)}, @LockOwner = N'Session', @DbPrincipal = N'public';");
+            _sql.Line("THROW;");
+        }
+        _sql.Line("END CATCH;");
         _sql.Line($"IF {status} <> 0 THROW 51930, 'Native SharpSql kernel returned a failure status.', 1;");
         return true;
     }
@@ -85,13 +113,21 @@ public sealed partial class SharpSqlCompiler
         preamble.Line($"IF SCHEMA_ID({SqlIdentifier.UnicodeLiteral(schemaName)}) IS NULL");
         using (preamble.Indent())
             preamble.Line("THROW 51931, 'Provision the SharpSql memory-optimized runtime before using native kernels.', 1;");
-        foreach (var provisioning in _nativeKernelProvisioning)
-            preamble.Line(provisioning);
+        foreach (var line in NativeKernelRuntimeSqlEmitter.EmitProvisioning(
+                     schemaName,
+                     _nativeKernelProvisioning.Select(plan => new NativeKernelDefinition(
+                         plan.Name,
+                         plan.QualifiedName,
+                         plan.ProvisioningSql)))
+                 .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            preamble.Line(line);
+        }
         preamble.Line();
         return preamble + program;
     }
 
-    private sealed record NativeKernelPlan(string QualifiedName, string ProvisioningSql);
+    private sealed record NativeKernelPlan(string Name, string QualifiedName, string ProvisioningSql);
 
     private static class NativeKernelEmitter
     {
@@ -113,11 +149,14 @@ public sealed partial class SharpSqlCompiler
                 method.ReturnType == IrType.Void || !SupportedType(method.ReturnType) ||
                 method.Parameters.Any(parameter => !SupportedType(parameter.Type)) ||
                 (method.Behavior.Effects & DisallowedEffects) != 0 ||
-                graph?.RecursiveMethodIds.Contains(method.Id) == true ||
-                !ContainsLoop(method.Body))
+                graph?.RecursiveMethodIds.Contains(method.Id) == true)
             {
                 return null;
             }
+
+            var core = CoreIrLowerer.Lower(method);
+            if (core.Method is null || !ContainsLoop(core.Method))
+                return null;
 
             var body = new SqlWriter();
             var symbols = method.Parameters
@@ -159,7 +198,7 @@ public sealed partial class SharpSqlCompiler
             var escapedCreateSql = createSql.Replace("'", "''", StringComparison.Ordinal);
             var provisioning =
                 $"IF OBJECT_ID({SqlIdentifier.UnicodeLiteral(qualifiedName)}, N'P') IS NULL EXEC(N'{escapedCreateSql}');";
-            return new NativeKernelPlan(qualifiedName, provisioning);
+            return new NativeKernelPlan(name, qualifiedName, provisioning);
         }
 
         private static bool EmitStatements(
@@ -341,13 +380,14 @@ public sealed partial class SharpSqlCompiler
         private static bool SupportedType(IrType type) => type.Name is
             "int" or "long";
 
-        private static bool ContainsLoop(ProceduralStatement statement) => statement switch
-        {
-            ProceduralWhile => true,
-            ProceduralBlock block => block.Statements.Any(ContainsLoop),
-            ProceduralIf @if => ContainsLoop(@if.Then) || @if.Else is not null && ContainsLoop(@if.Else),
-            _ => false
-        };
+        private static bool ContainsLoop(CoreMethod method) => method.Blocks.Any(block =>
+            block.Terminator switch
+            {
+                CoreJump jump => jump.Target.Value <= block.Id.Value,
+                CoreBranch branch => branch.WhenTrue.Value <= block.Id.Value ||
+                    branch.WhenFalse.Value <= block.Id.Value,
+                _ => false
+            });
 
         private static string Hash(string value)
         {

@@ -64,8 +64,27 @@ EXEC [BillingJobs].[Run];
 ```
 
 Treat a schema as owned by one SharpSql application. Publishing a different
-application into the same schema replaces the package entry procedure and manifest;
-it is not a side-by-side deployment mechanism.
+application into the same schema is rejected; it is not a side-by-side deployment
+mechanism. Changing the entry-procedure name during an upgrade removes the previous
+entry procedure after the replacement has been created successfully.
+
+## Uninstall an application
+
+Remove the installed entry procedure, manifest, application-local native kernels,
+and memory-optimized runtime types with the same persistent connection configuration:
+
+```bash
+sharpsql unpublish \
+  --connection Production \
+  --schema BillingJobs \
+  --name BillingReconciliation
+```
+
+The command checks the application identity in `PackageManifest` before removing
+anything and serializes against concurrent publishers. It deliberately retains the
+schema and any objects it does not recognize as SharpSql-owned. A failed removal is
+transactionally rolled back; dependent operator-created objects must be removed
+before retrying.
 
 ## Memory-optimized and native packages
 

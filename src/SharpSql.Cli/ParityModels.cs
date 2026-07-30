@@ -35,6 +35,12 @@ public sealed record ParityRunRequest(
     bool Profile = false)
 {
     public bool IsProject => Source is null;
+
+    /// <summary>Gets source paths compiled together for a normalized multi-file source request.</summary>
+    public IReadOnlyList<string>? SourcePaths { get; init; }
+
+    /// <summary>Gets an existing SQL Server connection used instead of creating a container session.</summary>
+    public string? ConnectionString { get; init; }
 }
 
 /// <summary>Describes a failure observed during parity verification.</summary>

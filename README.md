@@ -59,6 +59,11 @@ dotnet tool install --global SharpSql.Tool
 sharpsql --help
 ```
 
+The supported NuGet surface consists of `SharpSql.Tool` and `SharpSql.Sdk`.
+The compiler, IR, and MSBuild-loading assemblies are internal implementation
+components bundled with those products; they are not published as standalone
+packages.
+
 ### Project build and IDE integration
 
 Let the tool install and configure the SDK in a console project:
@@ -209,6 +214,17 @@ and version in `[MyApp].[PackageManifest]`. The installer is idempotent, so the 
 deployment can be retried safely. Publishing requires an explicit configured
 connection and does not start a Testcontainer.
 
+Remove an installed package with its schema and manifest identity. The application
+schema is retained, while the entry procedure, manifest, memory runtime types, and
+native kernels owned by SharpSql are removed:
+
+```bash
+sharpsql unpublish \
+  --connection Production \
+  --schema MyApp \
+  --name MyApp
+```
+
 Use `--memory-optimized` for schema-local memory runtime objects and add
 `--native-kernels` for eligible native procedures. The database must already have a
 `MEMORY_OPTIMIZED_DATA` filegroup and container; SharpSql does not create that physical
@@ -284,8 +300,9 @@ Add `--keep-container` to retain and reuse the matching SQL Server container on
 later verification runs. Without the option, verification still reuses a
 matching retained container when one exists, then removes it at the end.
 Retained containers are labeled
-`io.sharpsql.verify.reusable=true` so they can be found or removed with Docker
-Desktop or the Docker CLI.
+`io.sharpsql.sqlserver.reusable=true` so they can be found or removed with Docker
+Desktop or the Docker CLI. The `io.sharpsql.sqlserver.scope` label separates
+containers belonging to different projects or source scopes.
 
 Use `--debug` to report actual SQL plan statement/operator counts, estimated
 cost, compile resources, generated SQL size, and SharpSql heap allocations
@@ -322,25 +339,10 @@ The CLI reads C# from standard input when no input path is supplied:
 echo 'Console.WriteLine("Hello from SQL");' | dotnet run --project src/SharpSql.Cli
 ```
 
-The compiler can also be embedded directly:
-
-```csharp
-using SharpSql;
-
-var result = new SharpSqlCompiler().Transpile(source);
-if (!result.Success)
-    throw new InvalidOperationException(string.Join(Environment.NewLine, result.Diagnostics));
-
-Console.WriteLine(result.Sql);
-```
-
-Project loading is available separately so basic compiler consumers do not need to host MSBuild:
-
-```csharp
-var result = await new SharpSqlProjectCompiler().TranspileAsync(
-    "MyProject.csproj",
-    new ProjectTranspileOptions { EntryPoint = "MyCompany.Reporting.MonthEnd::Run" });
-```
+The repository contains compiler and MSBuild-loading source APIs used by the tool,
+SDK, and tests. They are implementation surfaces, not separately versioned or
+published libraries; use `SharpSql.Tool` or `SharpSql.Sdk` for released
+integrations.
 
 ## What works today
 
@@ -473,7 +475,7 @@ class Person
 
 The heap is allocation-only for the life of the script. Dropping its temporary tables reclaims the whole heap at once.
 
-Experimental durable modes are also available through the compiler API. `Durable`
+Repository source integrations also expose the experimental durable modes. `Durable`
 partitions shared heap and VM tables by execution ID. `ServiceBroker` additionally
 lowers the supported `Task.Delay`/`Task.WhenAll` fork-join shape into durable
 continuations executed by an activated SQL Server worker pool, with task results,
@@ -567,6 +569,11 @@ dotnet test tests/SharpSql.Tests --configuration Release
 Add a runtime-failure case under `cases/runtime-exceptions` with a directive such as `// sharpsql-expect-exception: KeyNotFoundException`. Add an intentionally unsupported but valid C# case under `cases/diagnostics` with `// sharpsql-expect-diagnostics: SS6301` (comma-separate multiple expected codes). Case paths are sorted deterministically and included in test names and failure reports; parity failures also print both structured outcomes, generated SQL, and source.
 
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing new language behavior, and include tests that make any C#/T-SQL semantic difference explicit.
+
+The `conformance` command measures CLR-valid transpilation by default. Add
+`--semantic COUNT` to execute up to that many observable transpiled corpus cases on
+both the CLR and SQL Server; the JSON report records this opt-in sample separately as
+`semanticResults` and does not treat it as whole-corpus semantic coverage.
 
 ## License
 

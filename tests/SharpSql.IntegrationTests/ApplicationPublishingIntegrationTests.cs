@@ -118,6 +118,51 @@ public sealed class ApplicationPublishingIntegrationTests(SqlServerFixture sqlSe
         Assert.Equal(nameof(RuntimeStorageKind.MemoryOptimized), reader.GetString(3));
     }
 
+    [Fact]
+    public async Task PublishEnforcesSchemaOwnershipAndUninstallRemovesOwnedObjects()
+    {
+        const string schema = "PublishingLifecycleTests";
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var connection = new SqlConnection(sqlServer.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        var initial = new SharpSqlApplicationPackage(schema, "LifecycleJob", "1.0.0", "PRINT N'first';")
+        {
+            EntryProcedureName = "RunV1"
+        };
+        var upgraded = initial with
+        {
+            Version = "2.0.0",
+            CompiledProgramSql = "PRINT N'second';",
+            EntryProcedureName = "RunV2"
+        };
+
+        await AssertSucceedsAsync(connection, initial.GenerateInstallSql());
+        await AssertSucceedsAsync(connection, upgraded.GenerateInstallSql());
+
+        await using (var renamedEntry = connection.CreateCommand())
+        {
+            renamedEntry.CommandText = $"SELECT OBJECT_ID(N'[{schema}].[RunV1]', N'P'), OBJECT_ID(N'[{schema}].[RunV2]', N'P');";
+            await using var reader = await renamedEntry.ExecuteReaderAsync(cancellationToken);
+            Assert.True(await reader.ReadAsync(cancellationToken));
+            Assert.True(reader.IsDBNull(0));
+            Assert.False(reader.IsDBNull(1));
+        }
+
+        var conflicting = upgraded with { ApplicationName = "DifferentJob" };
+        var conflictResult = await SqlBatchExecutor.ExecuteAsync(connection, conflicting.GenerateInstallSql(), 60, cancellationToken);
+        Assert.False(conflictResult.Success);
+        Assert.Equal(51942, conflictResult.ErrorNumber);
+
+        await AssertSucceedsAsync(connection, upgraded.GenerateUninstallSql());
+        await using var removedObjects = connection.CreateCommand();
+        removedObjects.CommandText = $"SELECT OBJECT_ID(N'[{schema}].[PackageManifest]', N'U'), OBJECT_ID(N'[{schema}].[RunV2]', N'P'), SCHEMA_ID(N'{schema}');";
+        await using var removedReader = await removedObjects.ExecuteReaderAsync(cancellationToken);
+        Assert.True(await removedReader.ReadAsync(cancellationToken));
+        Assert.True(removedReader.IsDBNull(0));
+        Assert.True(removedReader.IsDBNull(1));
+        Assert.False(removedReader.IsDBNull(2));
+    }
+
     private static async Task AssertSucceedsAsync(SqlConnection connection, string sql)
     {
         var result = await SqlBatchExecutor.ExecuteAsync(

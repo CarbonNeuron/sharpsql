@@ -3,6 +3,13 @@ using Xunit;
 
 namespace SharpSql.Tests;
 
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class BuildHostConsoleCollection
+{
+    public const string Name = "Build host console";
+}
+
+[Collection(BuildHostConsoleCollection.Name)]
 public sealed class BuildHostTests
 {
     private static string ProjectPath => Path.Combine(
@@ -16,6 +23,12 @@ public sealed class BuildHostTests
         "fixtures",
         "ServiceBrokerProject",
         "ServiceBrokerProject.csproj");
+
+    private static string MemoryOptimizedProjectPath => Path.Combine(
+        AppContext.BaseDirectory,
+        "fixtures",
+        "MemoryOptimizedProject",
+        "MemoryOptimizedProject.csproj");
 
     [Fact]
     public async Task GeneratesSqlForAnMsBuildProject()
@@ -93,20 +106,67 @@ public sealed class BuildHostTests
     }
 
     [Fact]
+    public async Task GeneratesSqlForMemoryOptimizedRuntimeStorage()
+    {
+        var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-build-{Guid.NewGuid():N}.sql");
+        try
+        {
+            var exitCode = await BuildProgram.RunAsync(
+                [
+                    "--project", MemoryOptimizedProjectPath,
+                    "--output", outputPath,
+                    "--configuration", "Release",
+                    "--framework", "net10.0",
+                    "--entry", "MemoryOptimizedProject.SqlJob::Run",
+                    "--runtime-storage", "MemoryOptimized"
+                ],
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, exitCode);
+            var sql = await File.ReadAllTextAsync(outputPath, TestContext.Current.CancellationToken);
+            Assert.Contains(
+                "DECLARE @__sharpsql_memory_stack [SharpSql].[MemoryVmStackV1];",
+                sql,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "DECLARE @__sharpsql_memory_slots [SharpSql].[MemoryVmSlotsV1];",
+                sql,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(outputPath);
+        }
+    }
+
+    [Fact]
     public async Task RejectsAnInvalidRuntimeStorage()
     {
         var outputPath = Path.Combine(Path.GetTempPath(), $"sharpsql-build-{Guid.NewGuid():N}.sql");
+        var previousError = Console.Error;
+        using var error = new StringWriter();
+        try
+        {
+            Console.SetError(error);
+            var exitCode = await BuildProgram.RunAsync(
+                [
+                    "--project", ProjectPath,
+                    "--output", outputPath,
+                    "--runtime-storage", "SomewhereElse"
+                ],
+                TestContext.Current.CancellationToken);
 
-        var exitCode = await BuildProgram.RunAsync(
-            [
-                "--project", ProjectPath,
-                "--output", outputPath,
-                "--runtime-storage", "SomewhereElse"
-            ],
-            TestContext.Current.CancellationToken);
-
-        Assert.Equal(2, exitCode);
-        Assert.False(File.Exists(outputPath));
+            Assert.Equal(2, exitCode);
+            Assert.Contains(
+                "--runtime-storage must be Ephemeral, MemoryOptimized, Durable, or ServiceBroker.",
+                error.ToString(),
+                StringComparison.Ordinal);
+            Assert.False(File.Exists(outputPath));
+        }
+        finally
+        {
+            Console.SetError(previousError);
+        }
     }
 
     [Fact]

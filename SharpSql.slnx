@@ -3,6 +3,8 @@
   <Project Path="src/SharpSql.Ir/SharpSql.Ir.csproj" />
   <Project Path="src/SharpSql.Analyzers/SharpSql.Analyzers.csproj" />
   <Project Path="src/SharpSql.Build/SharpSql.Build.csproj" />
+  <Project Path="src/SharpSql.Conformance/SharpSql.Conformance.csproj" />
+  <Project Path="src/SharpSql.ConformanceWorker/SharpSql.ConformanceWorker.csproj" />
   <Project Path="src/SharpSql.MSBuild/SharpSql.MSBuild.csproj" />
   <Project Path="src/SharpSql.Sdk/SharpSql.Sdk.csproj" />
   <Project Path="src/SharpSql.SqlServer/SharpSql.SqlServer.csproj" />

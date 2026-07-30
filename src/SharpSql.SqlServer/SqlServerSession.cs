@@ -30,12 +30,14 @@ public sealed class SqlServerSession : IAsyncDisposable
 
     internal SqlServerSession(
         SqlConnection connection,
+        string connectionString,
         string description,
         bool isContainer,
         string? containerId,
         bool keepContainer)
     {
         Connection = connection;
+        ConnectionString = connectionString;
         Description = description;
         IsContainer = isContainer;
         _containerId = containerId;
@@ -44,6 +46,8 @@ public sealed class SqlServerSession : IAsyncDisposable
 
     /// <summary>Gets the open SQL Server connection.</summary>
     public SqlConnection Connection { get; }
+    /// <summary>Gets the reusable connection string, including credentials needed for another connection.</summary>
+    public string ConnectionString { get; }
     /// <summary>Gets a display description of the connected server and database.</summary>
     public string Description { get; }
     /// <summary>Gets whether this session uses a Testcontainer.</summary>
@@ -102,6 +106,7 @@ public static partial class SqlServerSessionFactory
             var database = string.IsNullOrWhiteSpace(details.InitialCatalog) ? connection.Database : details.InitialCatalog;
             return new SqlServerSession(
                 connection,
+                options.ConnectionString,
                 $"{details.DataSource}/{database}",
                 isContainer: false,
                 containerId: null,
@@ -135,6 +140,7 @@ public static partial class SqlServerSessionFactory
             var source = new SqlConnectionStringBuilder(connectionString).DataSource;
             return new SqlServerSession(
                 sqlConnection,
+                connectionString,
                 $"container {container.Id[..Math.Min(12, container.Id.Length)]} ({source}/{options.DatabaseName})",
                 isContainer: true,
                 container.Id,

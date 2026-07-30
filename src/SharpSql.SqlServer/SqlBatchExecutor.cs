@@ -34,7 +34,11 @@ public sealed record SqlBatchDebugInfo(
 public sealed record SqlBatchExecutionOptions(
     bool CollectDebugInfo = false,
     Action<string>? MessageReceived = null,
-    bool ConsumeHeapDiagnostics = false);
+    bool ConsumeHeapDiagnostics = false)
+{
+    /// <summary>Gets an optional predicate used to prefer one error when SQL Server reports several.</summary>
+    public Func<int, bool>? PreferredErrorNumber { get; init; }
+}
 
 /// <summary>Contains the outcome of executing a SQL batch.</summary>
 /// <param name="Success">Whether execution completed without a SQL error.</param>
@@ -49,7 +53,23 @@ public sealed record SqlBatchExecutionResult(
     int? ErrorNumber = null,
     string? ErrorMessage = null,
     int RowsAffected = -1,
-    SqlBatchDebugInfo? DebugInfo = null);
+    SqlBatchDebugInfo? DebugInfo = null)
+{
+    /// <summary>Gets informational messages as normalized standard output.</summary>
+    public string StandardOutput => SqlBatchOutput.FromMessages(Messages);
+}
+
+/// <summary>Normalizes captured program output for C# and SQL execution parity.</summary>
+public static class SqlBatchOutput
+{
+    /// <summary>Normalizes line endings and removes trailing line terminators.</summary>
+    public static string Normalize(string output) =>
+        output.Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd('\r', '\n');
+
+    /// <summary>Formats SQL informational messages as normalized standard output.</summary>
+    public static string FromMessages(IEnumerable<string> messages) =>
+        Normalize(string.Join("\n", messages));
+}
 
 /// <summary>Executes generated SharpSql batches over an open SQL Server connection.</summary>
 public static class SqlBatchExecutor
@@ -207,7 +227,7 @@ public static class SqlBatchExecutor
         }
         catch (SqlException exception)
         {
-            var error = exception.Errors.Cast<SqlError>().First();
+            var error = SelectError(exception.Errors, options?.PreferredErrorNumber);
             string[] messageSnapshot;
             long heapObjectSnapshot;
             long indexedItemSnapshot;
@@ -240,6 +260,12 @@ public static class SqlBatchExecutor
             connection.InfoMessage -= HandleInfoMessage;
         }
     }
+
+    private static SqlError SelectError(SqlErrorCollection errors, Func<int, bool>? preferredErrorNumber) =>
+        preferredErrorNumber is null
+            ? errors.Cast<SqlError>().First()
+            : errors.Cast<SqlError>().FirstOrDefault(error => preferredErrorNumber(error.Number))
+              ?? errors.Cast<SqlError>().First();
 
     private static bool TryParseHeapDiagnostics(
         string message,

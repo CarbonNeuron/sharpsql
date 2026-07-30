@@ -46,11 +46,23 @@ public sealed record SharpSqlApplicationPackage
     /// Generates a concurrency-safe, idempotent SQL Server installation script for this package.
     /// </summary>
     public string GenerateInstallSql() => ApplicationPackageSqlEmitter.Emit(this);
+
+    /// <summary>
+    /// Generates a concurrency-safe SQL Server script that removes objects owned by this package.
+    /// The application schema itself is retained so unrelated, operator-managed objects are never removed.
+    /// </summary>
+    public string GenerateUninstallSql() => GenerateUninstallSql(SchemaName, ApplicationName);
+
+    /// <summary>Generates an uninstall script for an installed package without requiring its original compiled SQL.</summary>
+    public static string GenerateUninstallSql(string schemaName, string applicationName) =>
+        ApplicationPackageSqlEmitter.EmitUninstall(schemaName, applicationName);
 }
 
 internal static class ApplicationPackageSqlEmitter
 {
     private const int ProvisioningLockErrorNumber = 51940;
+    private const int PackageOwnershipErrorNumber = 51942;
+    private const int PackageNotInstalledErrorNumber = 51943;
     private const string ManifestName = "PackageManifest";
 
     internal static string Emit(SharpSqlApplicationPackage package)
@@ -126,6 +138,10 @@ internal static class ApplicationPackageSqlEmitter
                     "[PublishedAtUtc] DATETIME2(7) NOT NULL);";
                 sql.Line($"EXEC({SqlIdentifier.UnicodeLiteral(createManifest)});");
             }
+            sql.Line($"IF EXISTS (SELECT 1 FROM {manifest} WHERE [ApplicationName] <> {SqlIdentifier.UnicodeLiteral(applicationName)})");
+            using (sql.Indent())
+                sql.Line($"THROW {PackageOwnershipErrorNumber}, 'The application schema is already owned by a different SharpSql package.', 1;");
+            sql.Line($"DECLARE @__sharpsql_previous_entry SYSNAME = (SELECT [EntryProcedureName] FROM {manifest} WHERE [ApplicationName] = {SqlIdentifier.UnicodeLiteral(applicationName)});");
             sql.Line();
             var procedureDefinition = $"CREATE OR ALTER PROCEDURE {entryProcedure}{Environment.NewLine}" +
                 $"AS{Environment.NewLine}" +
@@ -134,6 +150,17 @@ internal static class ApplicationPackageSqlEmitter
                 "END;";
             sql.Line($"EXEC({SqlIdentifier.UnicodeLiteral(procedureDefinition)});");
             sql.Line($"IF OBJECT_ID({entryProcedureLiteral}, N'P') IS NULL THROW 51941, 'The SharpSql package entry procedure was not created.', 1;");
+            sql.Line("IF @__sharpsql_previous_entry IS NOT NULL AND @__sharpsql_previous_entry <> " + SqlIdentifier.UnicodeLiteral(entryName));
+            using (sql.Indent())
+            {
+                sql.Line("BEGIN");
+                using (sql.Indent())
+                {
+                    sql.Line($"DECLARE @__sharpsql_drop_previous_entry NVARCHAR(776) = N'DROP PROCEDURE {schema}.' + QUOTENAME(@__sharpsql_previous_entry) + N';';");
+                    sql.Line("EXEC sys.sp_executesql @__sharpsql_drop_previous_entry;");
+                }
+                sql.Line("END;");
+            }
             sql.Line();
             sql.Line($"UPDATE {manifest}");
             using (sql.Indent())
@@ -153,6 +180,76 @@ internal static class ApplicationPackageSqlEmitter
                 sql.Line("([ApplicationName], [PackageVersion], [ProgramHash], [EntryProcedureName], [RuntimeStorage], [NativeKernelsEnabled], [PublishedAtUtc])");
                 sql.Line($"VALUES ({SqlIdentifier.UnicodeLiteral(applicationName)}, {SqlIdentifier.UnicodeLiteral(version)}, N'{programHash}', {SqlIdentifier.UnicodeLiteral(entryName)}, N'{package.RuntimeStorage}', {(package.EnableNativeKernels ? 1 : 0)}, SYSUTCDATETIME());");
             }
+            sql.Line("COMMIT TRANSACTION;");
+            sql.Line($"EXEC sys.sp_releaseapplock @Resource = {lockResource}, @LockOwner = N'Session';");
+        }
+        sql.Line("END TRY");
+        sql.Line("BEGIN CATCH");
+        using (sql.Indent())
+        {
+            sql.Line("IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;");
+            sql.Line("IF @__sharpsql_package_lock_result >= 0");
+            using (sql.Indent())
+                sql.Line($"EXEC sys.sp_releaseapplock @Resource = {lockResource}, @LockOwner = N'Session';");
+            sql.Line("THROW;");
+        }
+        sql.Line("END CATCH;");
+        return sql.ToString();
+    }
+
+    internal static string EmitUninstall(string schemaName, string applicationName)
+    {
+        schemaName = SqlIdentifier.Validate(schemaName, nameof(schemaName));
+        applicationName = RequiredManifestValue(applicationName, nameof(applicationName));
+        var schema = SqlIdentifier.Quote(schemaName, nameof(schemaName));
+        var schemaLiteral = SqlIdentifier.UnicodeLiteral(schemaName);
+        var manifest = $"{schema}.{SqlIdentifier.Quote(ManifestName, ManifestName)}";
+        var manifestLiteral = SqlIdentifier.UnicodeLiteral(manifest);
+        var kernelCatalog = $"{schema}.{SqlIdentifier.Quote(NativeKernelRuntimeSqlEmitter.CatalogName, NativeKernelRuntimeSqlEmitter.CatalogName)}";
+        var kernelCatalogLiteral = SqlIdentifier.UnicodeLiteral(kernelCatalog);
+        var lockResource = SqlIdentifier.UnicodeLiteral($"SharpSql.Package.{schemaName}");
+
+        var sql = new SqlWriter();
+        sql.Line("SET XACT_ABORT ON;");
+        sql.Line("SET NOCOUNT ON;");
+        sql.Line("DECLARE @__sharpsql_package_lock_result INT;");
+        sql.Line("BEGIN TRY");
+        using (sql.Indent())
+        {
+            sql.Line("EXEC @__sharpsql_package_lock_result = sys.sp_getapplock");
+            using (sql.Indent())
+            {
+                sql.Line($"@Resource = {lockResource},");
+                sql.Line("@LockMode = N'Exclusive',");
+                sql.Line("@LockOwner = N'Session',");
+                sql.Line("@LockTimeout = 60000;");
+            }
+            sql.Line($"IF @__sharpsql_package_lock_result < 0 THROW {ProvisioningLockErrorNumber}, 'Could not acquire the SharpSql package publishing lock.', 1;");
+            sql.Line($"IF OBJECT_ID({manifestLiteral}, N'U') IS NULL THROW {PackageNotInstalledErrorNumber}, 'The SharpSql package is not installed in this schema.', 1;");
+            sql.Line("DECLARE @__sharpsql_entry SYSNAME;");
+            sql.Line($"SELECT @__sharpsql_entry = [EntryProcedureName] FROM {manifest} WHERE [ApplicationName] = {SqlIdentifier.UnicodeLiteral(applicationName)};");
+            sql.Line($"IF @__sharpsql_entry IS NULL THROW {PackageNotInstalledErrorNumber}, 'The requested SharpSql package is not installed in this schema.', 1;");
+            sql.Line("BEGIN TRANSACTION;");
+            sql.Line($"IF OBJECT_ID(QUOTENAME({schemaLiteral}) + N'.' + QUOTENAME(@__sharpsql_entry), N'P') IS NOT NULL");
+            using (sql.Indent())
+            {
+                sql.Line("BEGIN");
+                using (sql.Indent())
+                {
+                    sql.Line($"DECLARE @__sharpsql_drop_entry NVARCHAR(776) = N'DROP PROCEDURE {schema}.' + QUOTENAME(@__sharpsql_entry) + N';';");
+                    sql.Line("EXEC sys.sp_executesql @__sharpsql_drop_entry;");
+                }
+                sql.Line("END;");
+            }
+            sql.Line("DECLARE @__sharpsql_drop_kernels NVARCHAR(MAX);");
+            sql.Line("SELECT @__sharpsql_drop_kernels = STRING_AGG(CAST(N'DROP PROCEDURE ' + QUOTENAME(SCHEMA_NAME([schema_id])) + N'.' + QUOTENAME([name]) AS NVARCHAR(MAX)), N';')");
+            using (sql.Indent())
+                sql.Line($"FROM sys.procedures WHERE [schema_id] = SCHEMA_ID({schemaLiteral}) AND [name] LIKE N'NativeKernel[_]%';");
+            sql.Line("IF @__sharpsql_drop_kernels IS NOT NULL EXEC sys.sp_executesql @__sharpsql_drop_kernels;");
+            sql.Line($"IF OBJECT_ID({kernelCatalogLiteral}, N'U') IS NOT NULL DROP TABLE {kernelCatalog};");
+            sql.Line($"DROP TABLE {manifest};");
+            sql.Line($"IF TYPE_ID(N'{schemaName.Replace("'", "''", StringComparison.Ordinal)}.MemoryVmSlotsV1') IS NOT NULL DROP TYPE {schema}.[MemoryVmSlotsV1];");
+            sql.Line($"IF TYPE_ID(N'{schemaName.Replace("'", "''", StringComparison.Ordinal)}.MemoryVmStackV1') IS NOT NULL DROP TYPE {schema}.[MemoryVmStackV1];");
             sql.Line("COMMIT TRANSACTION;");
             sql.Line($"EXEC sys.sp_releaseapplock @Resource = {lockResource}, @LockOwner = N'Session';");
         }

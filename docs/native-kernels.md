@@ -54,9 +54,31 @@ native module.
 
 Each supported method receives a content-addressed procedure name. The program batch
 creates a missing procedure through dynamic DDL before normal execution; subsequent
-runs reuse it. These procedures are persistent database objects. Productionizing the
-feature should move their creation, retention, and garbage collection into an explicit
-installer/catalog rather than allowing old content hashes to accumulate.
+runs reuse it. Provisioning records each procedure in the application schema's
+`NativeKernelCatalog` and refreshes `LastUsedAtUtc`. Catalog creation and procedure
+installation are protected by application locks.
+
+Inspect installed kernels with:
+
+```csharp
+string sql = SharpSqlNativeKernelRuntime.GenerateStatusSql("SharpSql");
+```
+
+Retention is explicit and supports dry-run previews:
+
+```csharp
+string preview = SharpSqlNativeKernelRuntime.GenerateCleanupSql(
+    "SharpSql",
+    unusedFor: TimeSpan.FromDays(7),
+    batchSize: 20,
+    dryRun: true);
+```
+
+Execute the generated SQL in the application database, then repeat with
+`dryRun: false` to remove the selected catalog rows and procedures. Cleanup takes an
+exclusive per-kernel lock and rechecks `LastUsedAtUtc`; generated calls take the
+matching shared lock, so a procedure cannot be dropped while it is running. Package
+uninstall also removes its kernel catalog and all content-addressed kernel procedures.
 
 ## Initial result
 

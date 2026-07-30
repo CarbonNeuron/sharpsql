@@ -42,8 +42,34 @@ public sealed class SqlBatchExecutorIntegrationTests(SqlServerFixture sqlServer)
 
         Assert.True(result.Success, result.ErrorMessage);
         Assert.Equal(new[] { "first", "second" }, result.Messages);
+        Assert.Equal("first\nsecond", result.StandardOutput);
         lock (streamed)
             Assert.Equal(new[] { "first", "second" }, streamed);
+    }
+
+    [Fact]
+    public async Task CanConsumeHeapCountersWithoutCollectingPlans()
+    {
+        await using var connection = new SqlConnection(sqlServer.ConnectionString)
+        {
+            FireInfoMessageEventOnUserErrors = true
+        };
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+
+        var result = await SqlBatchExecutor.ExecuteAsync(
+            connection,
+            """
+            PRINT N'__SHARPSQL_DEBUG_HEAP__|objects=7|indexed_items=8|dictionary_entries=9';
+            PRINT N'visible';
+            """,
+            30,
+            new SqlBatchExecutionOptions(ConsumeHeapDiagnostics: true),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.ErrorMessage);
+        Assert.Equal(new[] { "visible" }, result.Messages);
+        Assert.Equal("visible", result.StandardOutput);
+        Assert.Null(result.DebugInfo);
     }
 
     [Fact]

@@ -462,10 +462,7 @@ public sealed partial class SharpSqlCompiler
 
     private void AddDiagnostic(string code, string message, IrSource source)
     {
-        var filePath = _csharpSourceNodes.TryGetValue(source, out var node)
-            ? node.SyntaxTree.FilePath
-            : null;
-        var diagnostic = new CompilerDiagnostic(code, message, source.Span.Line, source.Span.Column, filePath);
+        var diagnostic = new CompilerDiagnostic(code, message, source.Span.Line, source.Span.Column, source.FilePath);
         if (!_diagnostics.Contains(diagnostic))
             _diagnostics.Add(diagnostic);
     }
@@ -624,4 +621,3 @@ public sealed partial class SharpSqlCompiler
     private static string EscapeSqlString(string value) => value.Replace("'", "''", StringComparison.Ordinal);
 
 }
-

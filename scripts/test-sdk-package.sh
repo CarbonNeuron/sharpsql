@@ -22,7 +22,11 @@ fi
 
 work_dir="$(mktemp -d -t sharpsql-sdk-test.XXXXXX)"
 export NUGET_PACKAGES="$work_dir/packages"
+memory_container_id=""
 cleanup() {
+    if [[ -n "$memory_container_id" ]]; then
+        docker rm -f "$memory_container_id" >/dev/null 2>&1 || true
+    fi
     rm -rf -- "$work_dir"
 }
 trap cleanup EXIT
@@ -30,6 +34,7 @@ trap cleanup EXIT
 cp -R "$repo_root/tests/fixtures/SdkConsumer/valid" "$work_dir/valid"
 cp -R "$repo_root/tests/fixtures/SdkConsumer/invalid" "$work_dir/invalid"
 cp -R "$repo_root/tests/fixtures/SdkConsumer/async" "$work_dir/async"
+cp -R "$repo_root/tests/fixtures/SdkConsumer/memory" "$work_dir/memory"
 
 dotnet new console --name PackageDefault --output "$work_dir/package-default" --no-restore >/dev/null
 dotnet add "$work_dir/package-default/PackageDefault.csproj" package SharpSql.Sdk \
@@ -89,7 +94,8 @@ fi
 for project in \
     "$work_dir/valid/SdkConsumer.csproj" \
     "$work_dir/invalid/SdkConsumer.csproj" \
-    "$work_dir/async/SdkConsumer.csproj"; do
+    "$work_dir/async/SdkConsumer.csproj" \
+    "$work_dir/memory/SdkConsumer.csproj"; do
     if [[ -n "$tool_path" ]]; then
         "$tool_path" init "$project" --sdk-version "$version" --no-restore >/dev/null
     else
@@ -120,9 +126,20 @@ if invalid_storage_output="$(dotnet build "$work_dir/async/SdkConsumer.csproj" \
     printf 'The SDK package accepted an invalid SharpSqlRuntimeStorage value.\n' >&2
     exit 1
 fi
-if [[ "$invalid_storage_output" != *"SharpSqlRuntimeStorage must be Ephemeral, Durable, or ServiceBroker"* ]]; then
+if [[ "$invalid_storage_output" != *"SharpSqlRuntimeStorage must be Ephemeral, MemoryOptimized, Durable, or ServiceBroker"* ]]; then
     printf '%s\n' "$invalid_storage_output" >&2
     printf 'The SDK package did not explain the invalid SharpSqlRuntimeStorage value.\n' >&2
+    exit 1
+fi
+
+dotnet build "$work_dir/memory/SdkConsumer.csproj" \
+    --configuration Release \
+    --no-restore >/dev/null
+memory_sql="$work_dir/memory/generated.sql"
+if [[ ! -s "$memory_sql" ]] || \
+   ! grep -Fq 'DECLARE @__sharpsql_memory_stack [SharpSql].[MemoryVmStackV1];' "$memory_sql" || \
+   ! grep -Fq 'DECLARE @__sharpsql_memory_slots [SharpSql].[MemoryVmSlotsV1];' "$memory_sql"; then
+    printf 'The SDK package did not lower the memory-optimized recursive project with memory-optimized VM types.\n' >&2
     exit 1
 fi
 
@@ -153,6 +170,70 @@ if [[ "$run_output" != *"answer=42"* ]] || [[ "$run_output" != *"SharpSql: SQL e
     exit 1
 fi
 
+memory_database="SharpSqlMemorySdk${RANDOM}${RANDOM}"
+memory_prime_output="$(dotnet msbuild "$work_dir/memory/SdkConsumer.csproj" \
+    -t:SharpSqlRun \
+    -p:Configuration=Release \
+    -p:SharpSqlRuntimeStorage=Ephemeral \
+    -p:SharpSqlForceContainer=true \
+    -p:SharpSqlKeepContainer=true \
+    -p:SharpSqlContainerDatabase="$memory_database" \
+    -verbosity:minimal)"
+if [[ "$memory_prime_output" != *"memory-answer=42"* ]] || \
+   [[ "$memory_prime_output" != *"SharpSql: SQL execution completed"* ]]; then
+    printf '%s\n' "$memory_prime_output" >&2
+    printf 'The SDK package could not prepare the SQL Server container for memory-optimized execution.\n' >&2
+    exit 1
+fi
+
+mapfile -t memory_container_ids < <(
+    docker ps \
+        --filter "label=io.sharpsql.sqlserver.database=$memory_database" \
+        --format '{{.ID}}'
+)
+if [[ "${#memory_container_ids[@]}" -ne 1 ]]; then
+    printf 'Expected one retained SQL Server container for database %s, found %s.\n' \
+        "$memory_database" "${#memory_container_ids[@]}" >&2
+    exit 1
+fi
+memory_container_id="${memory_container_ids[0]}"
+memory_filegroup_sql="
+ALTER DATABASE [$memory_database]
+    ADD FILEGROUP [SharpSqlMemoryOptimized] CONTAINS MEMORY_OPTIMIZED_DATA;
+ALTER DATABASE [$memory_database]
+    ADD FILE
+    (
+        NAME = N'SharpSqlMemoryOptimized',
+        FILENAME = N'/var/opt/mssql/data/${memory_database}_xtp'
+    )
+    TO FILEGROUP [SharpSqlMemoryOptimized];
+"
+docker exec "$memory_container_id" /bin/bash -c '
+    if [[ -x /opt/mssql-tools18/bin/sqlcmd ]]; then
+        sqlcmd_path=/opt/mssql-tools18/bin/sqlcmd
+    else
+        sqlcmd_path=/opt/mssql-tools/bin/sqlcmd
+    fi
+    "$sqlcmd_path" -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -b -Q "$1"
+' _ "$memory_filegroup_sql" >/dev/null
+
+memory_run_output="$(dotnet msbuild "$work_dir/memory/SdkConsumer.csproj" \
+    -t:SharpSqlRun \
+    -p:Configuration=Release \
+    -p:SharpSqlForceContainer=true \
+    -p:SharpSqlKeepContainer=false \
+    -p:SharpSqlContainerDatabase="$memory_database" \
+    -verbosity:minimal)"
+if [[ "$memory_run_output" != *"memory-answer=42"* ]] || \
+   [[ "$memory_run_output" != *"SharpSql: provisioning memory-optimized runtime"* ]] || \
+   [[ "$memory_run_output" != *"SharpSql: memory-optimized runtime ready"* ]] || \
+   [[ "$memory_run_output" != *"SharpSql: SQL execution completed"* ]]; then
+    printf '%s\n' "$memory_run_output" >&2
+    printf 'The SharpSqlRun target did not provision and execute the memory-optimized project.\n' >&2
+    exit 1
+fi
+memory_container_id=""
+
 async_run_output="$(dotnet msbuild "$work_dir/async/SdkConsumer.csproj" \
     -t:SharpSqlRun \
     -p:Configuration=Release \
@@ -177,4 +258,4 @@ if [[ "$invalid_output" != *"error SS6301"* ]]; then
     exit 1
 fi
 
-printf 'Validated SharpSql.Sdk %s build generation, Service Broker async lowering, SQL execution, IDE profile, and analyzer diagnostics.\n' "$version"
+printf 'Validated SharpSql.Sdk %s build generation, memory-optimized and Service Broker lowering/execution, IDE profile, and analyzer diagnostics.\n' "$version"

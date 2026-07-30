@@ -9,6 +9,7 @@ public static class CliArgumentRouter
         "conformance",
         "init",
         "publish",
+        "unpublish",
         "run",
         "verify",
         "--help",

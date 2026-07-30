@@ -5,6 +5,7 @@ using System.Runtime.Loader;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Emit;
+using SharpSql.SqlServer;
 
 namespace SharpSql.Cli;
 
@@ -117,13 +118,13 @@ public sealed partial class TestcontainersParityRunner
             try
             {
                 await action();
-                return new ParityOutcome(NormalizeOutput(output.ToString()), null);
+                return new ParityOutcome(SqlBatchOutput.Normalize(output.ToString()), null);
             }
             catch (Exception exception)
             {
                 exception = Unwrap(exception);
                 return new ParityOutcome(
-                    NormalizeOutput(output.ToString()),
+                    SqlBatchOutput.Normalize(output.ToString()),
                     new ParityFailure(
                         ParityFailureCategory.Runtime,
                         exception.GetType().Name,

@@ -19,6 +19,7 @@
     <ProjectReference Include="../../src/SharpSql.Sdk/SharpSql.Sdk.csproj" />
     <ProjectReference Include="../../src/SharpSql/SharpSql.csproj" />
     <None Include="../fixtures/MultiFileProject/**/*" Exclude="../fixtures/MultiFileProject/bin/**/*;../fixtures/MultiFileProject/obj/**/*" Link="fixtures/MultiFileProject/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../fixtures/MemoryOptimizedProject/**/*" Exclude="../fixtures/MemoryOptimizedProject/bin/**/*;../fixtures/MemoryOptimizedProject/obj/**/*" Link="fixtures/MemoryOptimizedProject/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../fixtures/ServiceBrokerProject/**/*" Exclude="../fixtures/ServiceBrokerProject/bin/**/*;../fixtures/ServiceBrokerProject/obj/**/*" Link="fixtures/ServiceBrokerProject/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

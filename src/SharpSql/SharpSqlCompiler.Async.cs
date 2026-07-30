@@ -42,7 +42,38 @@ public sealed partial class SharpSqlCompiler
         var procedureName = ServiceBrokerProcedureName(_serviceBrokerProgramId);
         var procedureSql = CaptureServiceBrokerWorkerSql(() => EmitServiceBrokerWorkerProcedure(plan, procedureName));
         _sql.Line("-- SharpSql Service Broker program worker");
-        _sql.Line($"EXEC(N'{procedureSql.TrimEnd().Replace("'", "''", StringComparison.Ordinal)}');");
+        _sql.Line($"IF OBJECT_ID(N'[SharpSql].[{ExecutionInfrastructureSqlEmitter.RegisterProgramProcedureName}]', N'P') IS NULL");
+        using (_sql.Indent())
+            _sql.Line($"THROW {ServiceBrokerProgramMissingError}, 'Run SharpSqlServiceBrokerRuntime.GenerateProvisioningSql() before executing an async program.', 1;");
+        _sql.Line("DECLARE @__sharpsql_program_lock_result INT;");
+        _sql.Line("BEGIN TRY");
+        using (_sql.Indent())
+        {
+            _sql.Line("BEGIN TRANSACTION;");
+            _sql.Line("EXEC @__sharpsql_program_lock_result = sys.sp_getapplock");
+            using (_sql.Indent())
+            {
+                _sql.Line($"@Resource = N'SharpSql.ServiceBroker.Program.{_serviceBrokerProgramId}',");
+                _sql.Line("@LockMode = N'Exclusive',");
+                _sql.Line("@LockOwner = N'Transaction',");
+                _sql.Line("@LockTimeout = 60000,");
+                _sql.Line("@DbPrincipal = N'public';");
+            }
+            _sql.Line("IF @__sharpsql_program_lock_result < 0");
+            using (_sql.Indent())
+                _sql.Line($"THROW {ExecutionInfrastructureSqlEmitter.ProvisioningLockErrorNumber}, 'Could not acquire the SharpSql program installation lock.', 1;");
+            _sql.Line($"EXEC(N'{procedureSql.TrimEnd().Replace("'", "''", StringComparison.Ordinal)}');");
+            _sql.Line($"EXEC [SharpSql].[{ExecutionInfrastructureSqlEmitter.RegisterProgramProcedureName}] @ProgramId = N'{_serviceBrokerProgramId}';");
+            _sql.Line("COMMIT TRANSACTION;");
+        }
+        _sql.Line("END TRY");
+        _sql.Line("BEGIN CATCH");
+        using (_sql.Indent())
+        {
+            _sql.Line("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;");
+            _sql.Line("THROW;");
+        }
+        _sql.Line("END CATCH;");
         _sql.Line();
         EmitServiceBrokerLauncher(_serviceBrokerProgramId);
         _serviceBrokerProgramEmitted = true;
@@ -683,8 +714,15 @@ public sealed partial class SharpSqlCompiler
         _sql.Line("IF OBJECT_ID(N'[SharpSql].[Tasks]', N'U') IS NULL OR OBJECT_ID(N'[SharpSql].[ScheduleTask]', N'P') IS NULL");
         using (_sql.Indent())
             _sql.Line($"THROW {ServiceBrokerProgramMissingError}, 'Run SharpSqlServiceBrokerRuntime.GenerateProvisioningSql() before executing an async program.', 1;");
-        _sql.Line("INSERT INTO [SharpSql].[Executions] ([ExecutionId], [State], [StartedAtUtc])");
-        _sql.Line($"VALUES ({RuntimeExecutionId}, 1, SYSUTCDATETIME());");
+        _sql.Line("DECLARE @__sharpsql_lease_id UNIQUEIDENTIFIER;");
+        _sql.Line($"EXEC [SharpSql].[{ExecutionInfrastructureSqlEmitter.StartExecutionProcedureName}]");
+        using (_sql.Indent())
+        {
+            _sql.Line($"@ExecutionId = {RuntimeExecutionId},");
+            _sql.Line($"@ProgramId = N'{programId}',");
+            _sql.Line("@LeaseDurationSeconds = 30,");
+            _sql.Line("@LeaseId = @__sharpsql_lease_id OUTPUT;");
+        }
         _sql.Line("DECLARE @__sharpsql_root_task_id BIGINT;");
         _sql.Line("EXEC [SharpSql].[ScheduleTask]");
         using (_sql.Indent())
@@ -695,9 +733,11 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("@TaskId = @__sharpsql_root_task_id OUTPUT;");
         }
         _sql.Line("DECLARE @__sharpsql_execution_state TINYINT = 1;");
-        _sql.Line("DECLARE @__sharpsql_output_sequence BIGINT = 0;");
         _sql.Line("DECLARE @__sharpsql_next_output_sequence BIGINT;");
         _sql.Line("DECLARE @__sharpsql_output_text NVARCHAR(MAX);");
+        _sql.Line("DECLARE @__sharpsql_drained_output TABLE ([SequenceNumber] BIGINT NOT NULL PRIMARY KEY);");
+        _sql.Line("DECLARE @__sharpsql_next_heartbeat_at DATETIME2(7) = DATEADD(SECOND, 5, SYSUTCDATETIME());");
+        _sql.Line("DECLARE @__sharpsql_lease_renewed BIT;");
         _sql.Line("WHILE @__sharpsql_execution_state NOT IN (2, 3, 4)");
         _sql.Line("BEGIN");
         using (_sql.Indent())
@@ -710,6 +750,22 @@ public sealed partial class SharpSqlCompiler
             using (_sql.Indent())
                 _sql.Line("IF ERROR_NUMBER() <> 1205 THROW;");
             _sql.Line("END CATCH;");
+            _sql.Line("IF SYSUTCDATETIME() >= @__sharpsql_next_heartbeat_at");
+            _sql.Line("BEGIN");
+            using (_sql.Indent())
+            {
+                _sql.Line("SET @__sharpsql_lease_renewed = 0;");
+                _sql.Line($"EXEC [SharpSql].[{ExecutionInfrastructureSqlEmitter.HeartbeatExecutionProcedureName}]");
+                using (_sql.Indent())
+                {
+                    _sql.Line($"@ExecutionId = {RuntimeExecutionId},");
+                    _sql.Line("@LeaseId = @__sharpsql_lease_id,");
+                    _sql.Line("@LeaseDurationSeconds = 30,");
+                    _sql.Line("@Renewed = @__sharpsql_lease_renewed OUTPUT;");
+                }
+                _sql.Line("SET @__sharpsql_next_heartbeat_at = DATEADD(SECOND, 5, SYSUTCDATETIME());");
+            }
+            _sql.Line("END;");
             EmitServiceBrokerOutputDrain();
             _sql.Line("SET @__sharpsql_execution_state = NULL;");
             _sql.Line($"SELECT @__sharpsql_execution_state = [State] FROM [SharpSql].[Executions] WHERE [ExecutionId] = {RuntimeExecutionId};");
@@ -717,7 +773,20 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("IF @__sharpsql_execution_state NOT IN (2, 3, 4) WAITFOR DELAY '00:00:00.050';");
         }
         _sql.Line("END;");
-        EmitServiceBrokerOutputDrain();
+        // Completion and the last output writes normally become visible together, but
+        // activated worker commits and client message delivery can cross the launcher's
+        // first terminal read under load. Require a short bounded quiescence window
+        // before execution cleanup so committed tail output is not lost.
+        _sql.Line("DECLARE @__sharpsql_terminal_drain_pass INT = 0;");
+        _sql.Line("WHILE @__sharpsql_terminal_drain_pass < 3");
+        _sql.Line("BEGIN");
+        using (_sql.Indent())
+        {
+            EmitServiceBrokerOutputDrain();
+            _sql.Line("SET @__sharpsql_terminal_drain_pass += 1;");
+            _sql.Line("IF @__sharpsql_terminal_drain_pass < 3 WAITFOR DELAY '00:00:00.050';");
+        }
+        _sql.Line("END;");
         _sql.Line("IF @__sharpsql_execution_state = 3");
         _sql.Line("BEGIN");
         using (_sql.Indent())
@@ -742,7 +811,14 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("SET @__sharpsql_next_output_sequence = NULL;");
             _sql.Line("SET @__sharpsql_output_text = NULL;");
             _sql.Line("SELECT TOP (1) @__sharpsql_next_output_sequence = [SequenceNumber], @__sharpsql_output_text = [OutputText]");
-            _sql.Line($"FROM [SharpSql].[OutputEvents] WHERE [ExecutionId] = {RuntimeExecutionId} AND [SequenceNumber] > @__sharpsql_output_sequence ORDER BY [SequenceNumber];");
+            // Sequence values are allocated outside the worker transaction and can
+            // therefore become visible out of order. Remember individual drained rows
+            // so a late commit with a lower value is never skipped, without mutating the
+            // durable table while workers are still inserting into it.
+            _sql.Line($"FROM [SharpSql].[OutputEvents] AS [output] WHERE [ExecutionId] = {RuntimeExecutionId}");
+            using (_sql.Indent())
+                _sql.Line("AND NOT EXISTS (SELECT 1 FROM @__sharpsql_drained_output AS [drained] WHERE [drained].[SequenceNumber] = [output].[SequenceNumber])");
+            _sql.Line("ORDER BY [output].[SequenceNumber];");
             _sql.Line("IF @__sharpsql_next_output_sequence IS NULL BREAK;");
             // PRINT can buffer several kilobytes before sending an InfoMessage. A constant
             // format string keeps user '%' characters safe while NOWAIT streams ordinary
@@ -753,7 +829,7 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("ELSE");
             using (_sql.Indent())
                 _sql.Line("PRINT @__sharpsql_output_text;");
-            _sql.Line("SET @__sharpsql_output_sequence = @__sharpsql_next_output_sequence;");
+            _sql.Line("INSERT INTO @__sharpsql_drained_output ([SequenceNumber]) VALUES (@__sharpsql_next_output_sequence);");
         }
         _sql.Line("END;");
     }
@@ -887,10 +963,13 @@ public sealed partial class SharpSqlCompiler
     private bool TryResolveAsyncMethodReference(IrExpression expression, out MethodDefinition method)
     {
         method = null!;
-        if (!_csharpSourceNodes.TryGetValue(expression.Source, out var syntax))
-            return false;
-        var symbol = SemanticModelFor(syntax)?.GetSymbolInfo(syntax).Symbol as IMethodSymbol;
-        return symbol is not null && _methods.TryGetValue(MethodIdentity(symbol), out method) && method.IsAsync;
+        var methodId = expression switch
+        {
+            IrVariableExpression variable => variable.Symbol.ReferencedMethodId,
+            IrMemberExpression member => member.ReferencedMethodId,
+            _ => IrMethodId.None
+        };
+        return !methodId.IsNone && _methods.TryGetValue(methodId, out method) && method.IsAsync;
     }
 
     private static bool TrySplitRootAtWhenAll(

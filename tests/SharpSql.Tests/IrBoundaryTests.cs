@@ -105,6 +105,132 @@ public sealed class IrBoundaryTests
     }
 
     [Fact]
+    public void CSharpFrontendBindsMethodGroupIdentityWithoutBackendSemanticLookup()
+    {
+        const string source = """
+            var values = new List<int> { 1 };
+            var tasks = values.Select(Work).ToList();
+            await Task.WhenAll(tasks);
+
+            async Task<int> Work(int value)
+            {
+                await Task.Delay(0);
+                return value;
+            }
+            """;
+        var compiler = new SharpSqlCompiler();
+
+        compiler.Transpile(
+            source,
+            new TranspileOptions { RuntimeStorage = RuntimeStorageKind.ServiceBroker });
+
+        var program = Assert.IsType<IrProgram>(compiler.BoundProgram);
+        var work = Assert.Single(program.Methods, method => method.Name == "Work");
+        var tasks = Assert.IsType<ProceduralDeclarationStatement>(program.EntryPoint.Statements[1]);
+        var toList = Assert.IsType<IrInvocationExpression>(Assert.Single(tasks.Declaration.Variables).Initializer);
+        var select = Assert.IsType<IrInvocationExpression>(Assert.IsType<IrMemberExpression>(toList.Target).Receiver);
+        var methodGroup = Assert.IsType<IrVariableExpression>(Assert.Single(select.Arguments));
+
+        Assert.Equal(work.Id, methodGroup.Symbol.ReferencedMethodId);
+    }
+
+    [Fact]
+    public void CSharpFrontendBindsInferredLambdaParameterTypes()
+    {
+        const string source = """
+            var tasks = new List<Task<Person>>();
+            var results = tasks.Select(task => task.Result);
+            var ordered = results.OrderBy(person => person.Age);
+            record Person(int Age);
+            """;
+        var compiler = new SharpSqlCompiler();
+
+        compiler.Transpile(source);
+
+        var program = Assert.IsType<IrProgram>(compiler.BoundProgram);
+        var declaration = Assert.IsType<ProceduralDeclarationStatement>(program.EntryPoint.Statements[2]);
+        var orderBy = Assert.IsType<IrInvocationExpression>(Assert.Single(declaration.Declaration.Variables).Initializer);
+        var lambda = Assert.IsType<IrLambdaExpression>(Assert.Single(orderBy.Arguments));
+        var parameter = Assert.Single(lambda.Parameters);
+        var member = Assert.IsType<IrMemberExpression>(lambda.ExpressionBody);
+
+        Assert.Equal("Person", parameter.Type.Name);
+        Assert.Equal(parameter, Assert.IsType<IrVariableExpression>(member.Receiver).Symbol);
+    }
+
+    [Fact]
+    public void CSharpFrontendBindsMethodFlowSummariesIntoIr()
+    {
+        const string source = """
+            int marker = 1;
+            int Choose(bool choose)
+            {
+                if (choose)
+                    return 1;
+                return 2;
+            }
+            int Incomplete(bool choose)
+            {
+                if (choose)
+                    return 1;
+            }
+            """;
+        var compiler = new SharpSqlCompiler();
+
+        var result = compiler.Transpile(source);
+
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "CS0161");
+        var methods = Assert.IsType<IrProgram>(compiler.BoundProgram).Methods.ToDictionary(method => method.Name);
+        Assert.Equal(new MethodFlowSummary(EndPointIsReachable: false, StatementCount: 3), methods["Choose"].Flow);
+        Assert.Equal(new MethodFlowSummary(EndPointIsReachable: true, StatementCount: 2), methods["Incomplete"].Flow);
+    }
+
+    [Fact]
+    public void CSharpFrontendBindsSourceFilePathsIntoIr()
+    {
+        var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(
+            "int value = 1;",
+            path: "BoundInput.cs",
+            cancellationToken: TestContext.Current.CancellationToken);
+        var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+            "BoundInput",
+            [tree],
+            options: new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(
+                Microsoft.CodeAnalysis.OutputKind.ConsoleApplication));
+        var compiler = new SharpSqlCompiler();
+
+        var result = compiler.Transpile(compilation);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        var program = Assert.IsType<IrProgram>(compiler.BoundProgram);
+        Assert.Equal("BoundInput.cs", program.EntryPoint.Source.FilePath);
+        var declaration = Assert.IsType<ProceduralDeclarationStatement>(Assert.Single(program.EntryPoint.Statements));
+        Assert.Equal("BoundInput.cs", declaration.Source.FilePath);
+    }
+
+    [Fact]
+    public void IrDiagnosticsUseTheBoundSourcePathWithoutRoslyn()
+    {
+        var source = new IrSource(
+            new IrSourceSpan(Start: 12, Length: 4, Line: 3, Column: 7),
+            "BoundInput.cs",
+            [],
+            [],
+            []);
+        var program = new IrProgram(
+            [],
+            new ProceduralBlock(source, [new ProceduralUnsupported(source, "test")]),
+            []);
+
+        var result = new SharpSqlCompiler().Transpile(program);
+
+        var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == "SS4003");
+        Assert.Equal("BoundInput.cs", diagnostic.FilePath);
+        Assert.Equal(3, diagnostic.Line);
+        Assert.Equal(7, diagnostic.Column);
+    }
+
+    [Fact]
     public void SqlBackendAcceptsAProgramConstructedWithoutRoslyn()
     {
         var source = IrSource.None;
@@ -136,6 +262,29 @@ public sealed class IrBoundaryTests
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("DECLARE @answer INT = 1 + 2;", result.Sql);
         Assert.Contains("SET @answer = @answer + 2;", result.Sql);
+    }
+
+    [Fact]
+    public void HeapBackendDiagnosesArrayRankFromIrWithoutRoslyn()
+    {
+        var source = IrSource.None;
+        var arrayType = new IrType("int[,]", IsReference: true);
+        var facts = new ExpressionFacts(arrayType, ScalarNullability.NonNull, false, null);
+        var array = new IrArrayCreationExpression(source, facts, IrType.Int, null, []) { Rank = 2 };
+        var symbol = new IrSymbol(new IrSymbolId(1), "values", arrayType);
+        var program = new IrProgram(
+            [],
+            new ProceduralBlock(
+                source,
+                [new ProceduralDeclarationStatement(
+                    source,
+                    new ProceduralDeclaration(source, [new ProceduralVariable(source, symbol, array)]))]),
+            []);
+
+        var result = new SharpSqlCompiler().Transpile(program);
+
+        var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == "SS6301");
+        Assert.Equal("Only one-dimensional arrays are supported.", diagnostic.Message);
     }
 
     [Fact]
@@ -344,6 +493,41 @@ public sealed class IrBoundaryTests
         Assert.Contains("SET @selected = (SELECT CONVERT(INT, __value)", result.Sql);
         Assert.Contains("DECLARE @length INT = (SELECT __count", result.Sql);
         Assert.Contains("DROP TABLE IF EXISTS #__sharpsql_objects;", result.Sql);
+    }
+
+    [Fact]
+    public void SqlBackendLowersRuntimeMemberReceiversConstructedWithoutRoslyn()
+    {
+        var source = IrSource.None;
+        var intFacts = new ExpressionFacts(IrType.Int, ScalarNullability.NonNull, false, null);
+        var listType = new IrType("List<int>", IsReference: true);
+        var listFacts = new ExpressionFacts(listType, ScalarNullability.NonNull, false, null);
+        var count = new IrSymbol(new IrSymbolId(1), "count", IrType.Int);
+        IrConstantExpression Int(int value) => new(source, intFacts, value, value.ToString());
+        var list = new IrObjectCreationExpression(
+            source,
+            listFacts,
+            listType,
+            [],
+            [Int(4), Int(9)]);
+        var program = new IrProgram(
+            [],
+            new ProceduralBlock(
+                source,
+                [new ProceduralDeclarationStatement(
+                    source,
+                    new ProceduralDeclaration(
+                        source,
+                        [new ProceduralVariable(
+                            source,
+                            count,
+                            new IrMemberExpression(source, intFacts, list, "Count"))]))]),
+            []);
+
+        var result = new SharpSqlCompiler().Transpile(program);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.Contains("SET @count = (SELECT __count FROM #__sharpsql_objects", result.Sql);
     }
 
     [Fact]

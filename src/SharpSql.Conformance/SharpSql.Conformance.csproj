@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SharpSql/SharpSql.csproj" />
+    <ProjectReference Include="../SharpSql.ConformanceWorker/SharpSql.ConformanceWorker.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpSql.ConformanceTests" />
+  </ItemGroup>
+</Project>

@@ -25,6 +25,42 @@ public sealed class ApplicationPackageTests
         Assert.Contains("IF @@ROWCOUNT = 0", first, StringComparison.Ordinal);
         Assert.Contains("BEGIN TRANSACTION", first, StringComparison.Ordinal);
         Assert.Contains("COMMIT TRANSACTION", first, StringComparison.Ordinal);
+        Assert.Contains("already owned by a different SharpSql package", first, StringComparison.Ordinal);
+        Assert.Contains("@__sharpsql_previous_entry", first, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UninstallerIsDeterministicAndRemovesOnlyPackageOwnedObjects()
+    {
+        var package = Package();
+
+        var first = package.GenerateUninstallSql();
+        var second = package.GenerateUninstallSql();
+
+        Assert.Equal(first, second);
+        Assert.Contains("sys.sp_getapplock", first, StringComparison.Ordinal);
+        Assert.Contains("N'InventoryRebuild'", first, StringComparison.Ordinal);
+        Assert.Contains("DROP PROCEDURE [TenantJobs]", first, StringComparison.Ordinal);
+        Assert.Contains("NativeKernel[_]%", first, StringComparison.Ordinal);
+        Assert.Contains("DROP TABLE [TenantJobs].[NativeKernelCatalog]", first, StringComparison.Ordinal);
+        Assert.Contains("DROP TABLE [TenantJobs].[PackageManifest]", first, StringComparison.Ordinal);
+        Assert.Contains("DROP TYPE [TenantJobs].[MemoryVmSlotsV1]", first, StringComparison.Ordinal);
+        Assert.Contains("DROP TYPE [TenantJobs].[MemoryVmStackV1]", first, StringComparison.Ordinal);
+        Assert.DoesNotContain("DROP SCHEMA", first, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void UninstallerQuotesSchemaAndEscapesApplicationIdentity()
+    {
+        var sql = new SharpSqlApplicationPackage(
+            "Tenant]Jobs",
+            "O'Brien's job",
+            "ignored",
+            CompiledProgram).GenerateUninstallSql();
+
+        Assert.Contains("DROP TABLE [Tenant]]Jobs].[PackageManifest]", sql, StringComparison.Ordinal);
+        Assert.Contains("N'O''Brien''s job'", sql, StringComparison.Ordinal);
+        Assert.Contains("DROP PROCEDURE [Tenant]]Jobs]", sql, StringComparison.Ordinal);
     }
 
     [Fact]

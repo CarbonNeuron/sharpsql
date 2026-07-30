@@ -37,4 +37,7 @@ internal static class RuntimeErrorCatalog
         ApplicationExceptionErrorNumber => nameof(ApplicationException),
         _ => null
     };
+
+    public static (string Type, string Message, int Code) NormalizeSqlFailure(int number, string message) =>
+        (ExceptionTypeName(number) ?? "SqlException", message, number);
 }

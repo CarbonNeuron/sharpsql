@@ -11,4 +11,5 @@ public sealed record CliExecutionEnvironment(
     IParityRunner? ParityRunner = null,
     IProjectRestorer? ProjectRestorer = null,
     ISqlRunService? SqlRunService = null,
-    IPublishService? PublishService = null);
+    IPublishService? PublishService = null,
+    IUnpublishService? UnpublishService = null);

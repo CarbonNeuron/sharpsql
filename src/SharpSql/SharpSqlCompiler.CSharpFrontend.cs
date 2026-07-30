@@ -269,15 +269,21 @@ public sealed partial class SharpSqlCompiler
         MemberAccessExpressionSyntax member,
         IrSource source,
         ExpressionFacts facts,
-        VariableScope scope) =>
-        new(
+        VariableScope scope)
+    {
+        var referencedSymbol = SemanticModelFor(member)?.GetSymbolInfo(member).Symbol;
+        return new IrMemberExpression(
             source,
             facts,
             BindIrExpression(member.Expression, scope),
             member.Name.Identifier.ValueText)
         {
-            MemberId = MemberIdentity(SemanticModelFor(member)?.GetSymbolInfo(member).Symbol)
+            MemberId = referencedSymbol is IFieldSymbol or IPropertySymbol
+                ? MemberIdentity(referencedSymbol)
+                : IrMemberId.None,
+            ReferencedMethodId = MethodIdentity(referencedSymbol as IMethodSymbol)
         };
+    }
 
     private IrInvocationExpression BindInvocation(
         InvocationExpressionSyntax invocation,
@@ -591,7 +597,10 @@ public sealed partial class SharpSqlCompiler
             array.Initializer is not null || lengthSyntax is null or OmittedArraySizeExpressionSyntax
                 ? null
                 : BindIrExpression(lengthSyntax, scope),
-            array.Initializer?.Expressions.Select(item => BindIrExpression(item, scope)).ToArray() ?? []);
+            array.Initializer?.Expressions.Select(item => BindIrExpression(item, scope)).ToArray() ?? [])
+        {
+            Rank = array.Type.RankSpecifiers.Sum(specifier => specifier.Sizes.Count)
+        };
     }
 
     private IrLambdaExpression BindLambda(
@@ -608,9 +617,14 @@ public sealed partial class SharpSqlCompiler
         };
         var irParameters = parameters.Select(parameter =>
         {
-            var type = parameter.Type is null ? IrType.Unknown : CSharpTypeFactory.From(parameter.Type);
+            var parameterSymbol = SemanticModelFor(parameter)?.GetDeclaredSymbol(parameter) as IParameterSymbol;
+            var type = parameter.Type is not null
+                ? CSharpTypeFactory.From(parameter.Type)
+                : parameterSymbol is not null
+                    ? CSharpTypeFactory.From(parameterSymbol.Type)
+                    : IrType.Unknown;
             return GetOrCreateIrSymbol(
-                SemanticModelFor(parameter)?.GetDeclaredSymbol(parameter),
+                parameterSymbol,
                 parameter.Identifier.ValueText,
                 type);
         }).ToArray();
@@ -697,7 +711,8 @@ public sealed partial class SharpSqlCompiler
         {
             ReferencedMemberId = symbol is IFieldSymbol or IPropertySymbol
                 ? MemberIdentity(symbol)
-                : IrMemberId.None
+                : IrMemberId.None,
+            ReferencedMethodId = MethodIdentity(symbol as IMethodSymbol)
         };
         if (symbol is not null)
             _irSymbols[symbol] = created;
@@ -769,6 +784,7 @@ public sealed partial class SharpSqlCompiler
         var position = node.SyntaxTree.GetLineSpan(node.Span).StartLinePosition;
         var source = new IrSource(
             new IrSourceSpan(GlobalSourcePosition(node.SyntaxTree, node.SpanStart), node.Span.Length, position.Line + 1, position.Character + 1),
+            node.SyntaxTree.FilePath,
             ToIrComments(node.GetLeadingTrivia(), node.SyntaxTree),
             ToIrComments(node.GetTrailingTrivia(), node.SyntaxTree),
             ToIrComments(node.DescendantTrivia(descendIntoTrivia: true), node.SyntaxTree));
@@ -806,6 +822,21 @@ public sealed partial class SharpSqlCompiler
 
     private bool HasCSharpSource(IrSource source) =>
         _csharpSourceNodes.ContainsKey(source);
+
+    private MethodFlowSummary BindMethodFlow(BlockSyntax? body, IrType returnType)
+    {
+        if (body is null)
+        {
+            return new MethodFlowSummary(
+                EndPointIsReachable: returnType.Name == "void",
+                StatementCount: 1);
+        }
+
+        var controlFlow = SemanticModelFor(body)?.AnalyzeControlFlow(body);
+        return new MethodFlowSummary(
+            controlFlow is { Succeeded: true, EndPointIsReachable: true },
+            body.DescendantNodes().OfType<StatementSyntax>().Count());
+    }
 
     private static bool TryGetIrBinaryOperator(SyntaxKind kind, out IrBinaryOperator result)
     {

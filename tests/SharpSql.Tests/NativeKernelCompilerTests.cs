@@ -35,6 +35,9 @@ public sealed class NativeKernelCompilerTests
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.Contains("CREATE PROCEDURE [SharpSql].[NativeKernel_", result.Sql, StringComparison.Ordinal);
         Assert.Contains("WITH NATIVE_COMPILATION, SCHEMABINDING", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE [SharpSql].[NativeKernelCatalog]", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("SharpSql.NativeKernel.SharpSql.NativeKernel_", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("@LockMode = N'Shared'", result.Sql, StringComparison.Ordinal);
         Assert.Contains("@__result =", result.Sql, StringComparison.Ordinal);
         Assert.Contains("OUTPUT", result.Sql, StringComparison.Ordinal);
     }
@@ -96,5 +99,29 @@ public sealed class NativeKernelCompilerTests
         var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == "SS8201");
         Assert.Contains(nameof(RuntimeStorageKind.MemoryOptimized), diagnostic.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("NATIVE_COMPILATION", result.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GeneratesValidatedStatusAndRetentionSql()
+    {
+        var status = SharpSqlNativeKernelRuntime.GenerateStatusSql("TenantJobs");
+        var preview = SharpSqlNativeKernelRuntime.GenerateCleanupSql(
+            "TenantJobs",
+            TimeSpan.FromDays(7),
+            batchSize: 12,
+            dryRun: true);
+        var cleanup = SharpSqlNativeKernelRuntime.GenerateCleanupSql(
+            "TenantJobs",
+            TimeSpan.FromHours(1));
+
+        Assert.Contains("[TenantJobs].[NativeKernelCatalog]", status, StringComparison.Ordinal);
+        Assert.Contains("TOP (12)", preview, StringComparison.Ordinal);
+        Assert.DoesNotContain("DROP PROCEDURE", preview, StringComparison.Ordinal);
+        Assert.Contains("@LockMode = N'Exclusive'", cleanup, StringComparison.Ordinal);
+        Assert.Contains("DROP PROCEDURE [TenantJobs].", cleanup, StringComparison.Ordinal);
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            SharpSqlNativeKernelRuntime.GenerateCleanupSql("TenantJobs", TimeSpan.FromSeconds(30)));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            SharpSqlNativeKernelRuntime.GenerateCleanupSql("TenantJobs", TimeSpan.FromHours(1), batchSize: 101));
     }
 }

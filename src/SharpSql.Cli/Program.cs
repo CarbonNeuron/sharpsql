@@ -18,6 +18,7 @@ app.Configure(configurator =>
     configurator.AddCommand<PublishCommand>("publish").WithData(environment);
     configurator.AddCommand<RunCommand>("run").WithData(environment);
     configurator.AddCommand<TranspileCommand>("transpile").WithData(environment);
+    configurator.AddCommand<UnpublishCommand>("unpublish").WithData(environment);
     configurator.AddCommand<VerifyCommand>("verify").WithData(environment);
 });
 

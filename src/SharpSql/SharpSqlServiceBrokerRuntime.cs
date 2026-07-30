@@ -11,5 +11,6 @@ public static class SharpSqlServiceBrokerRuntime
     /// </summary>
     public static string GenerateProvisioningSql() =>
         ExecutionInfrastructureSqlEmitter.Emit() + Environment.NewLine +
+        ExecutionInfrastructureSqlEmitter.EmitLifecycle() + Environment.NewLine +
         ServiceBrokerWorkerDispatcherSqlEmitter.Emit();
 }

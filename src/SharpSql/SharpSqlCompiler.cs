@@ -298,7 +298,7 @@ public sealed partial class SharpSqlCompiler
     private static CSharpCompilation CreateCompilation(SyntaxTree sourceTree)
     {
         var globalUsings = CSharpSyntaxTree.ParseText(
-            "global using System; global using System.Collections.Generic; global using System.Linq;",
+            "global using System; global using System.Collections.Generic; global using System.Linq; global using System.Threading.Tasks;",
             new CSharpParseOptions(LanguageVersion.Preview));
         var compilation = CSharpCompilation.Create(
             "SharpSqlInput",
@@ -544,16 +544,18 @@ public sealed partial class SharpSqlCompiler
         {
             var scope = new VariableScope();
             var localSymbol = SemanticModelFor(local)?.GetDeclaredSymbol(local) as IMethodSymbol;
+            var returnType = CSharpTypeFactory.From(local.ReturnType);
             AddMethod(new MethodDefinition(
                 local.Identifier.ValueText,
-                CSharpTypeFactory.From(local.ReturnType),
+                returnType,
                 local.ParameterList.Parameters.Select(ToParameter).ToArray(),
                 local.Body is null ? null : (ProceduralBlock)BindProceduralStatement(local.Body, scope),
                 local.ExpressionBody is null ? null : BindIrExpression(local.ExpressionBody.Expression, scope),
                 ToIrSource(local))
             {
                 Id = MethodIdentity(localSymbol),
-                IsAsync = localSymbol?.IsAsync == true || local.Modifiers.Any(SyntaxKind.AsyncKeyword)
+                IsAsync = localSymbol?.IsAsync == true || local.Modifiers.Any(SyntaxKind.AsyncKeyword),
+                Flow = BindMethodFlow(local.Body, returnType)
             });
         }
 
@@ -567,6 +569,7 @@ public sealed partial class SharpSqlCompiler
             var isInstance = containingType is not null && !method.Modifiers.Any(SyntaxKind.StaticKeyword);
             var methodSymbol = SemanticModelFor(method)?.GetDeclaredSymbol(method) as IMethodSymbol;
             var scope = new VariableScope();
+            var returnType = CSharpTypeFactory.From(method.ReturnType);
             var parameters = method.ParameterList.Parameters.Select(ToParameter).ToList();
             if (isInstance)
                 parameters.Insert(0, new ParameterDefinition(GetOrCreateIrSymbol(
@@ -576,7 +579,7 @@ public sealed partial class SharpSqlCompiler
 
             AddMethod(new MethodDefinition(
                 method.Identifier.ValueText,
-                CSharpTypeFactory.From(method.ReturnType),
+                returnType,
                 parameters,
                 method.Body is null ? null : (ProceduralBlock)BindProceduralStatement(method.Body, scope),
                 method.ExpressionBody is null ? null : BindIrExpression(method.ExpressionBody.Expression, scope),
@@ -591,33 +594,16 @@ public sealed partial class SharpSqlCompiler
                 IsOverride = methodSymbol?.IsOverride == true,
                 IsSealed = methodSymbol?.IsSealed == true,
                 OverriddenMethodId = MethodIdentity(methodSymbol?.OverriddenMethod),
-                ImplementedInterfaceMethodIds = InterfaceMethodIdentities(methodSymbol)
+                ImplementedInterfaceMethodIds = InterfaceMethodIdentities(methodSymbol),
+                Flow = BindMethodFlow(method.Body, returnType)
             });
         }
     }
 
     private void AddMethod(MethodDefinition method)
     {
-        method = method with { Flow = AnalyzeMethodFlow(method) };
         if (!_methods.TryAdd(method, out _))
             AddDiagnostic("SS1001", $"Duplicate method identity is not supported: '{method.Name}'.", method.Source);
-    }
-
-    private MethodFlowSummary AnalyzeMethodFlow(MethodDefinition method)
-    {
-        if (method.Body is null)
-        {
-            return new MethodFlowSummary(
-                EndPointIsReachable: method.ReturnType.Name == "void",
-                StatementCount: 1);
-        }
-
-        var body = CSharpSyntax<BlockSyntax>(method.Body.Source);
-        var semanticModel = SemanticModelFor(body);
-        var controlFlow = semanticModel?.AnalyzeControlFlow(body);
-        return new MethodFlowSummary(
-            controlFlow is { Succeeded: true, EndPointIsReachable: true },
-            body.DescendantNodes().OfType<StatementSyntax>().Count());
     }
 
     private ParameterDefinition ToParameter(ParameterSyntax parameter) =>

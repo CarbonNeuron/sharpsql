@@ -19,43 +19,24 @@ internal static partial class ExecutionInfrastructureSqlEmitter
             EmitProcedureTransactionDeclaration(procedure);
             procedure.Line("SET @OutputText = COALESCE(@OutputText, N'');");
             procedure.Line();
-            procedure.Line("DECLARE @Allocation TABLE (");
-            using (procedure.Indent())
-            {
-                procedure.Line("[SequenceNumber] BIGINT NOT NULL,");
-                procedure.Line("[ConversationHandle] UNIQUEIDENTIFIER NULL");
-            }
-            procedure.Line(");");
             procedure.Line("DECLARE @SequenceNumber BIGINT;");
-            procedure.Line("DECLARE @ConversationHandle UNIQUEIDENTIFIER;");
-            procedure.Line("DECLARE @Notification NVARCHAR(MAX);");
-            procedure.Line("DECLARE @MessageBody VARBINARY(MAX);");
             procedure.Line();
             procedure.Line("BEGIN TRY");
             using (procedure.Indent())
             {
                 EmitProcedureTransactionStart(procedure, "SharpSqlAppendOutput");
                 procedure.Line();
-                procedure.Line($"UPDATE [{SchemaName}].[{ExecutionsTableName}] WITH (UPDLOCK, ROWLOCK)");
-                procedure.Line("SET [NextOutputSequence] = [NextOutputSequence] + 1");
-                procedure.Line("OUTPUT DELETED.[NextOutputSequence], INSERTED.[ConversationHandle]");
-                procedure.Line("INTO @Allocation ([SequenceNumber], [ConversationHandle])");
-                procedure.Line("WHERE [ExecutionId] = @ExecutionId;");
-                procedure.Line();
-                procedure.Line("IF NOT EXISTS (SELECT 1 FROM @Allocation)");
+                procedure.Line($"IF NOT EXISTS (SELECT 1 FROM [{SchemaName}].[{ExecutionsTableName}] WHERE [ExecutionId] = @ExecutionId)");
                 using (procedure.Indent())
                 {
                     procedure.Line(
                         $"THROW {ExecutionNotFoundErrorNumber}, 'The SharpSql execution does not exist.', 1;");
                 }
                 procedure.Line();
-                procedure.Line("SELECT");
-                using (procedure.Indent())
-                {
-                    procedure.Line("@SequenceNumber = [SequenceNumber],");
-                    procedure.Line("@ConversationHandle = [ConversationHandle]");
-                }
-                procedure.Line("FROM @Allocation;");
+                // A database sequence is intentionally non-transactional. Gaps are harmless,
+                // while avoiding an execution-row lock prevents output from serializing every
+                // worker transaction or deadlocking with another shared runtime resource.
+                procedure.Line($"SET @SequenceNumber = NEXT VALUE FOR [{SchemaName}].[{OutputSequenceName}];");
                 procedure.Line();
                 procedure.Line($"INSERT INTO [{SchemaName}].[{OutputEventsTableName}] (");
                 using (procedure.Indent())
@@ -64,31 +45,6 @@ internal static partial class ExecutionInfrastructureSqlEmitter
                 using (procedure.Indent())
                     procedure.Line("@ExecutionId, @SequenceNumber, @OutputText");
                 procedure.Line(");");
-                procedure.Line();
-                procedure.Line("IF @ConversationHandle IS NOT NULL");
-                procedure.Line("BEGIN");
-                using (procedure.Indent())
-                {
-                    procedure.Line("SELECT @Notification = (");
-                    using (procedure.Indent())
-                    {
-                        procedure.Line("SELECT");
-                        using (procedure.Indent())
-                        {
-                            procedure.Line("CONVERT(NVARCHAR(36), @ExecutionId) AS [executionId],");
-                            procedure.Line("@SequenceNumber AS [sequenceNumber],");
-                            procedure.Line("@OutputText AS [output]");
-                        }
-                        procedure.Line("FOR JSON PATH, WITHOUT_ARRAY_WRAPPER");
-                    }
-                    procedure.Line(");");
-                    procedure.Line("SET @MessageBody = CONVERT(VARBINARY(MAX), @Notification);");
-                    procedure.Line("SEND ON CONVERSATION @ConversationHandle");
-                    using (procedure.Indent())
-                        procedure.Line($"MESSAGE TYPE [{OutputMessageTypeName}] (@MessageBody);");
-                }
-                procedure.Line("END;");
-                procedure.Line();
                 EmitProcedureTransactionCommit(procedure);
                 procedure.Line("SELECT @SequenceNumber AS [SequenceNumber];");
             }
@@ -253,4 +209,3 @@ internal static partial class ExecutionInfrastructureSqlEmitter
     }
 
 }
-

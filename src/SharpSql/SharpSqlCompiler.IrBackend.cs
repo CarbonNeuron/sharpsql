@@ -39,8 +39,6 @@ public sealed partial class SharpSqlCompiler
                 ContainsRuntimeExpression(assignment.Target) || ContainsRuntimeExpression(assignment.Value),
             IrLambdaExpression lambda => LambdaContainsRuntimeExpression(lambda),
             IrQueryExpression query => ContainsRuntimeExpression(query.SourceExpression),
-            IrUnsupportedExpression when HasCSharpSource(expression.Source) =>
-                ContainsRuntimeExpression(CSharpExpression(expression)),
             _ => false
         };
     }
@@ -98,10 +96,6 @@ public sealed partial class SharpSqlCompiler
         {
             if (TryEmitHeapStatement(assignment, scope, _proceduralVmContext))
                 return;
-            if ((assignment.Target is not IrVariableExpression variableTarget || scope.Find(variableTarget.Symbol) is null) &&
-                HasCSharpSource(expression.Source) &&
-                TryEmitHeapStatement(CSharpExpression(expression), scope, _proceduralVmContext))
-                return;
             if (ContainsRuntimeExpression(assignment.Value))
             {
                 var target = EmitIrAssignable(assignment.Target, scope);
@@ -146,11 +140,7 @@ public sealed partial class SharpSqlCompiler
             return;
         }
 
-        // Heap and stateful runtime intrinsics are backend operations whose
-        // recognizers currently share the C# frontend adapter.
         if (TryEmitHeapStatement(expression, scope, _proceduralVmContext))
-            return;
-        if (HasCSharpSource(expression.Source) && TryEmitHeapStatement(CSharpExpression(expression), scope, _proceduralVmContext))
             return;
 
         if (expression is IrInvocationExpression call &&
@@ -246,9 +236,7 @@ public sealed partial class SharpSqlCompiler
             IrInterpolatedStringExpression interpolated => EmitIrInterpolatedString(interpolated, scope, substitutions),
             IrInvocationExpression invocation => EmitIrInvocation(invocation, scope, substitutions),
             IrMemberExpression member => EmitIrMember(member, scope, substitutions),
-            IrElementExpression element when HasCSharpSource(element.Source) => EmitHeapElementScalar(
-                CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.ElementAccessExpressionSyntax>(element.Source),
-                scope),
+            IrElementExpression element => EmitIrElement(element, scope, substitutions),
             IrObjectCreationExpression creation => EmitIrObjectCreation(creation, scope, substitutions),
             IrUnsupportedExpression unsupported => SqlScalarExpression.Primary(
                 UnsupportedExpression(unsupported.Source, unsupported.Description)),
@@ -277,9 +265,7 @@ public sealed partial class SharpSqlCompiler
         if (TryEmitRuntimeDispatchScalar(invocation, scope, substitutions, out var dispatchExpression))
             return dispatchExpression;
 
-        if (TryGetMethod(invocation, out var method) &&
-            method.PureExpression is not null &&
-            CanUseIrInvocation(method, invocation))
+        if (TryGetMethod(invocation, out var method) && method.PureExpression is not null)
         {
             EmitLeadingComments(method.Source);
             if (method.Body?.Statements.OfType<ProceduralReturn>().FirstOrDefault() is { } returnStatement)
@@ -289,29 +275,43 @@ public sealed partial class SharpSqlCompiler
                 return SqlScalarExpression.Primary("NULL");
 
             var replacements = new Dictionary<string, Substitution>(StringComparer.Ordinal);
+            var planReplacements = new Dictionary<string, SqlLinqQueryPlan>(StringComparer.Ordinal);
+            var lambdaReplacements = new Dictionary<string, SqlLinqLambdaPlan>(StringComparer.Ordinal);
             for (var index = 0; index < method.Parameters.Count; index++)
-                replacements[method.Parameters[index].Name] = new Substitution(
-                    EmitScalarExpression(arguments[index], scope, substitutions));
-            return EmitScalarExpression(method.PureExpression, scope, replacements);
-        }
+            {
+                var parameter = method.Parameters[index];
+                var argument = arguments[index];
+                if (TryBuildLinqLambda(argument, scope, substitutions, out var lambdaArgument))
+                {
+                    lambdaReplacements[parameter.Name] = lambdaArgument;
+                    continue;
+                }
+                if ((IsSequenceType(parameter.Type.Name) || KnownTypeFacts.IsLinqSequence(parameter.Type.Name)) &&
+                    TryBuildLinqQuery(argument, scope, substitutions, out var argumentQuery))
+                {
+                    planReplacements[parameter.Name] = argumentQuery;
+                    continue;
+                }
+                replacements[parameter.Name] = new Substitution(
+                    EmitScalarExpression(argument, scope, substitutions));
+            }
 
-        if (HasCSharpSource(invocation.Source))
-        {
-            return EmitInvocation(
-                CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.InvocationExpressionSyntax>(invocation.Source),
-                scope,
-                substitutions);
+            _linqPlanSubstitutions.Push(planReplacements);
+            _linqLambdaSubstitutions.Push(lambdaReplacements);
+            try
+            {
+                return EmitScalarExpression(method.PureExpression, scope, replacements);
+            }
+            finally
+            {
+                _linqLambdaSubstitutions.Pop();
+                _linqPlanSubstitutions.Pop();
+            }
         }
 
         return SqlScalarExpression.Primary(
             UnsupportedExpression(invocation.Source, "Only user-defined methods and supported intrinsics can be invoked."));
     }
-
-    private static bool CanUseIrInvocation(MethodDefinition method, IrInvocationExpression invocation) =>
-        !method.Parameters.Any(parameter =>
-            IsSequenceType(parameter.Type.Name) ||
-            KnownTypeFacts.IsLinqSequence(parameter.Type.Name)) &&
-        !invocation.Arguments.Any(argument => argument is IrLambdaExpression or IrQueryExpression);
 
     private SqlScalarExpression EmitIrMember(
         IrMemberExpression member,
@@ -339,6 +339,8 @@ public sealed partial class SharpSqlCompiler
 
         var receiverType = member.Receiver.Type;
         var receiver = EmitScalar(member.Receiver, scope, substitutions);
+        if (IsGroupingType(receiverType.Name) && member.MemberName == "Key")
+            return SqlScalarExpression.Primary(receiver);
         if (receiverType.IsString && member.MemberName == "Length")
             return SqlScalarExpression.Primary($"CONVERT(INT, DATALENGTH({receiver}) / 2)");
         if ((IsListType(receiverType.Name) && member.MemberName == "Count") ||
@@ -353,15 +355,25 @@ public sealed partial class SharpSqlCompiler
                 out var field))
             return SqlScalarExpression.Primary(
                 $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})");
-        if (HasCSharpSource(member.Source))
-        {
-            return EmitHeapMemberScalar(
-                CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.MemberAccessExpressionSyntax>(member.Source),
-                scope,
-                substitutions);
-        }
         return SqlScalarExpression.Primary(
             UnsupportedExpression(member.Source, $"Unknown member '{member.MemberName}' on '{receiverType.Name}'."));
+    }
+
+    private SqlScalarExpression EmitIrElement(
+        IrElementExpression element,
+        VariableScope scope,
+        IReadOnlyDictionary<string, Substitution>? substitutions)
+    {
+        if (element.Arguments.Count != 1)
+            return SqlScalarExpression.Primary(
+                UnsupportedExpression(element.Source, "Only single-argument indexing is supported."));
+
+        var receiver = EmitScalar(element.Receiver, scope, substitutions);
+        var key = EmitScalar(element.Arguments[0], scope, substitutions);
+        if (TryGetHeapElementSql(element.Receiver.Type, receiver, key, out var value))
+            return SqlScalarExpression.Primary(value);
+        return SqlScalarExpression.Primary(
+            UnsupportedExpression(element.Source, "Only string, list, array, and dictionary indexing is supported."));
     }
 
     private string EmitPredicate(
@@ -413,12 +425,6 @@ public sealed partial class SharpSqlCompiler
                 out var receiver))
             return SqlScalarExpression.Primary(
                 $"(SELECT {field.SqlName} FROM {heapType.TableName} WHERE {HeapExecutionFilter()}__object_id = {receiver})");
-        if (HasCSharpSource(variable.Source) && TryEmitImplicitHeapField(
-                CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.IdentifierNameSyntax>(variable.Source),
-                scope,
-                substitutions,
-                out var heapField))
-            return heapField;
         AddDiagnostic("SS4001", $"Unknown identifier '{variable.Symbol.Name}'.", variable.Source);
         return SqlScalarExpression.Primary("NULL");
     }
@@ -540,12 +546,9 @@ public sealed partial class SharpSqlCompiler
             creation.Arguments is [var characters] &&
             characters.Type.Name == "char[]")
             return SqlScalarExpression.Primary(StringFromCharacterArraySql(EmitScalar(characters, scope, substitutions)));
-        if (!HasCSharpSource(creation.Source))
-            return SqlScalarExpression.Primary(UnsupportedExpression(creation.Source, "Unsupported object construction."));
-        return EmitIntrinsicObjectCreation(
-            CSharpSyntax<Microsoft.CodeAnalysis.CSharp.Syntax.ObjectCreationExpressionSyntax>(creation.Source),
-            scope,
-            substitutions);
+        return SqlScalarExpression.Primary(UnsupportedExpression(
+            creation.Source,
+            "Only the string(char[]) scalar constructor is supported."));
     }
 
     private static string EmitIrConstant(IrConstantExpression constant)

@@ -403,6 +403,50 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task ConformanceCommandRecordsOptInSemanticParitySamples()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"sharpsql-conformance-cli-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var outputPath = Path.Combine(directory, "results.json");
+        var sourcePath = Path.Combine(directory, "test-001.cs");
+        await File.WriteAllTextAsync(
+            sourcePath,
+            "Console.WriteLine(42);",
+            TestContext.Current.CancellationToken);
+        try
+        {
+            var parity = new StubParityRunner(new ParityRunResult(
+                new ParityOutcome("42", null),
+                new ParityOutcome("42", null),
+                "PRINT 42;"));
+            var tester = new CommandAppTester(new CommandAppTesterSettings { TrimConsoleOutput = false });
+            var environment = new CliExecutionEnvironment(
+                tester.Console,
+                new StringReader(string.Empty),
+                ParityRunner: parity);
+            tester.Configure(configurator =>
+                configurator.AddCommand<ConformanceCommand>("conformance").WithData(environment));
+
+            var result = await tester.RunAsync(
+                ["conformance", "--tests", directory, "--output", outputPath, "--semantic", "1"],
+                TestContext.Current.CancellationToken);
+            var report = await SharpSql.Conformance.ConformanceRunner.ReadReportAsync(
+                outputPath,
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.NotNull(report);
+            Assert.True(report.SemanticConformanceValidated);
+            Assert.True(Assert.Single(report.SemanticResults).Matches);
+            Assert.Equal([sourcePath], parity.LastRequest!.SourcePaths);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void RoutesLegacyArgumentsToTheTranspileCommand()
     {
         Assert.Equal(["transpile", "Program.cs", "--output", "Program.sql"],
@@ -731,6 +775,33 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task UnpublishBindsApplicationIdentityAndConnectionOptions()
+    {
+        var service = new StubUnpublishService(new UnpublishResult(true, "server/database"));
+        var tester = CreateRoutedTester(unpublishService: service);
+
+        var result = await tester.RunAsync(
+            [
+                "unpublish",
+                "--schema", "BillingJobs",
+                "--name", "BillingReconciliation",
+                "--connection", "Production",
+                "--connection-string-env", "BILLING_SQL",
+                "--timeout", "90"
+            ],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("Removed", result.Output);
+        var request = Assert.IsType<UnpublishRequest>(service.LastRequest);
+        Assert.Equal("BillingJobs", request.SchemaName);
+        Assert.Equal("BillingReconciliation", request.ApplicationName);
+        Assert.Equal("Production", request.ConnectionName);
+        Assert.Equal("BILLING_SQL", request.ConnectionStringEnvironmentVariable);
+        Assert.Equal(90, request.CommandTimeoutSeconds);
+    }
+
+    [Fact]
     public async Task RunStreamsOnceAndRendersDebugProfileAndSavedArtifacts()
     {
         using var project = TemporaryProject.Create("""
@@ -814,7 +885,8 @@ public sealed class CliTests
     private static CommandAppTester CreateRoutedTester(
         IParityRunner? parityRunner = null,
         IProjectRestorer? projectRestorer = null,
-        ISqlRunService? sqlRunService = null)
+        ISqlRunService? sqlRunService = null,
+        IUnpublishService? unpublishService = null)
     {
         var tester = new CommandAppTester(new CommandAppTesterSettings { TrimConsoleOutput = false });
         var environment = new CliExecutionEnvironment(
@@ -822,12 +894,14 @@ public sealed class CliTests
             new StringReader(string.Empty),
             ParityRunner: parityRunner,
             ProjectRestorer: projectRestorer,
-            SqlRunService: sqlRunService);
+            SqlRunService: sqlRunService,
+            UnpublishService: unpublishService);
         tester.Configure(configurator =>
         {
             configurator.AddCommand<InitCommand>("init").WithData(environment);
             configurator.AddCommand<RunCommand>("run").WithData(environment);
             configurator.AddCommand<TranspileCommand>("transpile").WithData(environment);
+            configurator.AddCommand<UnpublishCommand>("unpublish").WithData(environment);
             configurator.AddCommand<VerifyCommand>("verify").WithData(environment);
         });
         return tester;
@@ -876,6 +950,19 @@ public sealed class CliTests
                 result.InstallerSql,
                 cancellationToken);
             return result;
+        }
+    }
+
+    private sealed class StubUnpublishService(UnpublishResult result) : IUnpublishService
+    {
+        public UnpublishRequest? LastRequest { get; private set; }
+
+        public Task<UnpublishResult> UnpublishAsync(
+            UnpublishRequest request,
+            CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            return Task.FromResult(result);
         }
     }
 

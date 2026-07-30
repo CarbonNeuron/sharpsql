@@ -18,8 +18,8 @@
     </PropertyGroup>
     <Error Condition="!Exists('$(SharpSqlBuildHostPath)')"
            Text="SharpSql build host was not found at '$(SharpSqlBuildHostPath)'." />
-    <Error Condition="'$(_SharpSqlRuntimeStorageLower)' != 'ephemeral' and '$(_SharpSqlRuntimeStorageLower)' != 'durable' and '$(_SharpSqlRuntimeStorageLower)' != 'servicebroker'"
-           Text="SharpSqlRuntimeStorage must be Ephemeral, Durable, or ServiceBroker." />
+    <Error Condition="'$(_SharpSqlRuntimeStorageLower)' != 'ephemeral' and '$(_SharpSqlRuntimeStorageLower)' != 'memoryoptimized' and '$(_SharpSqlRuntimeStorageLower)' != 'durable' and '$(_SharpSqlRuntimeStorageLower)' != 'servicebroker'"
+           Text="SharpSqlRuntimeStorage must be Ephemeral, MemoryOptimized, Durable, or ServiceBroker." />
     <Exec Command="dotnet &quot;$(SharpSqlBuildHostPath)&quot; --project &quot;$(MSBuildProjectFullPath)&quot; --output &quot;$(SharpSqlResolvedOutputPath)&quot; --configuration &quot;$(Configuration)&quot; --framework &quot;$(TargetFramework)&quot; --entry &quot;$(SharpSqlEntryPoint)&quot; --runtime-storage &quot;$(SharpSqlRuntimeStorage)&quot;"
           ConsoleToMSBuild="true"
           StandardOutputImportance="High"

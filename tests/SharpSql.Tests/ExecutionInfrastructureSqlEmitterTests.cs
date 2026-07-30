@@ -35,6 +35,8 @@ public sealed class ExecutionInfrastructureSqlEmitterTests
         Assert.Equal(51900, ExecutionInfrastructureSqlEmitter.ProvisioningLockErrorNumber);
         Assert.Contains("THROW 51900, 'Could not acquire the SharpSql infrastructure provisioning lock.'", sql);
         Assert.Contains("IF SCHEMA_ID(N'SharpSql') IS NULL", sql);
+        Assert.Contains("IF OBJECT_ID(N'[SharpSql].[OutputSequence]', N'SO') IS NULL", sql);
+        Assert.Contains("CREATE SEQUENCE [SharpSql].[OutputSequence] AS BIGINT", sql);
         Assert.Contains("IF OBJECT_ID(N'[SharpSql].[Executions]', N'U') IS NULL", sql);
         Assert.Contains("IF OBJECT_ID(N'[SharpSql].[OutputEvents]', N'U') IS NULL", sql);
         Assert.Contains("IF NOT EXISTS (SELECT 1 FROM sys.service_message_types", sql);
@@ -52,6 +54,7 @@ public sealed class ExecutionInfrastructureSqlEmitterTests
 
         Assert.Contains("CONSTRAINT [PK_sharpsql_Executions] PRIMARY KEY ([ExecutionId])", sql);
         Assert.Contains("[NextOutputSequence] BIGINT NOT NULL", sql);
+        Assert.Contains("NEXT VALUE FOR [SharpSql].[OutputSequence]", sql);
         Assert.Contains("CREATE INDEX [IX_sharpsql_Executions_ConversationHandle]", sql);
         Assert.DoesNotContain("CREATE UNIQUE INDEX", sql);
         Assert.DoesNotContain("WHERE [ConversationHandle] IS NOT NULL", sql);
@@ -82,22 +85,17 @@ public sealed class ExecutionInfrastructureSqlEmitterTests
     }
 
     [Fact]
-    public void AppendOutputAllocatesPersistsAndNotifiesAtomically()
+    public void AppendOutputAllocatesAndPersistsWithoutSerializingWorkerTransactions()
     {
         var sql = ExecutionInfrastructureSqlEmitter.Emit();
 
         Assert.Contains("CREATE OR ALTER PROCEDURE [SharpSql].[AppendOutput]", sql);
         Assert.Contains("@ExecutionId UNIQUEIDENTIFIER", sql);
         Assert.Contains("@OutputText NVARCHAR(MAX)", sql);
-        Assert.Contains("UPDATE [SharpSql].[Executions] WITH (UPDLOCK, ROWLOCK)", sql);
-        Assert.Contains("SET [NextOutputSequence] = [NextOutputSequence] + 1", sql);
-        Assert.Contains("OUTPUT DELETED.[NextOutputSequence], INSERTED.[ConversationHandle]", sql);
-        Assert.Contains("INTO @Allocation ([SequenceNumber], [ConversationHandle])", sql);
+        Assert.Contains("NEXT VALUE FOR [SharpSql].[OutputSequence]", sql);
         Assert.Contains("INSERT INTO [SharpSql].[OutputEvents]", sql);
-        Assert.Contains("IF @ConversationHandle IS NOT NULL", sql);
-        Assert.Contains("SEND ON CONVERSATION @ConversationHandle", sql);
-        Assert.Contains("MESSAGE TYPE [//sharpsql/v1/execution/output] (@MessageBody)", sql);
-        Assert.Contains("FOR JSON PATH, WITHOUT_ARRAY_WRAPPER", sql);
+        Assert.DoesNotContain("SET [NextOutputSequence] = [NextOutputSequence] + 1", sql);
+        Assert.DoesNotContain("MESSAGE TYPE [//sharpsql/v1/execution/output] (@MessageBody)", sql);
         Assert.Contains("COMMIT TRANSACTION;", sql);
         Assert.Equal(51901, ExecutionInfrastructureSqlEmitter.ExecutionNotFoundErrorNumber);
         Assert.Contains("THROW 51901, ''The SharpSql execution does not exist.''", sql);
@@ -264,6 +262,7 @@ public sealed class ExecutionInfrastructureSqlEmitterTests
             ExecutionInfrastructureSqlEmitter.SchemaName,
             ExecutionInfrastructureSqlEmitter.ExecutionsTableName,
             ExecutionInfrastructureSqlEmitter.OutputEventsTableName,
+            ExecutionInfrastructureSqlEmitter.OutputSequenceName,
             ExecutionInfrastructureSqlEmitter.TasksTableName,
             ExecutionInfrastructureSqlEmitter.TaskTimersTableName,
             ExecutionInfrastructureSqlEmitter.TaskJoinsTableName,

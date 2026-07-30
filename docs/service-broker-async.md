@@ -24,8 +24,8 @@ Durable task states are `0` waiting, `1` ready, `2` enqueued, `3` running,
 
 ## Execution flow
 
-1. The generated launcher installs a deterministic `Program_<hash>` procedure,
-   inserts an execution, and schedules its root task.
+1. The generated launcher installs and catalogs a deterministic `Program_<hash>`
+   procedure, starts a leased execution, and schedules its root task.
 2. An activated worker receives `{ program_id, execution_id, task_id }`, loads the
    durable payload, and runs the selected continuation until completion or an
    incomplete `await`.
@@ -33,8 +33,8 @@ Durable task states are `0` waiting, `1` ready, `2` enqueued, `3` running,
    the awaited dependency, and commits. The worker thread is then free.
 4. Completing a dependency sends a continuation message. `Task.WhenAll` resumes its
    waiter only when the final child reaches a terminal state.
-5. The launcher pumps due millisecond timers, drains output in sequence, observes
-   completion, and removes all rows for the execution.
+5. The launcher renews its lease, pumps due millisecond timers, drains output in
+   sequence, observes completion, and removes all rows for the execution.
 
 The entry point is itself the root task. The outer generated batch is only its
 launcher, so ordinary entry-point code can suspend and resume on activated sessions.
@@ -52,10 +52,12 @@ worker's own connection. `Console.WriteLine` appends an execution-scoped output 
 OutputEvents(execution_id, sequence_number, output_text, created_at_utc)
 ```
 
-Sequence allocation and insertion are atomic. When the execution has a response
-conversation, the append operation also sends an output notification. The launcher
-drains committed events and emits them on its connection. Writes within one task stay
-ordered. Output from concurrent tasks is ordered by whichever worker appends first.
+Sequence allocation uses a database sequence, and insertion remains transactional.
+This avoids holding a shared execution-row or conversation lock for the rest of a
+worker transaction. The launcher polls and drains committed events, then emits them on
+its connection. Writes within one task stay ordered. Output from concurrent tasks is
+ordered by whichever worker appends first; rolled-back writes can leave harmless gaps
+in the global sequence.
 
 The CLI receives ordinary output lines with `NOWAIT`, so they are visible while the
 execution is still running. Lines above 2,000 UTF-16 code units retain the larger
@@ -75,6 +77,41 @@ database permissions to create a schema, tables, procedures, message types, queu
 contracts, services, and the activated dispatcher; it intentionally does not run
 `ALTER DATABASE ... ENABLE_BROKER`. Run provisioning as a standalone batch rather
 than inside an existing transaction.
+
+## Lifecycle operations
+
+The launcher renews a token-bound 30-second execution lease every five seconds. A
+maintenance job can reclaim launchers that disappeared without completing:
+
+```sql
+EXEC [SharpSql].[ReapAbandonedExecutions] @BatchSize = 100;
+```
+
+The reaper rechecks the token and expiry while holding the execution row lock, so a
+concurrent heartbeat is not mistaken for abandonment. Explicit cancellation is also
+execution-scoped and idempotent:
+
+```sql
+EXEC [SharpSql].[CancelExecution]
+    @ExecutionId = '00000000-0000-0000-0000-000000000000',
+    @Reason = N'operator request';
+```
+
+`GetServiceBrokerStatus` returns execution leases and the installed program catalog.
+Content-addressed worker procedures can be previewed or removed after a retention
+window. Cleanup excludes programs referenced by active executions or nonterminal tasks
+and coordinates with installation/start through a per-program transaction lock:
+
+```sql
+EXEC [SharpSql].[CleanupServiceBrokerPrograms]
+    @UnusedForMinutes = 1440,
+    @BatchSize = 20,
+    @DryRun = 1;
+```
+
+Schedule the reaper and cleanup procedures with SQL Server Agent or an equivalent
+maintenance runner; provisioning installs the operations but does not create an Agent
+job.
 
 The CLI keeps that deployment boundary explicit. Transpiling or running with
 `--runtime-storage ServiceBroker --output out.sql` writes the program to `out.sql`
@@ -106,8 +143,8 @@ For a `SharpSql.Sdk` project, use the matching MSBuild property:
 </PropertyGroup>
 ```
 
-`SharpSqlRuntimeStorage` accepts `Ephemeral` (the default), `Durable`, or
-`ServiceBroker`. The SDK passes it to the analyzer and build host, and
+`SharpSqlRuntimeStorage` accepts `Ephemeral` (the default), `MemoryOptimized`,
+`Durable`, or `ServiceBroker`. The SDK passes it to the analyzer and build host, and
 `SharpSqlRun` provisions the infrastructure as a separate batch before running
 the generated program SQL. The CLI exposes the same choice as
 `--runtime-storage ServiceBroker` for `transpile` and `run`. The `run` command also
@@ -143,7 +180,8 @@ shared closure cells exist. Other locals declared before an await, nested return
 calls requiring the stack-machine fallback are likewise rejected with async-specific
 diagnostics rather than producing invalid worker SQL or silently losing state. General
 local/closure spilling, control-flow splitting, multiple/nested awaits, async recursion,
-cancellation, and abandoned-execution leases remain future work.
+and source-level `CancellationToken` lowering remain future work. Operators can cancel
+a whole execution through the lifecycle procedure above.
 
 Sub-second `Task.Delay` uses the durable timer table because Broker conversation timers
 use whole seconds. The generated launcher calls `SharpSql.ClaimDueContinuations` while

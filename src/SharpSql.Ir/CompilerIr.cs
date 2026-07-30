@@ -16,12 +16,14 @@ internal sealed record IrComment(int Start, string Text, IrCommentKind Kind);
 
 internal sealed record IrSource(
     IrSourceSpan Span,
+    string? FilePath,
     IReadOnlyList<IrComment> LeadingComments,
     IReadOnlyList<IrComment> TrailingComments,
     IReadOnlyList<IrComment> DescendantComments)
 {
     public static IrSource None { get; } = new(
         IrSourceSpan.None,
+        null,
         Array.Empty<IrComment>(),
         Array.Empty<IrComment>(),
         Array.Empty<IrComment>());
@@ -82,6 +84,7 @@ internal enum IrConstructorInitializerKind
 internal sealed record IrSymbol(IrSymbolId Id, string Name, IrType Type)
 {
     public IrMemberId ReferencedMemberId { get; init; } = IrMemberId.None;
+    public IrMethodId ReferencedMethodId { get; init; } = IrMethodId.None;
 }
 
 internal enum IrBinaryOperator
@@ -189,6 +192,7 @@ internal sealed record IrMemberExpression(
     string MemberName) : IrExpression(Source, Facts)
 {
     public IrMemberId MemberId { get; init; } = IrMemberId.None;
+    public IrMethodId ReferencedMethodId { get; init; } = IrMethodId.None;
 }
 
 internal sealed record IrElementExpression(
@@ -234,7 +238,10 @@ internal sealed record IrArrayCreationExpression(
     ExpressionFacts Facts,
     IrType ElementType,
     IrExpression? Length,
-    IReadOnlyList<IrExpression> Elements) : IrExpression(Source, Facts);
+    IReadOnlyList<IrExpression> Elements) : IrExpression(Source, Facts)
+{
+    public int Rank { get; init; } = 1;
+}
 
 internal sealed record IrInterpolatedText(string Text);
 internal sealed record IrInterpolation(IrExpression Expression);

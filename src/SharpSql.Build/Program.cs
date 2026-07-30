@@ -246,7 +246,7 @@ public static class Program
             if (!TryRuntimeStorage(Value(values, "runtime-storage"), out var runtimeStorage))
             {
                 parsed = null!;
-                error = "--runtime-storage must be Ephemeral, Durable, or ServiceBroker.";
+                error = "--runtime-storage must be Ephemeral, MemoryOptimized, Durable, or ServiceBroker.";
                 return false;
             }
 

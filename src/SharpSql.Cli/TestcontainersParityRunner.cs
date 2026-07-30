@@ -11,7 +11,6 @@ public sealed partial class TestcontainersParityRunner : IParityRunner
 {
     private const int ProfileWarmupRuns = 1;
     private const int ProfileSampleRuns = 3;
-    private const string HeapDebugPrefix = "__SHARPSQL_DEBUG_HEAP__|";
     private const string GlobalUsings =
         "global using System; global using System.Collections.Generic; global using System.Linq;";
     private static readonly CSharpParseOptions ParseOptions = new(LanguageVersion.Preview);
@@ -86,6 +85,7 @@ public sealed partial class TestcontainersParityRunner : IParityRunner
         await using var session = await SqlServerSessionFactory.OpenAsync(
             new SqlServerSessionOptions(
                 request.InputPath,
+                ConnectionString: request.ConnectionString,
                 Image: request.SqlServerImage,
                 KeepContainer: request.KeepContainer),
             cancellationToken);
@@ -141,9 +141,17 @@ public sealed partial class TestcontainersParityRunner : IParityRunner
         CancellationToken cancellationToken)
     {
         if (!request.IsProject)
+        {
+            if (request.SourcePaths is { Count: > 0 })
+            {
+                var sources = await Task.WhenAll(request.SourcePaths.Select(async path =>
+                    (Path: path, Source: await File.ReadAllTextAsync(path, cancellationToken))));
+                return new ProjectCompilationResult(CreateCompilation(sources), []);
+            }
             return new ProjectCompilationResult(
-                CreateCompilation(request.Source!, request.InputPath),
+                CreateCompilation([(request.InputPath, request.Source!)]),
                 []);
+        }
 
         return await new SharpSqlProjectCompiler().LoadCompilationAsync(
             request.InputPath,
@@ -161,13 +169,18 @@ public sealed partial class TestcontainersParityRunner : IParityRunner
         string.Join(",", diagnostics.Select(item => item.Code).Distinct(StringComparer.Ordinal)),
         string.Join(Environment.NewLine, diagnostics));
 
-    private static CSharpCompilation CreateCompilation(string source, string sourcePath)
+    private static CSharpCompilation CreateCompilation(IReadOnlyList<(string Path, string Source)> sources)
     {
-        var syntaxTrees = new[]
-        {
-            CSharpSyntaxTree.ParseText(SourceText.From(source, Encoding.UTF8), ParseOptions, sourcePath),
-            CSharpSyntaxTree.ParseText(SourceText.From(GlobalUsings, Encoding.UTF8), ParseOptions, "GlobalUsings.g.cs")
-        };
+        var syntaxTrees = sources
+            .Select(source => CSharpSyntaxTree.ParseText(
+                SourceText.From(source.Source, Encoding.UTF8),
+                ParseOptions,
+                source.Path))
+            .Append(CSharpSyntaxTree.ParseText(
+                SourceText.From(GlobalUsings, Encoding.UTF8),
+                ParseOptions,
+                "GlobalUsings.g.cs"))
+            .ToArray();
         return CSharpCompilation.Create(
             $"SharpSqlVerify_{Guid.NewGuid():N}",
             syntaxTrees,

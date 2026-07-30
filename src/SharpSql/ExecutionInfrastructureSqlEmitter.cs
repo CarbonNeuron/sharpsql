@@ -10,6 +10,7 @@ internal static partial class ExecutionInfrastructureSqlEmitter
     internal const string SchemaName = "SharpSql";
     internal const string ExecutionsTableName = "Executions";
     internal const string OutputEventsTableName = "OutputEvents";
+    internal const string OutputSequenceName = "OutputSequence";
     internal const string TasksTableName = "Tasks";
     internal const string TaskTimersTableName = "TaskTimers";
     internal const string TaskJoinsTableName = "TaskJoins";
@@ -99,6 +100,8 @@ internal static partial class ExecutionInfrastructureSqlEmitter
 
             EmitSchema(sql);
             sql.Line();
+            EmitRuntimeManifest(sql);
+            sql.Line();
             EmitExecutionRegistry(sql);
             sql.Line();
             EmitTasks(sql);
@@ -110,6 +113,10 @@ internal static partial class ExecutionInfrastructureSqlEmitter
             EmitTaskDependencies(sql);
             sql.Line();
             EmitOutputEvents(sql);
+            sql.Line();
+            EmitRuntimeMigrations(sql);
+            sql.Line();
+            EmitOutputSequence(sql);
             sql.Line();
             EmitMessageTypes(sql);
             sql.Line();
@@ -156,6 +163,13 @@ internal static partial class ExecutionInfrastructureSqlEmitter
         sql.Line($"IF SCHEMA_ID(N'{SchemaName}') IS NULL");
         using (sql.Indent())
             sql.Line($"EXEC(N'CREATE SCHEMA [{SchemaName}] AUTHORIZATION [dbo];');");
+    }
+
+    private static void EmitOutputSequence(SqlWriter sql)
+    {
+        sql.Line($"IF OBJECT_ID(N'[{SchemaName}].[{OutputSequenceName}]', N'SO') IS NULL");
+        using (sql.Indent())
+            sql.Line($"EXEC(N'CREATE SEQUENCE [{SchemaName}].[{OutputSequenceName}] AS BIGINT START WITH 1 INCREMENT BY 1 CACHE 1000;');");
     }
 
     private static void EmitExecutionRegistry(SqlWriter sql)
