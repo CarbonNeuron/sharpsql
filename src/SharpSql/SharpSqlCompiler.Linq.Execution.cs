@@ -677,11 +677,11 @@ public sealed partial class SharpSqlCompiler
             member.Name.Identifier.ValueText == "ToList" ? ListHeapTypeId : ArrayHeapTypeId,
             "__count",
             "0");
-        var column = CollectionValueColumn(query.ElementType, key: false);
-        var value = CollectionStoredValue(query.ElementType, $"{sourceAlias}.__value");
+        var column = IndexedItemValueColumn(query.ElementType);
+        var value = IndexedItemStoredValue(query.ElementType, $"{sourceAlias}.__value");
         _sql.Line(
-            $"INSERT INTO {HeapIndexedItems} ({HeapInsertColumns($"__owner_id, __index, {column}")}) " +
-            $"SELECT {HeapInsertValues($"{collection}, CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {sourceAlias}.__index) - 1), {value}")} " +
+            $"INSERT INTO {HeapIndexedItems} ({IndexedItemInsertColumns($"__owner_id, __index, {column}")}) " +
+            $"SELECT {IndexedItemInsertValues($"{collection}, CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {sourceAlias}.__index) - 1), {value}")} " +
             $"FROM ({querySql}) AS {sourceAlias};");
         var materializedCount = _names.Allocate("_linq_materialized_count");
         _sql.Line($"DECLARE {materializedCount} INT = @@ROWCOUNT;");
@@ -719,11 +719,11 @@ public sealed partial class SharpSqlCompiler
             member.MemberName == "ToList" ? ListHeapTypeId : ArrayHeapTypeId,
             "__count",
             "0");
-        var column = CollectionValueColumn(query.ElementType, false);
-        var value = CollectionStoredValue(query.ElementType, $"{alias}.__value");
+        var column = IndexedItemValueColumn(query.ElementType);
+        var value = IndexedItemStoredValue(query.ElementType, $"{alias}.__value");
         _sql.Line(
-            $"INSERT INTO {HeapIndexedItems} ({HeapInsertColumns($"__owner_id, __index, {column}")}) " +
-            $"SELECT {HeapInsertValues($"{collection}, CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {alias}.__index) - 1), {value}")} " +
+            $"INSERT INTO {HeapIndexedItems} ({IndexedItemInsertColumns($"__owner_id, __index, {column}")}) " +
+            $"SELECT {IndexedItemInsertValues($"{collection}, CONVERT(INT, ROW_NUMBER() OVER (ORDER BY {alias}.__index) - 1), {value}")} " +
             $"FROM ({querySql}) AS {alias};");
         var count = _names.Allocate("_linq_materialized_count");
         _sql.Line($"DECLARE {count} INT = @@ROWCOUNT;");

@@ -21,7 +21,7 @@ The project also contains three more specialized runtime/deployment paths:
 | Default ephemeral compiler/runtime | Broadest and best-tested path; one connection-local batch using temporary heap/VM tables. |
 | Durable runtime | Implemented and integration-tested for synchronous concurrent execution, isolation, cleanup, heap, and VM state. It creates permanent shared tables partitioned by execution ID. |
 | Service Broker async | Executable and deeply tested, but intentionally limited to one root `Task.WhenAll` over a materialized `Select` and one `Task.Delay(int)` in each worker method. It is not a general async state-machine compiler. |
-| Memory-optimized runtime | Experimental. Only legacy VM frames and slots move to memory-optimized table variables; the heap and LINQ buffers still use tempdb. The compiler and CLI support it, but the SDK target currently rejects the mode. |
+| Memory-optimized runtime | Experimental. VM frames/slots, heap object headers, and indexed collection/LINQ rows use execution-partitioned In-Memory OLTP tables. Typed object payloads and dictionaries remain rowstore. |
 | Native kernels | Opt-in prototype. It extracts a narrow class of pure `int`/`long` loop methods into persistent natively compiled procedures. |
 | Application publishing | Implemented for ephemeral or memory-optimized applications with a schema-local `Run` procedure and one-row manifest. There is no Service Broker publishing mode, uninstall, side-by-side versioning, or retention management. |
 | Bytecode runtime | Not present on `main`. A two-commit `feat/bytecode-runtime` branch has a useful ephemeral scalar slice, but it diverged before the memory-optimized, native-kernel, publishing, and cleanup work now on `main`. |
@@ -116,9 +116,9 @@ SharpSql emits explicit C#-style guards for empty sequences, multiple `Single` v
 
 #### Memory-optimized
 
-- Preserves the same direct SQL and label VM. Only VM frame and slot tables become execution-local variables of provisioned `MemoryVmStackV1` and `MemoryVmSlotsV1` memory-optimized table types (`src/SharpSql/MemoryOptimizedRuntimeSqlEmitter.cs:10-68`).
+- Preserves the same direct SQL and label VM while moving VM frames/slots, heap object headers, and indexed collection/LINQ rows to provisioned, execution-partitioned memory-optimized tables.
 - Because memory-optimized tables cannot store `SQL_VARIANT`, ordinary scalars round-trip through `VARBINARY(8000)` using their statically known type.
-- Managed object headers use a shared memory-optimized registry; typed object payloads, collections, dictionaries, and LINQ buffers remain ordinary temporary or durable rowstore tables (`docs/memory-optimized-runtime.md`).
+- Managed object headers and indexed collection/LINQ rows use shared memory-optimized tables; typed object payloads and dictionaries remain ordinary temporary or durable rowstore tables (`docs/memory-optimized-runtime.md`).
 - The database operator must create a `MEMORY_OPTIMIZED_DATA` filegroup/container; SharpSql intentionally emits only the idempotent schema/type provisioning.
 
 #### Native kernels
@@ -470,7 +470,7 @@ Publishing is functional and tested but still a first deployment slice:
 
 ### 7.3 Memory-optimized runtime
 
-The mode is explicitly experimental and optimizes VM frames/slots plus the fixed-shape heap object registry. Typed heap payloads and LINQ buffers are not yet memory-optimized, and SharpSql does not provision the physical filegroup/container. Its documented benchmark (roughly 32% lower elapsed time on recursive Fibonacci) is a microbenchmark, not a general performance guarantee (`docs/memory-optimized-runtime.md`).
+The mode is explicitly experimental and optimizes VM frames/slots, the fixed-shape heap object registry, and indexed collection/LINQ rows. Typed heap payloads and dictionaries are not yet memory-optimized, and SharpSql does not provision the physical filegroup/container. Its documented benchmark (roughly 32% lower elapsed time on recursive Fibonacci) is a microbenchmark, not a general performance guarantee (`docs/memory-optimized-runtime.md`).
 
 ### 7.4 Native kernels
 

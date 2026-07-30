@@ -178,7 +178,7 @@ public sealed partial class SharpSqlCompiler
                 var itemType = SequenceElementType(receiverType.Name);
                 var list = EmitScalar(member.Expression, scope);
                 var value = EmitScalar(invocation.ArgumentList.Arguments[0].Expression, scope);
-                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {list} AND {CollectionValuePredicate(itemType, value, false)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {list} AND {IndexedItemValuePredicate(itemType, value)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
                 return true;
             }
             if (IsDictionaryType(receiverType.Name) && member.Name.Identifier.ValueText == "ContainsValue" &&
@@ -219,7 +219,7 @@ public sealed partial class SharpSqlCompiler
                 var receiver = EmitScalar(member.Receiver, scope, substitutions);
                 var itemType = SequenceElementType(receiverType.Name);
                 var value = EmitScalar(invocation.Arguments[0], scope, substitutions);
-                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {receiver} AND {CollectionValuePredicate(itemType, value, false)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
+                expression = SqlScalarExpression.Primary($"CASE WHEN EXISTS (SELECT 1 FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {receiver} AND {IndexedItemValuePredicate(itemType, value)}) THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END");
                 return true;
             }
             if (IsDictionaryType(receiverType.Name) && member.MemberName == "ContainsValue" &&
@@ -399,6 +399,39 @@ public sealed partial class SharpSqlCompiler
         return $"CONVERT({type.SqlType()}, {column})";
     }
 
+    private string IndexedItemValueColumn(IrType type) =>
+        UsesMemoryOptimizedRuntime && !type.IsString && type.Name != "byte[]" && !type.IsReference
+            ? "__scalar_value"
+            : CollectionValueColumn(type, key: false);
+
+    private string IndexedItemStoredValue(IrType type, string value)
+    {
+        if (!UsesMemoryOptimizedRuntime || type.IsString || type.Name == "byte[]" || type.IsReference)
+            return CollectionStoredValue(type, value);
+        var typedValue = type.Name == "char"
+            ? $"CONVERT(NCHAR(1), {value})"
+            : value;
+        return $"CONVERT(VARBINARY(8000), {typedValue})";
+    }
+
+    private string IndexedItemReadValue(IrType type, string? qualifier = null)
+    {
+        if (!UsesMemoryOptimizedRuntime || type.IsString || type.Name == "byte[]" || type.IsReference)
+            return CollectionReadValue(type, key: false, qualifier);
+        var column = (qualifier is null ? string.Empty : qualifier + ".") + "__scalar_value";
+        return $"CONVERT({type.SqlType()}, {column})";
+    }
+
+    private string IndexedItemValuePredicate(IrType type, string value)
+    {
+        if (!UsesMemoryOptimizedRuntime)
+            return CollectionValuePredicate(type, value, key: false);
+        var column = IndexedItemValueColumn(type);
+        if (type.IsString)
+            return $"{column} COLLATE Latin1_General_100_BIN2 = {value} COLLATE Latin1_General_100_BIN2";
+        return $"{column} = {IndexedItemStoredValue(type, value)}";
+    }
+
     private static string DictionaryKeyPredicate(IrType type, string value)
     {
         if (type.IsString)
@@ -487,7 +520,7 @@ public sealed partial class SharpSqlCompiler
         $"(SELECT __count FROM {HeapObjects} WHERE {HeapObjectExecutionFilter()}__id = {collection})";
 
     private string SequenceElementSql(string collection, string index, IrType itemType) =>
-        $"(SELECT {CollectionReadValue(itemType, false)} FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {collection} AND __index = {index})";
+        $"(SELECT {IndexedItemReadValue(itemType)} FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {collection} AND __index = {index})";
 
     private static bool IsDictionaryType(string name) =>
         KnownTypeFacts.IsDictionary(name);

@@ -38,7 +38,7 @@ public sealed partial class SharpSqlCompiler
                 var receiver = EmitScalar(collectionMember.Expression, scope);
                 if (IsListType(receiverType.Name))
                 {
-                    _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {receiver};");
+                    _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {receiver};");
                     _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                     return true;
                 }
@@ -56,8 +56,7 @@ public sealed partial class SharpSqlCompiler
                 {
                     var receiver = EmitScalar(collectionMember.Expression, scope);
                     _sql.Line($"IF {index} < 0 OR {index} >= {SequenceCountSql(receiver)} THROW 51002, 'List index was out of range.', 1;");
-                    _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {receiver} AND __index = {index};");
-                    _sql.Line($"UPDATE {HeapIndexedItems} SET __index = __index - 1 WHERE {HeapExecutionFilter()}__owner_id = {receiver} AND __index > {index};");
+                    EmitIndexedItemRemoval(receiver, index);
                     _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                 });
                 return true;
@@ -152,7 +151,7 @@ public sealed partial class SharpSqlCompiler
                 var receiver = EmitScalar(member.Receiver, scope);
                 if (IsListType(receiverType.Name))
                 {
-                    _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {receiver};");
+                    _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {receiver};");
                     _sql.Line($"UPDATE {HeapObjects} SET __count = 0 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                     return true;
                 }
@@ -170,8 +169,7 @@ public sealed partial class SharpSqlCompiler
                 {
                     var receiver = EmitScalar(member.Receiver, scope);
                     _sql.Line($"IF {index} < 0 OR {index} >= {SequenceCountSql(receiver)} THROW 51002, 'List index was out of range.', 1;");
-                    _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {receiver} AND __index = {index};");
-                    _sql.Line($"UPDATE {HeapIndexedItems} SET __index = __index - 1 WHERE {HeapExecutionFilter()}__owner_id = {receiver} AND __index > {index};");
+                    EmitIndexedItemRemoval(receiver, index);
                     _sql.Line($"UPDATE {HeapObjects} SET __count = __count - 1 WHERE {HeapObjectExecutionFilter()}__id = {receiver};");
                 });
                 return true;
@@ -401,7 +399,7 @@ public sealed partial class SharpSqlCompiler
             {
                 var list = EmitScalar(element.Expression, scope);
                 EmitSequenceIndexGuard(listType, list, index);
-                _sql.Line($"UPDATE {HeapIndexedItems} SET {CollectionValueColumn(elementType, false)} = {CollectionStoredValue(elementType, value)} WHERE {HeapExecutionFilter()}__owner_id = {list} AND __index = {index};");
+                _sql.Line($"UPDATE {HeapIndexedItems} SET {IndexedItemValueColumn(elementType)} = {IndexedItemStoredValue(elementType, value)} WHERE {IndexedItemExecutionFilter()}__owner_id = {list} AND __index = {index};");
             }));
     }
 
@@ -418,21 +416,40 @@ public sealed partial class SharpSqlCompiler
             {
                 var list = EmitScalar(element.Receiver, scope);
                 EmitSequenceIndexGuard(listType, list, index);
-                _sql.Line($"UPDATE {HeapIndexedItems} SET {CollectionValueColumn(elementType, false)} = {CollectionStoredValue(elementType, value)} WHERE {HeapExecutionFilter()}__owner_id = {list} AND __index = {index};");
+                _sql.Line($"UPDATE {HeapIndexedItems} SET {IndexedItemValueColumn(elementType)} = {IndexedItemStoredValue(elementType, value)} WHERE {IndexedItemExecutionFilter()}__owner_id = {list} AND __index = {index};");
             }));
     }
 
     private void InsertIndexedItem(string list, string index, IrType type, string value) =>
-        _sql.Line($"INSERT INTO {HeapIndexedItems} ({HeapInsertColumns($"__owner_id, __index, {CollectionValueColumn(type, false)}")}) VALUES ({HeapInsertValues($"{list}, {index}, {CollectionStoredValue(type, value)}")});");
+        _sql.Line($"INSERT INTO {HeapIndexedItems} ({IndexedItemInsertColumns($"__owner_id, __index, {IndexedItemValueColumn(type)}")}) VALUES ({IndexedItemInsertValues($"{list}, {index}, {IndexedItemStoredValue(type, value)}")});");
+
+    private void EmitIndexedItemRemoval(string owner, string index)
+    {
+        if (!UsesMemoryOptimizedRuntime)
+        {
+            _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {owner} AND __index = {index};");
+            _sql.Line($"UPDATE {HeapIndexedItems} SET __index = __index - 1 WHERE {IndexedItemExecutionFilter()}__owner_id = {owner} AND __index > {index};");
+            return;
+        }
+
+        var buffer = $"#__sharpsql_indexed_compaction_{++_nextHeapAliasId}";
+        _sql.Line($"DROP TABLE IF EXISTS {buffer};");
+        _sql.Line($"SELECT __index, __scalar_value, __text_value, __binary_value, __reference_value INTO {buffer}");
+        _sql.Line($"FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {owner} AND __index > {index};");
+        _sql.Line($"DELETE FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {owner} AND __index >= {index};");
+        _sql.Line($"INSERT INTO {HeapIndexedItems} (__execution_id, __owner_id, __index, __scalar_value, __text_value, __binary_value, __reference_value)");
+        _sql.Line($"SELECT {RuntimeExecutionId}, {owner}, __index - 1, __scalar_value, __text_value, __binary_value, __reference_value FROM {buffer};");
+        _sql.Line($"DROP TABLE {buffer};");
+    }
 
     private void InsertDefaultIndexedItems(string owner, string count, IrType type)
     {
         var generated = $"__array_generated_{++_nextHeapAliasId}";
-        var column = CollectionValueColumn(type, false);
-        var value = CollectionStoredValue(type, DefaultSql(type));
+        var column = IndexedItemValueColumn(type);
+        var value = IndexedItemStoredValue(type, DefaultSql(type));
         _sql.Line(
-            $"INSERT INTO {HeapIndexedItems} ({HeapInsertColumns($"__owner_id, __index, {column}")}) " +
-            $"SELECT {HeapInsertValues($"{owner}, CONVERT(INT, {generated}.[value]), {value}")} " +
+            $"INSERT INTO {HeapIndexedItems} ({IndexedItemInsertColumns($"__owner_id, __index, {column}")}) " +
+            $"SELECT {IndexedItemInsertValues($"{owner}, CONVERT(INT, {generated}.[value]), {value}")} " +
             $"FROM GENERATE_SERIES(CONVERT(BIGINT, 0), CONVERT(BIGINT, {count}) - 1, CONVERT(BIGINT, 1)) AS {generated} " +
             $"WHERE {count} > 0;");
     }
@@ -440,18 +457,18 @@ public sealed partial class SharpSqlCompiler
     private void InsertIndexedItems(string list, IrType type, IReadOnlyList<string> values)
     {
         const int maximumRowsPerValuesClause = 1000;
-        var column = CollectionValueColumn(type, key: false);
+        var column = IndexedItemValueColumn(type);
         for (var start = 0; start < values.Count; start += maximumRowsPerValuesClause)
         {
             var count = Math.Min(maximumRowsPerValuesClause, values.Count - start);
-            _sql.Line($"INSERT INTO {HeapIndexedItems} ({HeapInsertColumns($"__owner_id, __index, {column}")}) VALUES");
+            _sql.Line($"INSERT INTO {HeapIndexedItems} ({IndexedItemInsertColumns($"__owner_id, __index, {column}")}) VALUES");
             using (_sql.Indent())
             {
                 for (var offset = 0; offset < count; offset++)
                 {
                     var index = start + offset;
                     var terminator = offset + 1 == count ? ";" : ",";
-                    _sql.Line($"({HeapInsertValues($"{list}, {index}, {CollectionStoredValue(type, values[index])}")}){terminator}");
+                    _sql.Line($"({IndexedItemInsertValues($"{list}, {index}, {IndexedItemStoredValue(type, values[index])}")}){terminator}");
                 }
             }
         }

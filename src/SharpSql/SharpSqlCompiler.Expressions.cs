@@ -277,9 +277,12 @@ public sealed partial class SharpSqlCompiler
         creation.ArgumentList?.Arguments is { Count: 1 } arguments &&
         InferType(arguments[0].Expression, scope, substitutions).Name == "char[]";
 
-    private string StringFromCharacterArraySql(string characters) =>
-        $"COALESCE((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), CONVERT(NCHAR(1), __value)), N'') " +
-        $"WITHIN GROUP (ORDER BY __index) FROM {HeapIndexedItems} WHERE {HeapExecutionFilter()}__owner_id = {characters}), N'')";
+    private string StringFromCharacterArraySql(string characters)
+    {
+        var character = IndexedItemReadValue(new IrType("char"));
+        return $"COALESCE((SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), {character}), N'') " +
+            $"WITHIN GROUP (ORDER BY __index) FROM {HeapIndexedItems} WHERE {IndexedItemExecutionFilter()}__owner_id = {characters}), N'')";
+    }
 
     private string EmitInterpolation(
         InterpolationSyntax interpolation,

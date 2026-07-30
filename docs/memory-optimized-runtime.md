@@ -3,10 +3,11 @@
 Status: experimental SQL Server 2022 storage option.
 
 `UseMemoryOptimizedTables` is independent from execution and durability. It preserves
-direct-SQL and static-label lowering while moving the stack-machine activation frames
-and spilled slots into database-global memory-optimized tables. Every row is partitioned
-by `ExecutionId`, allowing inline batches and Service Broker sessions to share the same
-physical runtime safely.
+direct-SQL and static-label lowering while moving stack-machine activation frames,
+spilled slots, managed object headers, and indexed collection/LINQ rows into
+database-global memory-optimized tables. Every row is partitioned by `ExecutionId`,
+allowing inline batches and Service Broker sessions to share the same physical runtime
+safely.
 
 Ephemeral configuration uses `DURABILITY = SCHEMA_ONLY`; its rows are not recovered
 after SQL Server restarts. Durable configuration uses `DURABILITY = SCHEMA_AND_DATA`.
@@ -90,13 +91,13 @@ cases, and concurrent execution isolation tests.
 
 ## Current boundary
 
-Managed object headers now use a database-global, execution-partitioned memory-optimized
-table with the selected durability. Per-type object rows, collection/dictionary storage,
-and LINQ buffers still use ordinary temporary or durable rowstore tables. Indexed items
-need an encoded scalar representation because In-Memory OLTP does not support
-`SQL_VARIANT`; per-program object tables have dynamic, strongly typed columns and need a
-separate provisioning/versioning design rather than being forced into an untyped shared
-heap.
+Managed object headers and indexed list/array/`Random`/LINQ rows use database-global,
+execution-partitioned memory-optimized tables with the selected durability. Indexed
+scalars use the same statically typed `VARBINARY(8000)` round-trip as VM slots; strings,
+binary values, and references retain dedicated columns. Per-type object rows and
+dictionary storage still use ordinary temporary or durable rowstore tables. Per-program
+object tables have dynamic, strongly typed columns and need a separate
+provisioning/versioning design rather than being forced into an untyped shared heap.
 
 Service Broker can provision and address either memory-table durability. Its current
 worker continuation slice still rejects calls that require the VM fallback (`SS7005`),

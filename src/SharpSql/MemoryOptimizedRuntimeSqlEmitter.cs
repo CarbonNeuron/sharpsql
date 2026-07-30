@@ -14,6 +14,9 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
     internal static string HeapObjectsTableName(RuntimeDurabilityKind durability) =>
         $"__sharpsql_memory_heap_objects_{DurabilityName(durability)}_v1";
 
+    internal static string HeapIndexedItemsTableName(RuntimeDurabilityKind durability) =>
+        $"__sharpsql_memory_heap_indexed_items_{DurabilityName(durability)}_v1";
+
     internal static string Emit(string schemaName = "SharpSql")
     {
         schemaName = SqlIdentifier.Validate(schemaName, nameof(schemaName));
@@ -108,6 +111,8 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
         RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, VmSlotsTable(durability), durability);
         sql.Line();
         RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, HeapObjectsTable(durability), durability);
+        sql.Line();
+        RuntimeTableSqlEmitter.EmitMemoryOptimizedTable(sql, schemaName, HeapIndexedItemsTable(durability), durability);
         return sql.ToString();
     }
 
@@ -151,6 +156,21 @@ internal static class MemoryOptimizedRuntimeSqlEmitter
         $"PK_sharpsql_memory_heap_objects_{DurabilityName(durability)}_v1",
         "[__execution_id], [__id]",
         524_288);
+
+    private static RuntimeTableDefinition HeapIndexedItemsTable(RuntimeDurabilityKind durability) => new(
+        HeapIndexedItemsTableName(durability),
+        [
+            "[__execution_id] UNIQUEIDENTIFIER NOT NULL",
+            "[__owner_id] INT NOT NULL",
+            "[__index] INT NOT NULL",
+            "[__scalar_value] VARBINARY(8000) NULL",
+            "[__text_value] NVARCHAR(MAX) NULL",
+            "[__binary_value] VARBINARY(MAX) NULL",
+            "[__reference_value] INT NULL"
+        ],
+        $"PK_sharpsql_memory_heap_indexed_items_{DurabilityName(durability)}_v1",
+        "[__execution_id], [__owner_id], [__index]",
+        1_048_576);
 
     private static string DurabilityName(RuntimeDurabilityKind durability) => durability switch
     {

@@ -419,8 +419,8 @@ public sealed partial class SharpSqlCompiler
         {
             var itemAlias = NextLinqAlias("item");
             return $"SELECT {itemAlias}.__index AS __index, " +
-                $"{CollectionReadValue(query.SourceElementType, key: false, qualifier: itemAlias)} AS __value " +
-                $"FROM {HeapIndexedItems} AS {itemAlias} WHERE {HeapExecutionFilter(itemAlias)}{itemAlias}.__owner_id = {heap.OwnerSql}";
+                $"{IndexedItemReadValue(query.SourceElementType, itemAlias)} AS __value " +
+                $"FROM {HeapIndexedItems} AS {itemAlias} WHERE {IndexedItemExecutionFilter(itemAlias)}{itemAlias}.__owner_id = {heap.OwnerSql}";
         }
 
         if (query.Source is SqlLinqRangeQuerySource range)
