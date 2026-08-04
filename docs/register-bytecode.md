@@ -61,3 +61,8 @@ within its activation; worker bytecode frames are not persisted or resumed. Memo
 bytecode state and bytecode suspension/resumption remain later work. Their staged
 architecture is described in
 [Durable register-bytecode design](durable-register-bytecode.md).
+
+Service Broker schema version 3 provisions durable activation rows and explicit
+program/image links as a foundation for later resumption. Synchronous workers install
+and link their canonical image today, but do not create activation rows or resume the
+interpreter across worker invocations.

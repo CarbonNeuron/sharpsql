@@ -701,6 +701,20 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
 
         Assert.Contains("[worker]", messages);
         Assert.Contains("result:8", messages);
+        await using (var persistence = connection.CreateCommand())
+        {
+            persistence.CommandText = """
+                SELECT
+                    (SELECT COUNT_BIG(*) FROM [SharpSql].[BytecodeImages]),
+                    (SELECT COUNT_BIG(*) FROM [SharpSql].[ServiceBrokerProgramBytecodeImages]),
+                    (SELECT COUNT_BIG(*) FROM [SharpSql].[BytecodeActivations]);
+                """;
+            await using var reader = await persistence.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            Assert.Equal(1L, reader.GetInt64(0));
+            Assert.Equal(1L, reader.GetInt64(1));
+            Assert.Equal(0L, reader.GetInt64(2));
+        }
         await AssertExecutionsCleanedUpAsync(connection);
     }
 

@@ -126,7 +126,10 @@ internal static partial class ExecutionInfrastructureSqlEmitter
 
     private static void EmitRegisterProgramProcedure(SqlWriter sql)
     {
-        var procedure = BeginProcedure(RegisterProgramProcedureName, "@ProgramId NVARCHAR(32)");
+        var procedure = BeginProcedure(
+            RegisterProgramProcedureName,
+            "@ProgramId NVARCHAR(32),",
+            "@BytecodeImageId BINARY(32) = NULL");
         using (procedure.Indent())
         {
             procedure.Line("SET NOCOUNT ON;");
@@ -146,6 +149,9 @@ internal static partial class ExecutionInfrastructureSqlEmitter
                 procedure.Line("IF OBJECT_ID(@QualifiedName, N'P') IS NULL");
                 using (procedure.Indent())
                     procedure.Line($"THROW {ServiceBrokerWorkerDispatcherSqlEmitter.ProgramNotInstalledErrorNumber}, 'The compiled SharpSql worker procedure is not installed.', 1;");
+                procedure.Line($"IF @BytecodeImageId IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {RegisterBytecodeRuntimeSqlEmitter.ImagesTable} WITH (UPDLOCK, HOLDLOCK) WHERE [__image_id] = @BytecodeImageId)");
+                using (procedure.Indent())
+                    procedure.Line($"THROW {RegisterBytecodeRuntimeSqlEmitter.IncompatibleImageErrorNumber}, 'The compiled SharpSql worker bytecode image is not installed.', 1;");
                 procedure.Line($"UPDATE [{SchemaName}].[{ProgramCatalogTableName}] WITH (UPDLOCK, HOLDLOCK)");
                 procedure.Line("SET [ProcedureName] = @ProcedureName, [LastUsedAtUtc] = SYSUTCDATETIME()");
                 procedure.Line("WHERE [ProgramId] = @ProgramId;");
@@ -155,6 +161,13 @@ internal static partial class ExecutionInfrastructureSqlEmitter
                     procedure.Line($"INSERT INTO [{SchemaName}].[{ProgramCatalogTableName}] ([ProgramId], [ProcedureName], [InstalledAtUtc], [LastUsedAtUtc])");
                     procedure.Line("VALUES (@ProgramId, @ProcedureName, SYSUTCDATETIME(), SYSUTCDATETIME());");
                 }
+                procedure.Line($"DELETE FROM [{SchemaName}].[{ProgramBytecodeImagesTableName}] WHERE [ProgramId] = @ProgramId AND (@BytecodeImageId IS NULL OR [BytecodeImageId] <> @BytecodeImageId);");
+                procedure.Line("IF @BytecodeImageId IS NOT NULL AND NOT EXISTS (");
+                using (procedure.Indent())
+                    procedure.Line($"SELECT 1 FROM [{SchemaName}].[{ProgramBytecodeImagesTableName}] WITH (UPDLOCK, HOLDLOCK) WHERE [ProgramId] = @ProgramId AND [BytecodeImageId] = @BytecodeImageId");
+                procedure.Line(")");
+                using (procedure.Indent())
+                    procedure.Line($"INSERT INTO [{SchemaName}].[{ProgramBytecodeImagesTableName}] ([ProgramId], [BytecodeImageId]) VALUES (@ProgramId, @BytecodeImageId);");
                 EmitProcedureTransactionCommit(procedure);
             }
             procedure.Line("END TRY");
@@ -424,6 +437,7 @@ internal static partial class ExecutionInfrastructureSqlEmitter
                         procedure.Line("WHERE [program].[ProgramId] = @ProgramId AND [program].[LastUsedAtUtc] < @CutoffUtc");
                         procedure.Line($"AND NOT EXISTS (SELECT 1 FROM [{SchemaName}].[{ExecutionsTableName}] AS [execution] WHERE [execution].[ProgramId] = @ProgramId AND [execution].[State] NOT IN (2, 3, 4))");
                         procedure.Line($"AND NOT EXISTS (SELECT 1 FROM [{SchemaName}].[{TasksTableName}] AS [task] WHERE [task].[ProgramId] = @ProgramId AND [task].[State] NOT BETWEEN 4 AND 6)");
+                        procedure.Line($"AND NOT EXISTS (SELECT 1 FROM [{SchemaName}].[{BytecodeActivationsTableName}] AS [activation] WHERE [activation].[ProgramId] = @ProgramId)");
                     }
                     procedure.Line(")");
                     procedure.Line("BEGIN");
@@ -438,6 +452,7 @@ internal static partial class ExecutionInfrastructureSqlEmitter
                             procedure.Line("EXEC sys.sp_executesql @DropStatement;");
                         }
                         procedure.Line("END;");
+                        procedure.Line($"DELETE FROM [{SchemaName}].[{ProgramBytecodeImagesTableName}] WHERE [ProgramId] = @ProgramId;");
                         procedure.Line($"DELETE FROM [{SchemaName}].[{ProgramCatalogTableName}] WHERE [ProgramId] = @ProgramId;");
                         procedure.Line("INSERT INTO @Removed VALUES (@ProgramId, @ProcedureName, CONVERT(BIT, 1));");
                         procedure.Line("SET @Count += 1;");
@@ -481,6 +496,9 @@ internal static partial class ExecutionInfrastructureSqlEmitter
 
     private static void EmitCancelOutstandingWork(SqlWriter procedure, int errorNumber, string messageExpression)
     {
+        procedure.Line($"DELETE FROM [{SchemaName}].[{BytecodeActivationsTableName}] WHERE [ExecutionId] = @ExecutionId;");
+        procedure.Line($"DELETE FROM {RegisterBytecodeRuntimeSqlEmitter.RegistersTable} WHERE [__execution_id] = @ExecutionId;");
+        procedure.Line($"DELETE FROM {RegisterBytecodeRuntimeSqlEmitter.FramesTable} WHERE [__execution_id] = @ExecutionId;");
         procedure.Line($"UPDATE [{SchemaName}].[{TasksTableName}]");
         procedure.Line($"SET [State] = 6, [CompletedAtUtc] = @NowUtc, [ErrorNumber] = {errorNumber}, [ErrorMessage] = {messageExpression},");
         using (procedure.Indent())
@@ -496,6 +514,7 @@ internal static partial class ExecutionInfrastructureSqlEmitter
         procedure.Line("WHERE [program].[LastUsedAtUtc] < @CutoffUtc");
         procedure.Line($"AND NOT EXISTS (SELECT 1 FROM [{SchemaName}].[{ExecutionsTableName}] AS [execution] WHERE [execution].[ProgramId] = [program].[ProgramId] AND [execution].[State] NOT IN (2, 3, 4))");
         procedure.Line($"AND NOT EXISTS (SELECT 1 FROM [{SchemaName}].[{TasksTableName}] AS [task] WHERE [task].[ProgramId] = [program].[ProgramId] AND [task].[State] NOT BETWEEN 4 AND 6)");
+        procedure.Line($"AND NOT EXISTS (SELECT 1 FROM [{SchemaName}].[{BytecodeActivationsTableName}] AS [activation] WHERE [activation].[ProgramId] = [program].[ProgramId])");
         procedure.Line("ORDER BY [program].[LastUsedAtUtc], [program].[ProgramId];");
     }
 

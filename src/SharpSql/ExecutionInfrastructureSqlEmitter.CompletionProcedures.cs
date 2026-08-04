@@ -226,6 +226,7 @@ internal static partial class ExecutionInfrastructureSqlEmitter
             procedure.Line();
             procedure.Line("DECLARE @NowUtc DATETIME2(7) = SYSUTCDATETIME();");
             procedure.Line("DECLARE @Completion TABLE ([SuspensionGeneration] INT NOT NULL);");
+            procedure.Line("DECLARE @BytecodeFrames TABLE ([FrameId] BIGINT NOT NULL PRIMARY KEY);");
             procedure.Line("DECLARE @Affected TABLE (");
             using (procedure.Indent())
             {
@@ -284,6 +285,24 @@ internal static partial class ExecutionInfrastructureSqlEmitter
                     procedure.Line("RETURN;");
                 }
                 procedure.Line("END;");
+                procedure.Line();
+                procedure.Line(";WITH [BytecodeFrameChain] AS (");
+                using (procedure.Indent())
+                {
+                    procedure.Line("SELECT [activation].[CurrentFrameId] AS [FrameId]");
+                    procedure.Line($"FROM [{SchemaName}].[{BytecodeActivationsTableName}] AS [activation]");
+                    procedure.Line("WHERE [activation].[ExecutionId] = @ExecutionId AND [activation].[TaskId] = @TaskId");
+                    procedure.Line("UNION ALL");
+                    procedure.Line("SELECT CONVERT(BIGINT, [frame].[__caller_id])");
+                    procedure.Line($"FROM {RegisterBytecodeRuntimeSqlEmitter.FramesTable} AS [frame]");
+                    procedure.Line("INNER JOIN [BytecodeFrameChain] AS [chain] ON [chain].[FrameId] = [frame].[__id]");
+                    procedure.Line("WHERE [frame].[__execution_id] = @ExecutionId AND [frame].[__caller_id] IS NOT NULL");
+                }
+                procedure.Line(")");
+                procedure.Line("INSERT INTO @BytecodeFrames ([FrameId]) SELECT [FrameId] FROM [BytecodeFrameChain] OPTION (MAXRECURSION 32767);");
+                procedure.Line($"DELETE FROM [{SchemaName}].[{BytecodeActivationsTableName}] WHERE [ExecutionId] = @ExecutionId AND [TaskId] = @TaskId;");
+                procedure.Line($"DELETE [register] FROM {RegisterBytecodeRuntimeSqlEmitter.RegistersTable} AS [register] INNER JOIN @BytecodeFrames AS [frame] ON [frame].[FrameId] = [register].[__frame_id] WHERE [register].[__execution_id] = @ExecutionId;");
+                procedure.Line($"DELETE [stored] FROM {RegisterBytecodeRuntimeSqlEmitter.FramesTable} AS [stored] INNER JOIN @BytecodeFrames AS [frame] ON [frame].[FrameId] = [stored].[__id] WHERE [stored].[__execution_id] = @ExecutionId;");
                 procedure.Line();
                 procedure.Line($"UPDATE [{SchemaName}].[{TaskTimersTableName}]");
                 procedure.Line("SET [State] = 3, [ClaimedAtUtc] = COALESCE([ClaimedAtUtc], @NowUtc)");
@@ -626,4 +645,3 @@ internal static partial class ExecutionInfrastructureSqlEmitter
         sql.Line($"EXEC(N'{batch}');");
     }
 }
-

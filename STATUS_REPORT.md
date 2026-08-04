@@ -5,7 +5,8 @@
 > register-bytecode fallback. ABI 1.2 supports linked scalar methods, recursive
 > bytecode calls, nullable string values, typed `Console.WriteLine` host calls, and
 > execution-partitioned durable rowstore state. Service Broker workers can execute
-> eligible synchronous bytecode helpers to completion; current limitations
+> eligible synchronous bytecode helpers to completion, and schema version 3 provisions
+> activation/program-image identities for later resumption; current limitations
 > and selection controls are documented in
 > [Register-bytecode fallback](docs/register-bytecode.md).
 

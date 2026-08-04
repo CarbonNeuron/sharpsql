@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-This document defines the incremental persistence model for the compact register-bytecode runtime. The bounded durable-rowstore inline slice described below is implemented. Service Broker workers also support eligible synchronous bytecode helpers through activation-local temporary state that always runs to completion. Cross-session bytecode resumption remains future work.
+This document defines the incremental persistence model for the compact register-bytecode runtime. The bounded durable-rowstore inline slice described below is implemented. Service Broker workers also support eligible synchronous bytecode helpers through activation-local temporary state that always runs to completion. Schema version 3 now installs durable activation metadata and explicit worker-program/image links, while cross-session bytecode execution and await lowering remain future work.
 
 The first implementation slice is deliberately limited to synchronous, inline execution with ordinary durable rowstore tables. It makes program images reusable and frame state execution-scoped without changing bytecode semantics or promising restart resumption.
 
@@ -21,8 +21,8 @@ Durable bytecode needs identities for distinct lifetimes. They must not be confl
 
 - `ExecutionId UNIQUEIDENTIFIER` identifies one logical run. It partitions all mutable state and bounds cleanup. Durable inline execution can reuse the execution ID already created by the shared runtime.
 - `BytecodeImageId BINARY(32)` identifies one immutable register-bytecode module. It is the full SHA-256 digest of the canonical image described below.
-- `TaskId BIGINT` is reserved for a later Service Broker activation or resumable fiber. The first slice does not use it.
-- Service Broker's existing `ProgramId NVARCHAR(32)` continues to identify and route a generated worker procedure. It is not a bytecode image ID. A later worker program may reference a bytecode image through an explicit link.
+- `TaskId BIGINT` identifies the Service Broker task owning a durable bytecode activation. Current synchronous workers do not create activation rows.
+- Service Broker's existing `ProgramId NVARCHAR(32)` continues to identify and route a generated worker procedure. It is not a bytecode image ID. Bytecode workers install their canonical image and record the exact program/image pair.
 
 Every mutable frame and register lookup must include `ExecutionId`. Every instruction, parameter, and argument lookup must include `BytecodeImageId`. A frame also records its image ID so it can never be interpreted against a different installed module.
 
@@ -105,6 +105,18 @@ ABI 1.2 uses nullable `BIGINT` and `NVARCHAR(MAX)` lanes selected by the type ta
 Broader runtime values require a later schema/ABI decision rather than silently
 changing this representation.
 
+`[SharpSql].[ServiceBrokerProgramBytecodeImages]` links retained worker programs to
+their immutable images with primary key `(ProgramId, BytecodeImageId)`. Both foreign
+keys use `NO ACTION`; program cleanup explicitly removes links and never deletes a
+shared image.
+
+`[SharpSql].[BytecodeActivations]` is keyed by `(ExecutionId, TaskId)` and records
+`ProgramId`, `BytecodeImageId`, `CurrentFrameId`, `SuspensionGeneration`, and audit
+timestamps. Its composite foreign keys require the exact retained program/image pair
+and an exact execution/frame/image triple. The task foreign key uses `ON DELETE
+CASCADE`, but lifecycle procedures still delete activations before registers and
+frames so mutable execution state is not orphaned.
+
 Program images are installed atomically under a transaction-owned application lock such as `SharpSql.Bytecode.Image.<hash>`. If an image already exists, installation verifies its ABI and recorded row counts and reuses it. Instruction, argument, and parameter rows are immutable and are never updated in place.
 
 ## Bounded first implementation slice
@@ -148,7 +160,12 @@ Bytecode ABI version and database schema version are independent:
 - a `RegisterBytecode` entry in the shared runtime manifest tracks the database schema version; and
 - incompatible physical changes create new versioned tables and an explicit migration rather than redefining `V1` columns.
 
-Provisioning uses the existing global runtime lock. The Service Broker schema version need not change for the standalone first slice. A later migration that adds task activation state or worker/image links must increment `ExecutionInfrastructureSqlEmitter.CurrentSchemaVersion` and retain the existing forward/backward-version checks.
+Provisioning uses the existing global runtime lock. Service Broker schema version 3
+adds the activation and program/image tables through an explicit v2-to-v3 migration.
+The bytecode catalogs and Service Broker program catalog are created before that
+migration, and the manifest advances to version 3 only after every new object exists
+in the same transaction. The independent `RegisterBytecode` manifest remains at its
+own schema version.
 
 ## Later increments
 
@@ -171,10 +188,17 @@ The bounded worker increment is implemented. Each generated worker procedure emb
 
 ### Suspension and resumption
 
-Add `[SharpSql].[BytecodeActivations]`, keyed by `(ExecutionId, TaskId)`, to store the image and current frame for a resumable worker activation. Add an explicit link from retained Service Broker worker programs to their bytecode images.
+The persistence foundation is implemented: `[SharpSql].[BytecodeActivations]` stores
+the image/current-frame identity for a task, and retained Service Broker programs link
+to their installed canonical images. Cancellation, abandoned-execution reaping,
+task completion, final execution cleanup, and program retention cleanup remove mutable
+state or links in foreign-key-safe order. Immutable images remain available for reuse.
 
 The existing Broker transaction supplies the required boundary: message receive, task claim, bytecode execution, PC/register updates, dependency or timer registration, and transition back to waiting commit together. Worker failure rolls the transaction back and redelivers the message. `SuspensionGeneration` prevents stale or duplicate dependency completion from resuming the wrong instruction.
 
 Async lowering then needs explicit bytecode/Core IR host operations. An incomplete await records a deterministic resume PC and activation state before returning from the worker. Resumption loads the activation by `(ExecutionId, TaskId)` and continues against the exact `BytecodeImageId`. Native SQL labels are never persisted as resumable continuations.
 
-Cancellation and abandoned-execution reaping must delete activation, register, and frame state by `ExecutionId`. Worker-program cleanup removes its image links under the existing per-program lock; separate image retention cleanup removes only old, unreferenced images. Multiple awaits, exception unwinding, `finally`, cancellation tokens, broader value types, heap operations, and async recursion remain subsequent ABI work.
+No worker writes or reloads an activation yet, and there is no await host operation.
+Multiple awaits, exception unwinding, `finally`, cancellation tokens, broader value
+types, heap operations, image garbage collection, and async recursion remain
+subsequent ABI work.

@@ -65,8 +65,11 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("IF @__sharpsql_program_lock_result < 0");
             using (_sql.Indent())
                 _sql.Line($"THROW {ExecutionInfrastructureSqlEmitter.ProvisioningLockErrorNumber}, 'Could not acquire the SharpSql program installation lock.', 1;");
+            EmitServiceBrokerRegisterBytecodeImage();
             _sql.Line($"EXEC(N'{procedureSql.TrimEnd().Replace("'", "''", StringComparison.Ordinal)}');");
-            _sql.Line($"EXEC [SharpSql].[{ExecutionInfrastructureSqlEmitter.RegisterProgramProcedureName}] @ProgramId = N'{_serviceBrokerProgramId}';");
+            _sql.Line(_bytecodeMethods.Count > 0
+                ? $"EXEC [SharpSql].[{ExecutionInfrastructureSqlEmitter.RegisterProgramProcedureName}] @ProgramId = N'{_serviceBrokerProgramId}', @BytecodeImageId = {BytecodeImage.SqlId};"
+                : $"EXEC [SharpSql].[{ExecutionInfrastructureSqlEmitter.RegisterProgramProcedureName}] @ProgramId = N'{_serviceBrokerProgramId}';");
             _sql.Line("COMMIT TRANSACTION;");
         }
         _sql.Line("END TRY");
@@ -842,7 +845,12 @@ public sealed partial class SharpSqlCompiler
     private void EmitServiceBrokerRegistryCleanup()
     {
         if (_serviceBrokerProgramEmitted)
+        {
+            _sql.Line($"DELETE FROM [SharpSql].[{ExecutionInfrastructureSqlEmitter.BytecodeActivationsTableName}] WHERE [ExecutionId] = {RuntimeExecutionId};");
+            _sql.Line($"DELETE FROM {RegisterBytecodeRuntimeSqlEmitter.RegistersTable} WHERE [__execution_id] = {RuntimeExecutionId};");
+            _sql.Line($"DELETE FROM {RegisterBytecodeRuntimeSqlEmitter.FramesTable} WHERE [__execution_id] = {RuntimeExecutionId};");
             _sql.Line($"DELETE FROM [SharpSql].[Executions] WHERE [ExecutionId] = {RuntimeExecutionId};");
+        }
     }
 
     private string CaptureServiceBrokerWorkerSql(Action emit)

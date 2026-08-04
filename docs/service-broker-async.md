@@ -192,6 +192,15 @@ local/closure spilling, control-flow splitting, multiple/nested awaits, async re
 and source-level `CancellationToken` lowering remain future work. Operators can cancel
 a whole execution through the lifecycle procedure above.
 
+Service Broker schema version 3 lays the persistence foundation for later bytecode
+resumption. It records each bytecode worker program's canonical image in
+`ServiceBrokerProgramBytecodeImages` and provisions `BytecodeActivations`, keyed by
+execution and task with exact program/image and current-frame foreign keys. Current
+workers still run bytecode synchronously and leave the activation table empty; no
+await opcode or resume dispatch is part of this slice. Cancellation, lease reaping,
+task completion, and final execution cleanup defensively remove activation, register,
+and frame rows, while program retention removes links but retains shared images.
+
 Sub-second `Task.Delay` uses the durable timer table because Broker conversation timers
 use whole seconds. The generated launcher calls `SharpSql.ClaimDueContinuations` while
 it waits. Async prefixes run in source enumeration order, matching C# execution through

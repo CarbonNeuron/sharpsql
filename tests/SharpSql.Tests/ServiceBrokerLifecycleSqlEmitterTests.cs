@@ -13,6 +13,8 @@ public sealed class ServiceBrokerLifecycleSqlEmitterTests
         Assert.Contains("ADD [LastHeartbeatAtUtc] DATETIME2(7) NULL", sql);
         Assert.Contains("ADD [LeaseExpiresAtUtc] DATETIME2(7) NULL", sql);
         Assert.Contains("CREATE TABLE [SharpSql].[ServiceBrokerPrograms]", sql);
+        Assert.Contains("CREATE TABLE [SharpSql].[ServiceBrokerProgramBytecodeImages]", sql);
+        Assert.Contains("CREATE TABLE [SharpSql].[BytecodeActivations]", sql);
         Assert.Contains("CREATE OR ALTER PROCEDURE [SharpSql].[StartServiceBrokerExecution]", sql);
         Assert.Contains("CREATE OR ALTER PROCEDURE [SharpSql].[HeartbeatExecution]", sql);
         Assert.Contains("CREATE OR ALTER PROCEDURE [SharpSql].[CancelExecution]", sql);
@@ -32,6 +34,10 @@ public sealed class ServiceBrokerLifecycleSqlEmitterTests
         Assert.Contains("WHERE [ExecutionId] = @ExecutionId AND [State] NOT IN (2, 3)", sql);
         Assert.Contains($"@ErrorNumber = {ExecutionInfrastructureSqlEmitter.ExecutionAbandonedErrorNumber}", sql);
         Assert.Contains("WITH (UPDLOCK, HOLDLOCK)", sql);
+        var activationDelete = sql.IndexOf("DELETE FROM [SharpSql].[BytecodeActivations] WHERE [ExecutionId] = @ExecutionId", StringComparison.Ordinal);
+        var registerDelete = sql.IndexOf("DELETE FROM [SharpSql].[BytecodeRegistersV1] WHERE [__execution_id] = @ExecutionId", activationDelete, StringComparison.Ordinal);
+        var frameDelete = sql.IndexOf("DELETE FROM [SharpSql].[BytecodeFramesV1] WHERE [__execution_id] = @ExecutionId", registerDelete, StringComparison.Ordinal);
+        Assert.True(activationDelete >= 0 && registerDelete > activationDelete && frameDelete > registerDelete);
     }
 
     [Fact]
@@ -46,6 +52,10 @@ public sealed class ServiceBrokerLifecycleSqlEmitterTests
         Assert.Contains("EXEC sys.sp_executesql @DropStatement", sql);
         Assert.Contains("@UnusedForMinutes < 1", sql);
         Assert.Contains("@DryRun = 1", sql);
+        Assert.Contains("[activation].[ProgramId] = [program].[ProgramId]", sql);
+        Assert.True(
+            sql.IndexOf("DELETE FROM [SharpSql].[ServiceBrokerProgramBytecodeImages] WHERE [ProgramId] = @ProgramId", StringComparison.Ordinal) <
+            sql.IndexOf("DELETE FROM [SharpSql].[ServiceBrokerPrograms] WHERE [ProgramId] = @ProgramId", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -77,5 +87,34 @@ public sealed class ServiceBrokerLifecycleSqlEmitterTests
         Assert.Contains("DECLARE @__sharpsql_drained_output TABLE", result.Sql);
         Assert.Contains("NOT EXISTS (SELECT 1 FROM @__sharpsql_drained_output", result.Sql);
         Assert.Contains("WHILE @__sharpsql_terminal_drain_pass < 3", result.Sql);
+    }
+
+    [Fact]
+    public void ProgramRegistrationLinksAnOptionalInstalledBytecodeImageUnderTheProgramLock()
+    {
+        var sql = ExecutionInfrastructureSqlEmitter.EmitLifecycle();
+
+        Assert.Contains("@BytecodeImageId BINARY(32) = NULL", sql);
+        var programLock = sql.IndexOf("SharpSql.ServiceBroker.Program.", StringComparison.Ordinal);
+        var imageValidation = sql.IndexOf("[__image_id] = @BytecodeImageId", programLock, StringComparison.Ordinal);
+        var linkInsert = sql.IndexOf("INSERT INTO [SharpSql].[ServiceBrokerProgramBytecodeImages]", imageValidation, StringComparison.Ordinal);
+        Assert.True(programLock >= 0 && imageValidation > programLock && linkInsert > imageValidation);
+    }
+
+    [Fact]
+    public void TaskCompletionDeletesOnlyItsActivationFrameChain()
+    {
+        var sql = ExecutionInfrastructureSqlEmitter.Emit();
+
+        Assert.Contains("WITH [BytecodeFrameChain] AS", sql);
+        Assert.Contains("OPTION (MAXRECURSION 32767)", sql);
+        var activationDelete = sql.IndexOf(
+            "DELETE FROM [SharpSql].[BytecodeActivations] WHERE [ExecutionId] = @ExecutionId AND [TaskId] = @TaskId",
+            StringComparison.Ordinal);
+        var registerDelete = sql.IndexOf("DELETE [register] FROM [SharpSql].[BytecodeRegistersV1]", activationDelete, StringComparison.Ordinal);
+        var frameDelete = sql.IndexOf("DELETE [stored] FROM [SharpSql].[BytecodeFramesV1]", registerDelete, StringComparison.Ordinal);
+        Assert.True(activationDelete >= 0 && registerDelete > activationDelete && frameDelete > registerDelete);
+        Assert.Contains("WHERE [register].[__execution_id] = @ExecutionId", sql);
+        Assert.Contains("WHERE [stored].[__execution_id] = @ExecutionId", sql);
     }
 }

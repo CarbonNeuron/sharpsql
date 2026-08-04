@@ -56,13 +56,13 @@ public sealed class ExecutionInfrastructureSqlEmitterTests
         Assert.Contains("[NextOutputSequence] BIGINT NOT NULL", sql);
         Assert.Contains("NEXT VALUE FOR [SharpSql].[OutputSequence]", sql);
         Assert.Contains("CREATE INDEX [IX_sharpsql_Executions_ConversationHandle]", sql);
-        Assert.DoesNotContain("CREATE UNIQUE INDEX", sql);
+        Assert.DoesNotContain("CREATE UNIQUE INDEX [IX_sharpsql_Executions_ConversationHandle]", sql);
         Assert.DoesNotContain("WHERE [ConversationHandle] IS NOT NULL", sql);
         Assert.Contains("CONSTRAINT [PK_sharpsql_OutputEvents] PRIMARY KEY CLUSTERED ([ExecutionId], [SequenceNumber])", sql);
         Assert.Contains("FOREIGN KEY ([ExecutionId])", sql);
         Assert.Contains("REFERENCES [SharpSql].[Executions] ([ExecutionId]) ON DELETE CASCADE", sql);
         Assert.Contains("CHECK ([SequenceNumber] > 0)", sql);
-        Assert.DoesNotContain("IDENTITY", sql);
+        Assert.DoesNotContain("[SequenceNumber] BIGINT IDENTITY", sql);
     }
 
     [Fact]

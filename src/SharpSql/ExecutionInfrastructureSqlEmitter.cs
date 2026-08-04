@@ -114,6 +114,10 @@ internal static partial class ExecutionInfrastructureSqlEmitter
             sql.Line();
             EmitOutputEvents(sql);
             sql.Line();
+            RegisterBytecodeRuntimeSqlEmitter.EmitProvisioning(sql);
+            sql.Line();
+            EmitProgramCatalog(sql);
+            sql.Line();
             EmitRuntimeMigrations(sql);
             sql.Line();
             EmitOutputSequence(sql);

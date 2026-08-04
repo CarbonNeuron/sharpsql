@@ -6,6 +6,8 @@ namespace SharpSql.IntegrationTests;
 [Collection(SqlServerCollection.Name)]
 public sealed class ServiceBrokerLifecycleIntegrationTests(SqlServerFixture sqlServer)
 {
+    private const string BytecodeImageId = "0x1111111111111111111111111111111111111111111111111111111111111111";
+
     [Fact]
     public async Task LeasesCancellationReapingAndProgramCleanupAreCoordinated()
     {
@@ -30,7 +32,9 @@ public sealed class ServiceBrokerLifecycleIntegrationTests(SqlServerFixture sqlS
             cleanup.CommandText = $"""
                 DELETE FROM [SharpSql].[Executions]
                 WHERE [ExecutionId] IN (@canceledExecutionId, @abandonedExecutionId);
+                DELETE FROM [SharpSql].[ServiceBrokerProgramBytecodeImages] WHERE [ProgramId] = N'{programId}';
                 DELETE FROM [SharpSql].[ServiceBrokerPrograms] WHERE [ProgramId] = N'{programId}';
+                DELETE FROM [SharpSql].[BytecodeImages] WHERE [__image_id] = {BytecodeImageId};
                 DROP PROCEDURE IF EXISTS [SharpSql].[Program_{programId}];
                 """;
             cleanup.Parameters.AddWithValue("@canceledExecutionId", canceledExecutionId);
@@ -50,8 +54,14 @@ public sealed class ServiceBrokerLifecycleIntegrationTests(SqlServerFixture sqlS
             DECLARE @leaseId UNIQUEIDENTIFIER;
             DECLARE @renewed BIT;
             DECLARE @taskId BIGINT;
+            DECLARE @frameId BIGINT;
 
-            EXEC [SharpSql].[RegisterServiceBrokerProgram] @ProgramId = N'{programId}';
+            INSERT INTO [SharpSql].[BytecodeImages] (
+                [__image_id], [__abi_major], [__abi_minor], [__instruction_count],
+                [__argument_count], [__parameter_count], [__installed_at_utc], [__last_used_at_utc])
+            VALUES ({BytecodeImageId}, 1, 2, 0, 0, 0, SYSUTCDATETIME(), SYSUTCDATETIME());
+            EXEC [SharpSql].[RegisterServiceBrokerProgram]
+                @ProgramId = N'{programId}', @BytecodeImageId = {BytecodeImageId};
             EXEC [SharpSql].[StartServiceBrokerExecution]
                 @ExecutionId = @canceledExecutionId,
                 @ProgramId = N'{programId}',
@@ -76,6 +86,15 @@ public sealed class ServiceBrokerLifecycleIntegrationTests(SqlServerFixture sqlS
                 @HandlerName = N'test',
                 @StartSuspended = 1,
                 @TaskId = @taskId OUTPUT;
+            INSERT INTO [SharpSql].[BytecodeFramesV1] (
+                [__execution_id], [__image_id], [__method_id], [__pc], [__return_id], [__caller_id], [__result_destination])
+            VALUES (@canceledExecutionId, {BytecodeImageId}, 1, 0, 0, NULL, NULL);
+            SET @frameId = SCOPE_IDENTITY();
+            INSERT INTO [SharpSql].[BytecodeRegistersV1] ([__execution_id], [__frame_id], [__register_id], [__type], [__value])
+            VALUES (@canceledExecutionId, @frameId, 1, 2, 42);
+            INSERT INTO [SharpSql].[BytecodeActivations] (
+                [ExecutionId], [TaskId], [ProgramId], [BytecodeImageId], [CurrentFrameId], [SuspensionGeneration])
+            VALUES (@canceledExecutionId, @taskId, N'{programId}', {BytecodeImageId}, @frameId, 0);
             UPDATE [SharpSql].[ServiceBrokerPrograms]
             SET [LastUsedAtUtc] = DATEADD(DAY, -2, SYSUTCDATETIME())
             WHERE [ProgramId] = N'{programId}';
@@ -95,6 +114,12 @@ public sealed class ServiceBrokerLifecycleIntegrationTests(SqlServerFixture sqlS
                 SELECT 1 FROM [SharpSql].[Tasks]
                 WHERE [ExecutionId] = @canceledExecutionId AND [TaskId] = @taskId AND [State] = 6
             ) THROW 51994, 'Cancellation did not remain execution-scoped through its task.', 1;
+            IF EXISTS (SELECT 1 FROM [SharpSql].[BytecodeActivations] WHERE [ExecutionId] = @canceledExecutionId)
+                OR EXISTS (SELECT 1 FROM [SharpSql].[BytecodeRegistersV1] WHERE [__execution_id] = @canceledExecutionId)
+                OR EXISTS (SELECT 1 FROM [SharpSql].[BytecodeFramesV1] WHERE [__execution_id] = @canceledExecutionId)
+                THROW 51989, 'Cancellation retained mutable bytecode state.', 1;
+            IF NOT EXISTS (SELECT 1 FROM [SharpSql].[ServiceBrokerProgramBytecodeImages] WHERE [ProgramId] = N'{programId}' AND [BytecodeImageId] = {BytecodeImageId})
+                THROW 51988, 'Cancellation removed the retained program image link.', 1;
 
             UPDATE [SharpSql].[ServiceBrokerPrograms]
             SET [LastUsedAtUtc] = DATEADD(DAY, -2, SYSUTCDATETIME())
@@ -102,9 +127,14 @@ public sealed class ServiceBrokerLifecycleIntegrationTests(SqlServerFixture sqlS
             EXEC [SharpSql].[CleanupServiceBrokerPrograms] @UnusedForMinutes = 1;
             IF OBJECT_ID(N'[SharpSql].[Program_{programId}]', N'P') IS NOT NULL
                 THROW 51995, 'Cleanup retained an unused terminal program.', 1;
+            IF EXISTS (SELECT 1 FROM [SharpSql].[ServiceBrokerProgramBytecodeImages] WHERE [ProgramId] = N'{programId}')
+                THROW 51987, 'Program cleanup retained its bytecode image link.', 1;
+            IF NOT EXISTS (SELECT 1 FROM [SharpSql].[BytecodeImages] WHERE [__image_id] = {BytecodeImageId})
+                THROW 51986, 'Program cleanup removed a shared immutable bytecode image.', 1;
 
             EXEC(N'{ProgramProcedureSql(programId).Replace("'", "''", StringComparison.Ordinal)}');
-            EXEC [SharpSql].[RegisterServiceBrokerProgram] @ProgramId = N'{programId}';
+            EXEC [SharpSql].[RegisterServiceBrokerProgram]
+                @ProgramId = N'{programId}', @BytecodeImageId = {BytecodeImageId};
             EXEC [SharpSql].[StartServiceBrokerExecution]
                 @ExecutionId = @abandonedExecutionId,
                 @ProgramId = N'{programId}',
@@ -116,6 +146,15 @@ public sealed class ServiceBrokerLifecycleIntegrationTests(SqlServerFixture sqlS
                 @HandlerName = N'test',
                 @StartSuspended = 1,
                 @TaskId = @taskId OUTPUT;
+            INSERT INTO [SharpSql].[BytecodeFramesV1] (
+                [__execution_id], [__image_id], [__method_id], [__pc], [__return_id], [__caller_id], [__result_destination])
+            VALUES (@abandonedExecutionId, {BytecodeImageId}, 1, 0, 0, NULL, NULL);
+            SET @frameId = SCOPE_IDENTITY();
+            INSERT INTO [SharpSql].[BytecodeRegistersV1] ([__execution_id], [__frame_id], [__register_id], [__type], [__value])
+            VALUES (@abandonedExecutionId, @frameId, 1, 2, 84);
+            INSERT INTO [SharpSql].[BytecodeActivations] (
+                [ExecutionId], [TaskId], [ProgramId], [BytecodeImageId], [CurrentFrameId], [SuspensionGeneration])
+            VALUES (@abandonedExecutionId, @taskId, N'{programId}', {BytecodeImageId}, @frameId, 0);
             UPDATE [SharpSql].[Executions]
             SET [LeaseExpiresAtUtc] = DATEADD(MINUTE, -1, SYSUTCDATETIME())
             WHERE [ExecutionId] = @abandonedExecutionId;
@@ -129,6 +168,12 @@ public sealed class ServiceBrokerLifecycleIntegrationTests(SqlServerFixture sqlS
                 SELECT 1 FROM [SharpSql].[Tasks]
                 WHERE [ExecutionId] = @abandonedExecutionId AND [TaskId] = @taskId AND [State] = 6
             ) THROW 51997, 'Reaping did not cancel the abandoned execution task.', 1;
+            IF EXISTS (SELECT 1 FROM [SharpSql].[BytecodeActivations] WHERE [ExecutionId] = @abandonedExecutionId)
+                OR EXISTS (SELECT 1 FROM [SharpSql].[BytecodeRegistersV1] WHERE [__execution_id] = @abandonedExecutionId)
+                OR EXISTS (SELECT 1 FROM [SharpSql].[BytecodeFramesV1] WHERE [__execution_id] = @abandonedExecutionId)
+                THROW 51985, 'Reaping retained mutable bytecode state.', 1;
+            IF NOT EXISTS (SELECT 1 FROM [SharpSql].[ServiceBrokerProgramBytecodeImages] WHERE [ProgramId] = N'{programId}' AND [BytecodeImageId] = {BytecodeImageId})
+                THROW 51984, 'Reaping removed the retained program image link.', 1;
             """;
         command.Parameters.AddWithValue("@canceledExecutionId", canceledExecutionId);
         command.Parameters.AddWithValue("@abandonedExecutionId", abandonedExecutionId);

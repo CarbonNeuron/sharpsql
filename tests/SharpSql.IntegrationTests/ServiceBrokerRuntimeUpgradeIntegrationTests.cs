@@ -8,6 +8,96 @@ namespace SharpSql.IntegrationTests;
 public sealed class ServiceBrokerRuntimeUpgradeIntegrationTests(SqlServerFixture sqlServer)
 {
     [Fact]
+    public async Task UpgradesVersionTwoToDurableBytecodeResumptionInfrastructureIdempotently()
+    {
+        await using var connection = await OpenUpgradeDatabaseAsync();
+        await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
+        var retainedExecutionId = Guid.NewGuid();
+        await using (var downgrade = connection.CreateCommand())
+        {
+            downgrade.CommandText = """
+                INSERT INTO [SharpSql].[Executions] ([ExecutionId], [State], [NextOutputSequence])
+                VALUES (@executionId, 0, 2);
+                INSERT INTO [SharpSql].[OutputEvents] ([ExecutionId], [SequenceNumber], [OutputText])
+                VALUES (@executionId, 1, N'v2-retained');
+                DROP TABLE [SharpSql].[BytecodeActivations];
+                DROP TABLE [SharpSql].[ServiceBrokerProgramBytecodeImages];
+                DROP INDEX [UX_sharpsql_BytecodeFramesV1_ExecutionFrameImage] ON [SharpSql].[BytecodeFramesV1];
+                UPDATE [SharpSql].[RuntimeManifest]
+                SET [SchemaVersion] = 2
+                WHERE [RuntimeName] = N'ServiceBroker';
+                """;
+            downgrade.Parameters.AddWithValue("@executionId", retainedExecutionId);
+            await downgrade.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
+        await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
+
+        await using (var assertion = connection.CreateCommand())
+        {
+            assertion.CommandText = """
+                SELECT
+                    (SELECT [SchemaVersion] FROM [SharpSql].[RuntimeManifest] WHERE [RuntimeName] = N'ServiceBroker'),
+                    (SELECT COUNT_BIG(*) FROM sys.tables WHERE [object_id] IN (
+                        OBJECT_ID(N'[SharpSql].[BytecodeActivations]'),
+                        OBJECT_ID(N'[SharpSql].[ServiceBrokerProgramBytecodeImages]'))),
+                    (SELECT COUNT_BIG(*) FROM sys.indexes WHERE [name] IN (
+                        N'UX_sharpsql_BytecodeFramesV1_ExecutionFrameImage',
+                        N'IX_sharpsql_BytecodeActivations_Image',
+                        N'IX_sharpsql_ServiceBrokerProgramBytecodeImages_Image')),
+                    (SELECT COUNT_BIG(*) FROM [SharpSql].[OutputEvents] WHERE [ExecutionId] = @executionId AND [OutputText] = N'v2-retained');
+                """;
+            assertion.Parameters.AddWithValue("@executionId", retainedExecutionId);
+            await using var reader = await assertion.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            Assert.Equal(3, reader.GetInt32(0));
+            Assert.Equal(2L, reader.GetInt64(1));
+            Assert.Equal(3L, reader.GetInt64(2));
+            Assert.Equal(1L, reader.GetInt64(3));
+        }
+
+        const string source = """
+            var values = new List<int> { 5 };
+            var tasks = values.Select(Work).ToList();
+            await Task.WhenAll(tasks);
+
+            async Task<int> Work(int value)
+            {
+                await Task.Delay(1);
+                return Fib(value);
+            }
+
+            int Fib(int value) => value <= 1 ? value : Fib(value - 1) + Fib(value - 2);
+            """;
+        var compilation = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions
+            {
+                RuntimeStorage = RuntimeStorageKind.ServiceBroker,
+                ManagedFallback = ManagedFallbackKind.Bytecode,
+                MaxInlineStatements = 1
+            });
+        Assert.True(compilation.Success, string.Join(Environment.NewLine, compilation.Diagnostics));
+        await ExecuteAsync(connection, compilation.Sql, 120);
+
+        await using (var bytecodeAssertion = connection.CreateCommand())
+        {
+            bytecodeAssertion.CommandText = """
+                SELECT
+                    (SELECT COUNT_BIG(*) FROM [SharpSql].[BytecodeImages]),
+                    (SELECT COUNT_BIG(*) FROM [SharpSql].[ServiceBrokerProgramBytecodeImages]),
+                    (SELECT COUNT_BIG(*) FROM [SharpSql].[BytecodeActivations]);
+                """;
+            await using var reader = await bytecodeAssertion.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            Assert.Equal(1L, reader.GetInt64(0));
+            Assert.Equal(1L, reader.GetInt64(1));
+            Assert.Equal(0L, reader.GetInt64(2));
+        }
+    }
+
+    [Fact]
     public async Task UpgradesAnUnversionedV1SnapshotAndRunsAnAsyncWorkload()
     {
         await using var connection = await OpenUpgradeDatabaseAsync();

@@ -12,19 +12,21 @@ public sealed partial class SharpSqlCompiler
     private const string BytecodeImageIdVariable = "@__sharpsql_bc_image_id";
     private List<VmContinuation> _bytecodeContinuations = [];
     private RegisterBytecodeImage? _bytecodeImage;
+    private bool _emittingPersistentBytecodeImage;
 
     private bool UsesDurableRowstoreBytecode =>
         _bytecodeMethods.Count > 0 &&
         _effectiveRuntime.Execution == RuntimeExecutionKind.Inline &&
         _effectiveRuntime.Durability == RuntimeDurabilityKind.Durable &&
         !_effectiveRuntime.UseMemoryOptimizedTables;
-    private string BytecodeProgramTable => UsesDurableRowstoreBytecode
+    private bool UsesPersistentBytecodeImage => UsesDurableRowstoreBytecode || _emittingPersistentBytecodeImage;
+    private string BytecodeProgramTable => UsesPersistentBytecodeImage
         ? RegisterBytecodeRuntimeSqlEmitter.InstructionsTable
         : LocalBytecodeProgramTable;
-    private string BytecodeArgumentsTable => UsesDurableRowstoreBytecode
+    private string BytecodeArgumentsTable => UsesPersistentBytecodeImage
         ? RegisterBytecodeRuntimeSqlEmitter.ArgumentsTable
         : LocalBytecodeArgumentsTable;
-    private string BytecodeParametersTable => UsesDurableRowstoreBytecode
+    private string BytecodeParametersTable => UsesPersistentBytecodeImage
         ? RegisterBytecodeRuntimeSqlEmitter.ParametersTable
         : LocalBytecodeParametersTable;
     private string BytecodeFramesTable => UsesDurableRowstoreBytecode
@@ -166,10 +168,22 @@ public sealed partial class SharpSqlCompiler
 
     private void EmitDurableRegisterBytecodePreamble()
     {
+        EmitPersistentRegisterBytecodeImage(provision: true);
+    }
+
+    private void EmitServiceBrokerRegisterBytecodeImage()
+    {
+        if (_bytecodeMethods.Count > 0)
+            EmitPersistentRegisterBytecodeImage(provision: false);
+    }
+
+    private void EmitPersistentRegisterBytecodeImage(bool provision)
+    {
         var image = BytecodeImage;
         _sql.Line("-- SharpSql durable rowstore register-bytecode image and execution state");
         _sql.Line($"DECLARE {BytecodeImageIdVariable} BINARY(32) = {image.SqlId};");
-        RegisterBytecodeRuntimeSqlEmitter.EmitProvisioning(_sql);
+        if (provision)
+            RegisterBytecodeRuntimeSqlEmitter.EmitProvisioning(_sql);
         _sql.Line("DECLARE @__sharpsql_bc_image_lock_result INT;");
         _sql.Line("EXEC @__sharpsql_bc_image_lock_result = sys.sp_getapplock");
         using (_sql.Indent())
@@ -189,7 +203,16 @@ public sealed partial class SharpSqlCompiler
         {
             _sql.Line($"INSERT INTO {RegisterBytecodeRuntimeSqlEmitter.ImagesTable} (__image_id, __abi_major, __abi_minor, __instruction_count, __argument_count, __parameter_count, __installed_at_utc, __last_used_at_utc)");
             _sql.Line($"VALUES ({BytecodeImageIdVariable}, {image.Module.Version.Major}, {image.Module.Version.Minor}, {image.InstructionCount}, {image.ArgumentCount}, {image.ParameterCount}, SYSUTCDATETIME(), SYSUTCDATETIME());");
-            EmitRegisterBytecodeImage();
+            var outerPersistentImage = _emittingPersistentBytecodeImage;
+            _emittingPersistentBytecodeImage = true;
+            try
+            {
+                EmitRegisterBytecodeImage();
+            }
+            finally
+            {
+                _emittingPersistentBytecodeImage = outerPersistentImage;
+            }
         }
         _sql.Line("END");
         _sql.Line("ELSE");
@@ -273,11 +296,11 @@ public sealed partial class SharpSqlCompiler
             arguments);
     }
 
-    private string ImageColumns(string columns) => UsesDurableRowstoreBytecode
+    private string ImageColumns(string columns) => UsesPersistentBytecodeImage
         ? "__image_id, " + columns
         : columns;
 
-    private string ImageRow(string row) => UsesDurableRowstoreBytecode
+    private string ImageRow(string row) => UsesPersistentBytecodeImage
         ? $"({BytecodeImageIdVariable}, {row.Substring(1)}"
         : row;
 

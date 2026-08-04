@@ -266,8 +266,10 @@ public sealed class AsyncStateMachinePlanTests
         Assert.Contains("EXEC [SharpSql].[AppendOutput]", result.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("PRINT CASE WHEN @__sharpsql_bc", result.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("#__sharpsql_stack", result.Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("[SharpSql].[BytecodeFramesV1]", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("CREATE TABLE [SharpSql].[BytecodeFramesV1]", result.Sql, StringComparison.Ordinal);
         Assert.Equal(1, Count(result.Sql, "CREATE TABLE #__sharpsql_bc_program"));
+        Assert.Contains("INSERT INTO [SharpSql].[BytecodeImages]", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("@BytecodeImageId = 0x", result.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
