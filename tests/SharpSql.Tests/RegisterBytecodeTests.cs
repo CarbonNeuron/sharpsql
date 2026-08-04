@@ -92,4 +92,43 @@ public sealed class RegisterBytecodeTests
         Assert.Equal(2, methods.Single(method => method.Name == "Twice").Instructions
             .Count(instruction => instruction is BytecodeCallInstruction));
     }
+
+    [Fact]
+    public void LowersVoidDirectAndRecursiveCallsWithoutResultRegisters()
+    {
+        const string source = """
+            int marker = 0;
+            void Emit(int value) => Console.WriteLine(value);
+            void Countdown(int value)
+            {
+                if (value == 0)
+                    return;
+                Emit(value);
+                Countdown(value - 1);
+            }
+            """;
+        var compiler = new SharpSqlCompiler();
+        compiler.Transpile(source, new TranspileOptions { ManagedFallback = ManagedFallbackKind.Legacy });
+        var definitions = Assert.IsType<IrProgram>(compiler.BoundProgram).Methods.ToArray();
+        var ids = definitions.Select((method, index) =>
+                (Source: method.Id, Bytecode: new BytecodeMethodId(index + 1)))
+            .ToDictionary(item => item.Source, item => item.Bytecode);
+        var methods = definitions.Select(method => Assert.IsType<RegisterBytecodeMethod>(
+            RegisterBytecodeLowerer.Lower(
+                method,
+                Assert.IsType<CoreMethod>(CoreIrLowerer.Lower(method, ids.Keys.ToArray()).Method),
+                ids[method.Id],
+                ids).Method)).ToArray();
+
+        var calls = methods.Single(method => method.Name == "Countdown").Instructions
+            .OfType<BytecodeCallInstruction>()
+            .ToArray();
+
+        Assert.Equal(2, calls.Length);
+        Assert.All(calls, call => Assert.Null(call.Destination));
+        Assert.DoesNotContain(methods.SelectMany(method => method.Registers), register => register.Type == IrType.Void);
+        Assert.Empty(RegisterBytecodeContract.Validate(new RegisterBytecodeModule(
+            RegisterBytecodeContract.CurrentVersion,
+            methods)));
+    }
 }

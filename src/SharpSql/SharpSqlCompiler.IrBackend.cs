@@ -146,6 +146,13 @@ public sealed partial class SharpSqlCompiler
         if (TryEmitHeapStatement(expression, scope, _proceduralVmContext))
             return;
 
+        if (expression is IrInvocationExpression bytecodeCall &&
+            TryGetRegisterBytecodeMethod(bytecodeCall, out _))
+        {
+            EmitVmExpression(bytecodeCall, scope, _proceduralVmContext, _ => { });
+            return;
+        }
+
         if (expression is IrInvocationExpression call &&
             TryGetComplexMethod(call, out var complexMethod))
         {

@@ -48,12 +48,23 @@ public sealed class RegisterBytecodeIntegrationTests(SqlServerFixture sqlServer)
                 return value + 1;
             }
 
+            void Emit(int value) => Console.WriteLine(value);
+
+            void Countdown(int value)
+            {
+                if (value == 0)
+                    return;
+                Emit(value);
+                Countdown(value - 1);
+            }
+
             Console.WriteLine(SumTo(9));
             Console.WriteLine(Factorial(6));
             Console.WriteLine(Twice(40));
             Console.WriteLine(IsEven(10));
             Console.WriteLine(IsOdd(10));
             Console.WriteLine(Announce(7));
+            Countdown(3);
             """;
         var testCase = new ParityCase("register-bytecode", source);
         var csharp = await ParityHarness.ExecuteCSharpAsync(testCase);
@@ -75,5 +86,6 @@ public sealed class RegisterBytecodeIntegrationTests(SqlServerFixture sqlServer)
         Assert.Contains("compact register-bytecode runtime ABI 1.1", sql.GeneratedSql, StringComparison.Ordinal);
         Assert.Contains("#__sharpsql_bc_arguments", sql.GeneratedSql, StringComparison.Ordinal);
         Assert.DoesNotContain("SharpSql stack-machine runtime", sql.GeneratedSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("#__sharpsql_stack", sql.GeneratedSql, StringComparison.Ordinal);
     }
 }

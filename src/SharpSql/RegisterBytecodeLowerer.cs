@@ -24,8 +24,12 @@ internal static class RegisterBytecodeLowerer
         foreach (var local in core.Locals)
             registerTypes[local.Value] = local.Type;
         foreach (var instruction in core.Blocks.SelectMany(block => block.Instructions))
-            if (instruction is not CoreHostCallInstruction)
-                registerTypes[instruction.Result] = instruction.Type;
+        {
+            if (instruction is CoreHostCallInstruction ||
+                instruction is CoreCallInstruction call && call.Type == IrType.Void)
+                continue;
+            registerTypes[instruction.Result] = instruction.Type;
+        }
 
         var unsupported = registerTypes.Values.FirstOrDefault(type => !RegisterBytecodeContract.IsRuntimeType(type));
         if (unsupported is not null)
@@ -63,7 +67,7 @@ internal static class RegisterBytecodeLowerer
                         Register(binary.Result), binary.Type, binary.Operator,
                         Register(binary.Left), Register(binary.Right)),
                     CoreCallInstruction call => new BytecodeCallInstruction(
-                            Register(call.Result),
+                            call.Type == IrType.Void ? null : Register(call.Result),
                             methodIds![call.Target],
                             call.Arguments.Select(Register).ToArray()),
                     CoreHostCallInstruction host => new BytecodeHostCallInstruction(

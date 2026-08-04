@@ -331,8 +331,14 @@ public sealed partial class SharpSqlCompiler
             using (_sql.Indent())
             {
                 _sql.Line("SET @__sharpsql_bc_frame_id = @__sharpsql_bc_caller_frame_id;");
-                _sql.Line($"UPDATE {BytecodeRegistersTable} SET __value = @__sharpsql_bc_result WHERE __frame_id = @__sharpsql_bc_frame_id AND __register_id = @__sharpsql_bc_result_destination;");
-                _sql.Line($"IF @@ROWCOUNT = 0 INSERT INTO {BytecodeRegistersTable} (__frame_id, __register_id, __value) VALUES (@__sharpsql_bc_frame_id, @__sharpsql_bc_result_destination, @__sharpsql_bc_result);");
+                _sql.Line("IF @__sharpsql_bc_result_destination IS NOT NULL");
+                _sql.Line("BEGIN");
+                using (_sql.Indent())
+                {
+                    _sql.Line($"UPDATE {BytecodeRegistersTable} SET __value = @__sharpsql_bc_result WHERE __frame_id = @__sharpsql_bc_frame_id AND __register_id = @__sharpsql_bc_result_destination;");
+                    _sql.Line($"IF @@ROWCOUNT = 0 INSERT INTO {BytecodeRegistersTable} (__frame_id, __register_id, __value) VALUES (@__sharpsql_bc_frame_id, @__sharpsql_bc_result_destination, @__sharpsql_bc_result);");
+                }
+                _sql.Line("END;");
                 _sql.Line($"GOTO {BytecodeDispatchLabel};");
             }
             _sql.Line("END;");

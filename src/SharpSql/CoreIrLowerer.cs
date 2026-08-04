@@ -274,7 +274,7 @@ internal static class CoreIrLowerer
                     return LowerConditional(conditional, out value);
 
                 case IrInvocationExpression invocation when
-                    !invocation.TargetMethodId.IsNone && invocation.Type != IrType.Void &&
+                    !invocation.TargetMethodId.IsNone &&
                     _callableMethods?.Contains(invocation.TargetMethodId) == true:
                     value = default;
                     var arguments = new List<CoreValueId>(invocation.Arguments.Count);
@@ -284,7 +284,8 @@ internal static class CoreIrLowerer
                             return false;
                         arguments.Add(loweredArgument);
                     }
-                    value = AllocateValue();
+                    if (invocation.Type != IrType.Void)
+                        value = AllocateValue();
                     _current.Instructions.Add(new CoreCallInstruction(
                         value,
                         invocation.Type,
