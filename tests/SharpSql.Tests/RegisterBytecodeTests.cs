@@ -131,4 +131,80 @@ public sealed class RegisterBytecodeTests
             RegisterBytecodeContract.CurrentVersion,
             methods)));
     }
+
+    [Fact]
+    public void LowersStringConstantsCallsConcatenationAndEquality()
+    {
+        const string source = """
+            int marker = 0;
+            string Echo(string value) => value;
+            string Decorate(string value)
+            {
+                string missing = default;
+                Console.WriteLine(missing);
+                return "[" + Echo(value) + "]";
+            }
+            bool Same(string left, string right) => left == right;
+            """;
+        var compiler = new SharpSqlCompiler();
+        compiler.Transpile(source, new TranspileOptions { ManagedFallback = ManagedFallbackKind.Legacy });
+        var definitions = Assert.IsType<IrProgram>(compiler.BoundProgram).Methods.ToArray();
+        var ids = definitions.Select((method, index) =>
+                (Source: method.Id, Bytecode: new BytecodeMethodId(index + 1)))
+            .ToDictionary(item => item.Source, item => item.Bytecode);
+        var methods = definitions.Select(method => Assert.IsType<RegisterBytecodeMethod>(
+            RegisterBytecodeLowerer.Lower(
+                method,
+                Assert.IsType<CoreMethod>(CoreIrLowerer.Lower(method, ids.Keys.ToArray()).Method),
+                ids[method.Id],
+                ids).Method)).ToArray();
+
+        var decorate = methods.Single(method => method.Name == "Decorate");
+        var same = methods.Single(method => method.Name == "Same");
+
+        Assert.Contains(decorate.Registers, register => register.Type == IrType.String);
+        Assert.Contains(decorate.Instructions, instruction =>
+            instruction is BytecodeConstantInstruction { Type: { IsString: true }, Value: null });
+        var writeLine = Assert.Single(decorate.Instructions.OfType<BytecodeHostCallInstruction>());
+        Assert.Equal(BytecodeHostOperation.WriteLine, writeLine.Operation);
+        Assert.Equal(
+            IrType.String,
+            decorate.Registers.Single(register => register.Register == Assert.Single(writeLine.Arguments)).Type);
+        Assert.Equal(2, decorate.Instructions.Count(instruction =>
+            instruction is BytecodeBinaryInstruction { Operator: IrBinaryOperator.Add }));
+        Assert.Contains(same.Instructions, instruction =>
+            instruction is BytecodeBinaryInstruction { Operator: IrBinaryOperator.Equal, Type: { IsBoolean: true } });
+        Assert.Contains("const r", RegisterBytecodeDisassembler.Disassemble(decorate), StringComparison.Ordinal);
+        Assert.Contains("\"[\"", RegisterBytecodeDisassembler.Disassemble(decorate), StringComparison.Ordinal);
+        Assert.Empty(RegisterBytecodeContract.Validate(new RegisterBytecodeModule(
+            RegisterBytecodeContract.CurrentVersion,
+            methods)));
+        Assert.Equal(8, Enum.GetValues<RegisterBytecodeOpCode>().Length);
+    }
+
+    [Fact]
+    public void ValidatorRejectsInvalidStringValuesAndReturnTypes()
+    {
+        var method = new RegisterBytecodeMethod(
+            new BytecodeMethodId(1),
+            new IrMethodId("Text"),
+            "Text",
+            IrType.String,
+            [],
+            [
+                new RegisterBytecodeRegister(new BytecodeRegister(1), IrType.String),
+                new RegisterBytecodeRegister(new BytecodeRegister(2), IrType.Int)
+            ],
+            [
+                new BytecodeConstantInstruction(new BytecodeRegister(1), IrType.String, 1),
+                new BytecodeReturnInstruction(new BytecodeRegister(2))
+            ]);
+
+        var errors = RegisterBytecodeContract.Validate(new RegisterBytecodeModule(
+            RegisterBytecodeContract.CurrentVersion,
+            [method]));
+
+        Assert.Contains(errors, error => error.Code == RegisterBytecodeValidationCode.InvalidInstruction);
+        Assert.Contains(errors, error => error.Code == RegisterBytecodeValidationCode.InvalidReturn);
+    }
 }

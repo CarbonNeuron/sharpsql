@@ -58,6 +58,39 @@ public sealed class RegisterBytecodeIntegrationTests(SqlServerFixture sqlServer)
                 Countdown(value - 1);
             }
 
+            string Echo(string value) => value;
+
+            string Decorate(string value)
+            {
+                string missing = default;
+                Console.WriteLine(value);
+                return "[" + Echo(value) + "]";
+            }
+
+            string? EchoNullable(string? value)
+            {
+                string? copy = value;
+                return copy;
+            }
+
+            bool IsNullRoundTrip(string? value)
+            {
+                string? copy = EchoNullable(value);
+                return copy == null;
+            }
+
+            bool Same(string? left, string? right)
+            {
+                bool result = left == right;
+                return result;
+            }
+
+            bool Different(string? left, string? right)
+            {
+                bool result = left != right;
+                return result;
+            }
+
             Console.WriteLine(SumTo(9));
             Console.WriteLine(Factorial(6));
             Console.WriteLine(Twice(40));
@@ -65,6 +98,13 @@ public sealed class RegisterBytecodeIntegrationTests(SqlServerFixture sqlServer)
             Console.WriteLine(IsOdd(10));
             Console.WriteLine(Announce(7));
             Countdown(3);
+            Console.WriteLine(Decorate("O'Brien Ω"));
+            Console.WriteLine(Same(null, null));
+            Console.WriteLine(Same(null, ""));
+            Console.WriteLine(Same("A", "a"));
+            Console.WriteLine(Same("tail ", "tail"));
+            Console.WriteLine(Different("A", "a"));
+            Console.WriteLine(IsNullRoundTrip(null));
             """;
         var testCase = new ParityCase("register-bytecode", source);
         var csharp = await ParityHarness.ExecuteCSharpAsync(testCase);
@@ -83,8 +123,10 @@ public sealed class RegisterBytecodeIntegrationTests(SqlServerFixture sqlServer)
             sql.Outcome.Failure is null &&
             csharp.StandardOutput == sql.Outcome.StandardOutput,
             ParityHarness.FormatComparisonFailure(testCase, csharp, sql));
-        Assert.Contains("compact register-bytecode runtime ABI 1.1", sql.GeneratedSql, StringComparison.Ordinal);
+        Assert.Contains("compact register-bytecode runtime ABI 1.2", sql.GeneratedSql, StringComparison.Ordinal);
         Assert.Contains("#__sharpsql_bc_arguments", sql.GeneratedSql, StringComparison.Ordinal);
+        Assert.Contains("__constant_text NVARCHAR(MAX)", sql.GeneratedSql, StringComparison.Ordinal);
+        Assert.Contains("__text_value NVARCHAR(MAX)", sql.GeneratedSql, StringComparison.Ordinal);
         Assert.DoesNotContain("SharpSql stack-machine runtime", sql.GeneratedSql, StringComparison.Ordinal);
         Assert.DoesNotContain("#__sharpsql_stack", sql.GeneratedSql, StringComparison.Ordinal);
     }

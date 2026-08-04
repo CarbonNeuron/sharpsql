@@ -30,7 +30,7 @@ public sealed class CompilerTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.True(result.UsesRegisterBytecode);
-        Assert.Contains("compact register-bytecode runtime ABI 1.1", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("compact register-bytecode runtime ABI 1.2", result.Sql, StringComparison.Ordinal);
         Assert.Contains("#__sharpsql_bc_program", result.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SharpSql stack-machine runtime", result.Sql, StringComparison.Ordinal);
     }
@@ -52,13 +52,38 @@ public sealed class CompilerTests
     }
 
     [Fact]
-    public void RequiredBytecodeReportsWhyAnIneligibleFallbackCannotLower()
+    public void RequiredBytecodeSupportsStringRegistersConstantsAndResults()
     {
         const string source = """
             string Work(string value)
             {
                 string copy = value;
                 return copy + "!";
+            }
+            Console.WriteLine(Work("nope"));
+            """;
+
+        var result = new SharpSqlCompiler().Transpile(source, new TranspileOptions
+        {
+            MaxInlineStatements = 1,
+            ManagedFallback = ManagedFallbackKind.Bytecode
+        });
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.True(result.UsesRegisterBytecode);
+        Assert.Contains("__constant_text NVARCHAR(MAX)", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("__text_value NVARCHAR(MAX)", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SharpSql stack-machine runtime", result.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RequiredBytecodeStillRejectsUnsupportedStringOperations()
+    {
+        const string source = """
+            int Work(string value)
+            {
+                int length = value.Length;
+                return length;
             }
             Console.WriteLine(Work("nope"));
             """;

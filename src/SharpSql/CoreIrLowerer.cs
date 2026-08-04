@@ -246,8 +246,12 @@ internal static class CoreIrLowerer
                         value = default;
                         return Fail($"Short-circuit operator '{binary.Operator}' requires control-flow lowering.");
                     }
-                    if (!LowerExpression(binary.Left, out var left) ||
-                        !LowerExpression(binary.Right, out var right))
+                    var contextualStringType = binary.Operator is IrBinaryOperator.Equal or IrBinaryOperator.NotEqual &&
+                        (binary.Left.Type.IsString || binary.Right.Type.IsString)
+                            ? IrType.String
+                            : null;
+                    if (!LowerBinaryOperand(binary.Left, contextualStringType, out var left) ||
+                        !LowerBinaryOperand(binary.Right, contextualStringType, out var right))
                         break;
                     value = AllocateValue();
                     _current.Instructions.Add(
@@ -310,6 +314,17 @@ internal static class CoreIrLowerer
 
             value = default;
             return Fail($"Expression '{expression.GetType().Name}' is not supported by Core IR lowering.");
+        }
+
+        private bool LowerBinaryOperand(IrExpression expression, IrType? contextualType, out CoreValueId value)
+        {
+            if (contextualType is not null && expression is IrConstantExpression { Value: null })
+            {
+                value = AllocateValue();
+                _current.Instructions.Add(new CoreConstantInstruction(value, contextualType, null));
+                return true;
+            }
+            return LowerExpression(expression, out value);
         }
 
         private bool LowerConditional(IrConditionalExpression expression, out CoreValueId value)

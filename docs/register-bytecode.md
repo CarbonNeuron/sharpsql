@@ -25,14 +25,14 @@ sharpsql transpile App.csproj --managed-fallback Bytecode
 every selected fallback method to lower successfully. A strict failure produces
 `SS8001` with the rejected Core IR operation or runtime type.
 
-## ABI 1.1
+## ABI 1.2
 
 The program contract has exactly eight instruction families: `Constant`, `Move`,
 `Convert`, `Unary`, `Binary`, `Branch`, `Call`, and `Return`. Validation rejects
 unknown registers, invalid branch targets, call arity mismatches, unsupported types,
 and return-shape mismatches before SQL emission. Disassembly is deterministic.
 
-The executable slice supports `bool`, `int`, and `long`; constants,
+The executable slice supports `bool`, `int`, `long`, and nullable `string`; constants,
 conversions, arithmetic, comparisons, bit operations and C# shift-count behavior;
 locals and parameters; `if`, `while`, conditional values, and returns. Calls from
 native SQL into bytecode evaluate arguments once and return a typed scalar. Bytecode
@@ -40,8 +40,19 @@ methods can call one another recursively through typed child frames. The first t
 host operation maps `Console.WriteLine` for supported scalar values back to native SQL
 output without adding another opcode family.
 
-Methods requiring heap values, strings, exceptions, async suspension, or general
+String registers use a separate `NVARCHAR(MAX)` value lane. ABI 1.2 supports string
+literals and `default(string)`, moves, string parameters and results, string-to-string
+concatenation, null-safe ordinal equality and inequality, and
+`Console.WriteLine(string)`. Concatenation treats null as empty, matching C# string
+concatenation. Equality distinguishes null from empty and compares UTF-16 bytes, so it
+is case-sensitive and preserves trailing-space differences independently of the
+database collation.
+
+Interpolation, coalescing, string members and methods, mixed string/scalar
+concatenation, and non-identity string conversions remain outside this compact slice.
+Methods requiring heap values, exceptions, async suspension, or general
 relational host operations remain on the legacy VM in `Auto`.
 Durable frame persistence and Service Broker resumption are also later ABI work;
 the current interpreter state is execution-local even when the surrounding heap is
-durable.
+durable. The staged persistence and resumption architecture is described in
+[Durable register-bytecode design](durable-register-bytecode.md).

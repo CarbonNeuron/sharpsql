@@ -34,6 +34,31 @@ internal static class RegisterBytecodeLowerer
         var unsupported = registerTypes.Values.FirstOrDefault(type => !RegisterBytecodeContract.IsRuntimeType(type));
         if (unsupported is not null)
             return new(null, $"Runtime type '{unsupported.Name}' is not supported by register bytecode yet.");
+        foreach (var instruction in core.Blocks.SelectMany(block => block.Instructions))
+        {
+            switch (instruction)
+            {
+                case CoreConvertInstruction convert
+                    when (convert.Type.IsString || registerTypes[convert.Operand].IsString) &&
+                         convert.Type != registerTypes[convert.Operand]:
+                    return new(null, "Register bytecode supports only identity conversions involving strings.");
+                case CoreUnaryInstruction unary when registerTypes[unary.Operand].IsString:
+                    return new(null, $"Unary operator '{unary.Operator}' is not supported for strings.");
+                case CoreBinaryInstruction binary
+                    when binary.Type.IsString || registerTypes[binary.Left].IsString || registerTypes[binary.Right].IsString:
+                {
+                    var left = registerTypes[binary.Left];
+                    var right = registerTypes[binary.Right];
+                    var valid = binary.Operator == IrBinaryOperator.Add &&
+                            binary.Type.IsString && left.IsString && right.IsString ||
+                        binary.Operator is IrBinaryOperator.Equal or IrBinaryOperator.NotEqual &&
+                            binary.Type.IsBoolean && left.IsString && right.IsString;
+                    if (!valid)
+                        return new(null, $"Binary operator '{binary.Operator}' has an unsupported string operand shape.");
+                    break;
+                }
+            }
+        }
         var missingCall = core.Blocks.SelectMany(block => block.Instructions)
             .OfType<CoreCallInstruction>()
             .FirstOrDefault(call => methodIds is null || !methodIds.ContainsKey(call.Target));
@@ -139,7 +164,15 @@ internal static class RegisterBytecodeDisassembler
     {
         null => "null",
         bool boolean => boolean ? "true" : "false",
+        string text => $"\"{EscapeString(text)}\"",
         IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
         _ => value.ToString() ?? "null"
     };
+
+    private static string EscapeString(string value) => value
+        .Replace("\\", "\\\\", StringComparison.Ordinal)
+        .Replace("\"", "\\\"", StringComparison.Ordinal)
+        .Replace("\r", "\\r", StringComparison.Ordinal)
+        .Replace("\n", "\\n", StringComparison.Ordinal)
+        .Replace("\t", "\\t", StringComparison.Ordinal);
 }

@@ -96,6 +96,7 @@ internal enum RegisterBytecodeValidationCode
     InvalidBranch,
     InvalidCall,
     InvalidReturn,
+    InvalidInstruction,
     UnsupportedType
 }
 
@@ -107,7 +108,7 @@ internal sealed record RegisterBytecodeValidationError(
 
 internal static class RegisterBytecodeContract
 {
-    public static RegisterBytecodeVersion CurrentVersion { get; } = new(1, 1);
+    public static RegisterBytecodeVersion CurrentVersion { get; } = new(1, 2);
 
     public static IReadOnlyList<RegisterBytecodeValidationError> Validate(RegisterBytecodeModule module)
     {
@@ -148,6 +149,13 @@ internal static class RegisterBytecodeContract
         List<RegisterBytecodeValidationError> errors)
     {
         var registers = new Dictionary<BytecodeRegister, IrType>();
+        if (method.ReturnType != IrType.Void && !IsRuntimeType(method.ReturnType))
+        {
+            errors.Add(new(
+                RegisterBytecodeValidationCode.UnsupportedType,
+                $"Method '{method.Name}' has unsupported return type '{method.ReturnType.Name}'.",
+                method.Id));
+        }
         foreach (var register in method.Registers)
         {
             if (register.Register.Value <= 0 || registers.ContainsKey(register.Register))
@@ -199,6 +207,10 @@ internal static class RegisterBytecodeContract
                 errors.Add(new(RegisterBytecodeValidationCode.InvalidRegister,
                     $"Instruction {offset.Value} references missing register r{register.Value}.", method.Id, offset));
         }
+        bool HasType(BytecodeRegister register, IrType expected) =>
+            registers.TryGetValue(register, out var actual) && actual == expected;
+        void Invalid(string message, RegisterBytecodeValidationCode code = RegisterBytecodeValidationCode.InvalidInstruction) =>
+            errors.Add(new(code, message, method.Id, offset));
         void Target(BytecodeOffset target)
         {
             if (target.Value < 0 || target.Value >= method.Instructions.Count)
@@ -210,27 +222,60 @@ internal static class RegisterBytecodeContract
         {
             case BytecodeConstantInstruction constant:
                 Require(constant.Destination);
+                if (!HasType(constant.Destination, constant.Type) || !ConstantMatches(constant.Type, constant.Value))
+                    Invalid($"Constant destination or value does not match type '{constant.Type.Name}'.");
                 break;
             case BytecodeMoveInstruction move:
                 Require(move.Destination);
                 Require(move.Source);
+                if (registers.TryGetValue(move.Destination, out var moveDestination) &&
+                    registers.TryGetValue(move.Source, out var moveSource) && moveDestination != moveSource)
+                    Invalid("Move source and destination types do not match.");
                 break;
             case BytecodeConvertInstruction convert:
                 Require(convert.Destination);
                 Require(convert.Source);
+                if (!HasType(convert.Destination, convert.Type))
+                    Invalid($"Convert destination does not match type '{convert.Type.Name}'.");
+                if (registers.TryGetValue(convert.Source, out var convertSource) &&
+                    (convert.Type.IsString || convertSource.IsString) && convert.Type != convertSource)
+                    Invalid("Register bytecode supports only identity conversions involving strings.");
                 break;
             case BytecodeUnaryInstruction unary:
                 Require(unary.Destination);
                 Require(unary.Operand);
+                if (!HasType(unary.Destination, unary.Type) ||
+                    registers.TryGetValue(unary.Operand, out var unaryOperand) && unaryOperand.IsString)
+                    Invalid("Unary instruction has an invalid result or operand type.");
                 break;
             case BytecodeBinaryInstruction binary:
                 Require(binary.Destination);
                 Require(binary.Left);
                 Require(binary.Right);
+                if (!HasType(binary.Destination, binary.Type))
+                {
+                    Invalid($"Binary destination does not match type '{binary.Type.Name}'.");
+                    break;
+                }
+                if (registers.TryGetValue(binary.Left, out var leftType) &&
+                    registers.TryGetValue(binary.Right, out var rightType) &&
+                    (binary.Type.IsString || leftType.IsString || rightType.IsString))
+                {
+                    var validStringBinary = binary.Operator == IrBinaryOperator.Add &&
+                            binary.Type.IsString && leftType.IsString && rightType.IsString ||
+                        binary.Operator is IrBinaryOperator.Equal or IrBinaryOperator.NotEqual &&
+                            binary.Type.IsBoolean && leftType.IsString && rightType.IsString;
+                    if (!validStringBinary)
+                        Invalid($"Binary operator '{binary.Operator}' has an unsupported string operand shape.");
+                }
                 break;
             case BytecodeBranchInstruction branch:
                 if (branch.Condition is { } condition)
+                {
                     Require(condition);
+                    if (registers.TryGetValue(condition, out var conditionType) && !conditionType.IsBoolean)
+                        Invalid("A conditional branch requires a bool condition.", RegisterBytecodeValidationCode.InvalidBranch);
+                }
                 Target(branch.WhenTrue);
                 if (branch.WhenFalse is { } whenFalse)
                     Target(whenFalse);
@@ -280,7 +325,11 @@ internal static class RegisterBytecodeContract
                 break;
             case BytecodeReturnInstruction @return:
                 if (@return.Value is { } value)
+                {
                     Require(value);
+                    if (registers.TryGetValue(value, out var returnType) && returnType != method.ReturnType)
+                        Invalid("Return register type does not match the method return type.", RegisterBytecodeValidationCode.InvalidReturn);
+                }
                 if ((@return.Value is null) != (method.ReturnType == IrType.Void))
                     errors.Add(new(RegisterBytecodeValidationCode.InvalidReturn,
                         "Return value presence does not match the method return type.", method.Id, offset));
@@ -288,5 +337,14 @@ internal static class RegisterBytecodeContract
         }
     }
 
-    public static bool IsRuntimeType(IrType type) => type.Name is "bool" or "int" or "long";
+    private static bool ConstantMatches(IrType type, object? value) => type.Name switch
+    {
+        "bool" => value is bool,
+        "int" => value is int,
+        "long" => value is long,
+        "string" => value is null or string,
+        _ => false
+    };
+
+    public static bool IsRuntimeType(IrType type) => type.Name is "bool" or "int" or "long" or "string";
 }
