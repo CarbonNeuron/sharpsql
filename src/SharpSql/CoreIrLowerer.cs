@@ -7,12 +7,14 @@ internal sealed record CoreLoweringResult(CoreMethod? Method, string? Unsupporte
 
 internal static class CoreIrLowerer
 {
-    public static CoreLoweringResult Lower(MethodDefinition method)
+    public static CoreLoweringResult Lower(
+        MethodDefinition method,
+        IReadOnlyCollection<IrMethodId>? callableMethods = null)
     {
-        if (method.Body is null)
-            return Unsupported("Only block-bodied methods can be lowered to Core IR.");
+        if (method.Body is null && method.ExpressionBody is null)
+            return Unsupported("Only methods with a body can be lowered to Core IR.");
 
-        var builder = new Builder(method);
+        var builder = new Builder(method, callableMethods);
         return builder.Lower();
     }
 
@@ -21,6 +23,7 @@ internal static class CoreIrLowerer
     private sealed class Builder
     {
         private readonly MethodDefinition _method;
+        private readonly IReadOnlyCollection<IrMethodId>? _callableMethods;
         private readonly List<MutableBlock> _blocks = [];
         private readonly Dictionary<IrSymbolId, CoreValueId> _symbols = [];
         private readonly List<CoreParameter> _parameters = [];
@@ -29,9 +32,10 @@ internal static class CoreIrLowerer
         private MutableBlock _current;
         private string? _unsupportedReason;
 
-        public Builder(MethodDefinition method)
+        public Builder(MethodDefinition method, IReadOnlyCollection<IrMethodId>? callableMethods)
         {
             _method = method;
+            _callableMethods = callableMethods;
             _current = CreateBlock();
             foreach (var parameter in method.Parameters)
             {
@@ -43,8 +47,19 @@ internal static class CoreIrLowerer
 
         public CoreLoweringResult Lower()
         {
-            if (!LowerStatement(_method.Body!))
-                return Unsupported(_unsupportedReason ?? "The method contains an unsupported Core IR operation.");
+            if (_method.Body is not null)
+            {
+                if (!LowerStatement(_method.Body))
+                    return Unsupported(_unsupportedReason ?? "The method contains an unsupported Core IR operation.");
+            }
+            else if (_method.ExpressionBody is not null)
+            {
+                if (!LowerExpression(_method.ExpressionBody, out var expressionResult))
+                    return Unsupported(_unsupportedReason ?? "The method contains an unsupported Core IR operation.");
+                _current.Terminator = _method.ReturnType == IrType.Void
+                    ? new CoreReturn(null)
+                    : new CoreReturn(expressionResult);
+            }
 
             if (_current.Terminator is null)
             {
@@ -257,6 +272,39 @@ internal static class CoreIrLowerer
 
                 case IrConditionalExpression conditional:
                     return LowerConditional(conditional, out value);
+
+                case IrInvocationExpression invocation when
+                    !invocation.TargetMethodId.IsNone && invocation.Type != IrType.Void &&
+                    _callableMethods?.Contains(invocation.TargetMethodId) == true:
+                    value = default;
+                    var arguments = new List<CoreValueId>(invocation.Arguments.Count);
+                    foreach (var argument in invocation.Arguments)
+                    {
+                        if (!LowerExpression(argument, out var loweredArgument))
+                            return false;
+                        arguments.Add(loweredArgument);
+                    }
+                    value = AllocateValue();
+                    _current.Instructions.Add(new CoreCallInstruction(
+                        value,
+                        invocation.Type,
+                        invocation.TargetMethodId,
+                        arguments));
+                    return true;
+
+                case IrInvocationExpression invocation when IsConsoleWriteLine(invocation):
+                    value = default;
+                    var hostArguments = new List<CoreValueId>(invocation.Arguments.Count);
+                    foreach (var argument in invocation.Arguments)
+                    {
+                        if (!LowerExpression(argument, out var loweredArgument))
+                            return false;
+                        hostArguments.Add(loweredArgument);
+                    }
+                    _current.Instructions.Add(new CoreHostCallInstruction(
+                        CoreHostOperation.WriteLine,
+                        hostArguments));
+                    return true;
             }
 
             value = default;
@@ -310,6 +358,13 @@ internal static class CoreIrLowerer
                 _ => 0
             };
         }
+
+        private static bool IsConsoleWriteLine(IrInvocationExpression invocation) =>
+            invocation.Target is IrMemberExpression
+            {
+                Receiver: IrVariableExpression { Symbol.Name: "Console" },
+                MemberName: "WriteLine"
+            };
 
         private bool LowerAssignment(IrAssignmentExpression assignment, out CoreValueId value)
         {

@@ -15,7 +15,8 @@ internal static class RegisterBytecodeLowerer
     public static RegisterBytecodeLoweringResult Lower(
         MethodDefinition source,
         CoreMethod core,
-        BytecodeMethodId methodId)
+        BytecodeMethodId methodId,
+        IReadOnlyDictionary<IrMethodId, BytecodeMethodId>? methodIds = null)
     {
         var registerTypes = new Dictionary<CoreValueId, IrType>();
         foreach (var parameter in core.Parameters)
@@ -23,11 +24,17 @@ internal static class RegisterBytecodeLowerer
         foreach (var local in core.Locals)
             registerTypes[local.Value] = local.Type;
         foreach (var instruction in core.Blocks.SelectMany(block => block.Instructions))
-            registerTypes[instruction.Result] = instruction.Type;
+            if (instruction is not CoreHostCallInstruction)
+                registerTypes[instruction.Result] = instruction.Type;
 
         var unsupported = registerTypes.Values.FirstOrDefault(type => !RegisterBytecodeContract.IsRuntimeType(type));
         if (unsupported is not null)
             return new(null, $"Runtime type '{unsupported.Name}' is not supported by register bytecode yet.");
+        var missingCall = core.Blocks.SelectMany(block => block.Instructions)
+            .OfType<CoreCallInstruction>()
+            .FirstOrDefault(call => methodIds is null || !methodIds.ContainsKey(call.Target));
+        if (missingCall is not null)
+            return new(null, $"Call target '{missingCall.Target.Value}' is not part of the register-bytecode module.");
 
         var offsets = new Dictionary<CoreBlockId, BytecodeOffset>();
         var nextOffset = 0;
@@ -55,6 +62,13 @@ internal static class RegisterBytecodeLowerer
                     CoreBinaryInstruction binary => new BytecodeBinaryInstruction(
                         Register(binary.Result), binary.Type, binary.Operator,
                         Register(binary.Left), Register(binary.Right)),
+                    CoreCallInstruction call => new BytecodeCallInstruction(
+                            Register(call.Result),
+                            methodIds![call.Target],
+                            call.Arguments.Select(Register).ToArray()),
+                    CoreHostCallInstruction host => new BytecodeHostCallInstruction(
+                        (BytecodeHostOperation)host.Operation,
+                        host.Arguments.Select(Register).ToArray()),
                     _ => throw new InvalidOperationException($"Unknown Core IR instruction '{instruction.GetType().Name}'.")
                 });
             }
@@ -80,14 +94,11 @@ internal static class RegisterBytecodeLowerer
             registerTypes.OrderBy(pair => pair.Key.Value)
                 .Select(pair => new RegisterBytecodeRegister(Register(pair.Key), pair.Value)).ToArray(),
             instructions);
-        var module = new RegisterBytecodeModule(RegisterBytecodeContract.CurrentVersion, [method]);
-        var validation = RegisterBytecodeContract.Validate(module);
-        return validation.Count == 0
-            ? new(method, null)
-            : new(null, string.Join(" ", validation.Select(error => error.Message)));
+        return new(method, null);
     }
 
     private static BytecodeRegister Register(CoreValueId value) => new(value.Value);
+
 }
 
 internal static class RegisterBytecodeDisassembler
@@ -114,6 +125,7 @@ internal static class RegisterBytecodeDisassembler
         BytecodeBranchInstruction { Condition: null } branch => $"branch {branch.WhenTrue.Value}",
         BytecodeBranchInstruction branch => $"branch r{branch.Condition!.Value.Value}, {branch.WhenTrue.Value}, {branch.WhenFalse!.Value.Value}",
         BytecodeCallInstruction call => $"call {call.Target.Value} ({string.Join(", ", call.Arguments.Select(value => $"r{value.Value}"))})",
+        BytecodeHostCallInstruction call => $"host.{call.Operation} ({string.Join(", ", call.Arguments.Select(value => $"r{value.Value}"))})",
         BytecodeReturnInstruction { Value: null } => "return",
         BytecodeReturnInstruction value => $"return r{value.Value!.Value.Value}",
         _ => instruction.OpCode.ToString()

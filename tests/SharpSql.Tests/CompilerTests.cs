@@ -30,7 +30,7 @@ public sealed class CompilerTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
         Assert.True(result.UsesRegisterBytecode);
-        Assert.Contains("compact register-bytecode runtime ABI 1.0", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("compact register-bytecode runtime ABI 1.1", result.Sql, StringComparison.Ordinal);
         Assert.Contains("#__sharpsql_bc_program", result.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SharpSql stack-machine runtime", result.Sql, StringComparison.Ordinal);
     }
@@ -55,8 +55,12 @@ public sealed class CompilerTests
     public void RequiredBytecodeReportsWhyAnIneligibleFallbackCannotLower()
     {
         const string source = """
-            int Recurse(int value) => value == 0 ? 0 : Recurse(value - 1);
-            Console.WriteLine(Recurse(2));
+            string Work(string value)
+            {
+                string copy = value;
+                return copy + "!";
+            }
+            Console.WriteLine(Work("nope"));
             """;
 
         var result = new SharpSqlCompiler().Transpile(source, new TranspileOptions

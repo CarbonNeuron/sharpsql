@@ -29,7 +29,31 @@ public sealed class RegisterBytecodeIntegrationTests(SqlServerFixture sqlServer)
                 return sum;
             }
 
+            int Factorial(int value) => value <= 1 ? 1 : value * Factorial(value - 1);
+
+            int Step(int value) => value + 1;
+
+            int Twice(int value)
+            {
+                value = Step(value);
+                return Step(value);
+            }
+
+            bool IsEven(int value) => value == 0 ? true : IsOdd(value - 1);
+            bool IsOdd(int value) => value == 0 ? false : IsEven(value - 1);
+
+            int Announce(int value)
+            {
+                Console.WriteLine(value);
+                return value + 1;
+            }
+
             Console.WriteLine(SumTo(9));
+            Console.WriteLine(Factorial(6));
+            Console.WriteLine(Twice(40));
+            Console.WriteLine(IsEven(10));
+            Console.WriteLine(IsOdd(10));
+            Console.WriteLine(Announce(7));
             """;
         var testCase = new ParityCase("register-bytecode", source);
         var csharp = await ParityHarness.ExecuteCSharpAsync(testCase);
@@ -48,7 +72,8 @@ public sealed class RegisterBytecodeIntegrationTests(SqlServerFixture sqlServer)
             sql.Outcome.Failure is null &&
             csharp.StandardOutput == sql.Outcome.StandardOutput,
             ParityHarness.FormatComparisonFailure(testCase, csharp, sql));
-        Assert.Contains("compact register-bytecode runtime ABI 1.0", sql.GeneratedSql, StringComparison.Ordinal);
+        Assert.Contains("compact register-bytecode runtime ABI 1.1", sql.GeneratedSql, StringComparison.Ordinal);
+        Assert.Contains("#__sharpsql_bc_arguments", sql.GeneratedSql, StringComparison.Ordinal);
         Assert.DoesNotContain("SharpSql stack-machine runtime", sql.GeneratedSql, StringComparison.Ordinal);
     }
 }

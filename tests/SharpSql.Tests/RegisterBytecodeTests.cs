@@ -60,4 +60,36 @@ public sealed class RegisterBytecodeTests
         Assert.Contains(errors, error => error.Code == RegisterBytecodeValidationCode.InvalidRegister);
         Assert.Contains(errors, error => error.Code == RegisterBytecodeValidationCode.InvalidBranch);
     }
+
+    [Fact]
+    public void LinksTypedDirectCallsAcrossABytecodeModule()
+    {
+        const string source = """
+            int marker = 0;
+            int Step(int value) => value + 1;
+            int Twice(int value) => Step(Step(value));
+            """;
+        var compiler = new SharpSqlCompiler();
+        compiler.Transpile(source, new TranspileOptions { ManagedFallback = ManagedFallbackKind.Legacy });
+        var definitions = Assert.IsType<IrProgram>(compiler.BoundProgram).Methods
+            .OrderBy(method => method.Name, StringComparer.Ordinal)
+            .ToArray();
+        var ids = definitions.Select((method, index) =>
+                (Source: method.Id, Bytecode: new BytecodeMethodId(index + 1)))
+            .ToDictionary(item => item.Source, item => item.Bytecode);
+        var methods = definitions.Select(method => Assert.IsType<RegisterBytecodeMethod>(
+            RegisterBytecodeLowerer.Lower(
+                method,
+                Assert.IsType<CoreMethod>(CoreIrLowerer.Lower(method, ids.Keys.ToArray()).Method),
+                ids[method.Id],
+                ids).Method)).ToArray();
+
+        var validation = RegisterBytecodeContract.Validate(new RegisterBytecodeModule(
+            RegisterBytecodeContract.CurrentVersion,
+            methods));
+
+        Assert.Empty(validation);
+        Assert.Equal(2, methods.Single(method => method.Name == "Twice").Instructions
+            .Count(instruction => instruction is BytecodeCallInstruction));
+    }
 }

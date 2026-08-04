@@ -5,6 +5,8 @@ namespace SharpSql;
 public sealed partial class SharpSqlCompiler
 {
     private const string BytecodeProgramTable = "#__sharpsql_bc_program";
+    private const string BytecodeArgumentsTable = "#__sharpsql_bc_arguments";
+    private const string BytecodeParametersTable = "#__sharpsql_bc_parameters";
     private const string BytecodeFramesTable = "#__sharpsql_bc_frames";
     private const string BytecodeRegistersTable = "#__sharpsql_bc_registers";
     private readonly List<VmContinuation> _bytecodeContinuations = [];
@@ -18,9 +20,11 @@ public sealed partial class SharpSqlCompiler
         if (_bytecodeMethods.Count == 0)
             return;
 
-        _sql.Line("-- SharpSql compact register-bytecode runtime ABI 1.0");
+        _sql.Line("-- SharpSql compact register-bytecode runtime ABI 1.1");
         _sql.Line($"DROP TABLE IF EXISTS {BytecodeRegistersTable};");
         _sql.Line($"DROP TABLE IF EXISTS {BytecodeFramesTable};");
+        _sql.Line($"DROP TABLE IF EXISTS {BytecodeArgumentsTable};");
+        _sql.Line($"DROP TABLE IF EXISTS {BytecodeParametersTable};");
         _sql.Line($"DROP TABLE IF EXISTS {BytecodeProgramTable};");
         _sql.Line($"CREATE TABLE {BytecodeProgramTable} (");
         using (_sql.Indent())
@@ -39,13 +43,36 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("PRIMARY KEY (__method_id, __pc)");
         }
         _sql.Line(");");
+        _sql.Line($"CREATE TABLE {BytecodeArgumentsTable} (");
+        using (_sql.Indent())
+        {
+            _sql.Line("__method_id INT NOT NULL,");
+            _sql.Line("__pc INT NOT NULL,");
+            _sql.Line("__argument_index INT NOT NULL,");
+            _sql.Line("__register_id INT NOT NULL,");
+            _sql.Line("__type TINYINT NOT NULL,");
+            _sql.Line("PRIMARY KEY (__method_id, __pc, __argument_index)");
+        }
+        _sql.Line(");");
+        _sql.Line($"CREATE TABLE {BytecodeParametersTable} (");
+        using (_sql.Indent())
+        {
+            _sql.Line("__method_id INT NOT NULL,");
+            _sql.Line("__parameter_index INT NOT NULL,");
+            _sql.Line("__register_id INT NOT NULL,");
+            _sql.Line("__type TINYINT NOT NULL,");
+            _sql.Line("PRIMARY KEY (__method_id, __parameter_index)");
+        }
+        _sql.Line(");");
         _sql.Line($"CREATE TABLE {BytecodeFramesTable} (");
         using (_sql.Indent())
         {
             _sql.Line("__id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,");
             _sql.Line("__method_id INT NOT NULL,");
             _sql.Line("__pc INT NOT NULL,");
-            _sql.Line("__return_id INT NOT NULL");
+            _sql.Line("__return_id INT NOT NULL,");
+            _sql.Line("__caller_id INT NULL,");
+            _sql.Line("__result_destination INT NULL");
         }
         _sql.Line(");");
         _sql.Line($"CREATE TABLE {BytecodeRegistersTable} (");
@@ -59,6 +86,9 @@ public sealed partial class SharpSqlCompiler
         _sql.Line(");");
         EmitRegisterBytecodeImage();
         _sql.Line("DECLARE @__sharpsql_bc_frame_id INT;");
+        _sql.Line("DECLARE @__sharpsql_bc_new_frame_id INT;");
+        _sql.Line("DECLARE @__sharpsql_bc_caller_frame_id INT;");
+        _sql.Line("DECLARE @__sharpsql_bc_result_destination INT;");
         _sql.Line("DECLARE @__sharpsql_bc_method_id INT;");
         _sql.Line("DECLARE @__sharpsql_bc_pc INT;");
         _sql.Line("DECLARE @__sharpsql_bc_opcode TINYINT;");
@@ -109,6 +139,53 @@ public sealed partial class SharpSqlCompiler
                 }
             }
         }
+
+        var parameters = _bytecodeMethods.Values
+            .OrderBy(method => method.Id.Value)
+            .SelectMany(method => method.Parameters.Select((parameter, index) =>
+                $"({method.Id.Value}, {index}, {parameter.Register.Value}, {BytecodeType(parameter.Type)})"))
+            .ToArray();
+        EmitCompactRows(
+            BytecodeParametersTable,
+            "__method_id, __parameter_index, __register_id, __type",
+            parameters);
+
+        var arguments = _bytecodeMethods.Values
+            .OrderBy(method => method.Id.Value)
+            .SelectMany(method =>
+            {
+                var types = method.Registers.ToDictionary(register => register.Register, register => register.Type);
+                return method.Instructions.SelectMany((instruction, pc) =>
+                    BytecodeCallArguments(instruction).Select((argument, index) =>
+                        $"({method.Id.Value}, {pc}, {index}, {argument.Value}, {BytecodeType(types[argument])})"));
+            })
+            .ToArray();
+        EmitCompactRows(
+            BytecodeArgumentsTable,
+            "__method_id, __pc, __argument_index, __register_id, __type",
+            arguments);
+    }
+
+    private static IReadOnlyList<BytecodeRegister> BytecodeCallArguments(
+        RegisterBytecodeInstruction instruction) => instruction switch
+        {
+            BytecodeCallInstruction call => call.Arguments,
+            BytecodeHostCallInstruction host => host.Arguments,
+            _ => []
+        };
+
+    private void EmitCompactRows(string table, string columns, IReadOnlyList<string> rows)
+    {
+        for (var offset = 0; offset < rows.Count; offset += 1000)
+        {
+            var count = Math.Min(1000, rows.Count - offset);
+            _sql.Line($"INSERT INTO {table} ({columns}) VALUES");
+            using (_sql.Indent())
+            {
+                for (var index = 0; index < count; index++)
+                    _sql.Line(rows[offset + index] + (index + 1 == count ? ";" : ","));
+            }
+        }
     }
 
     private static (string Columns, string Row) CompactRegisterBytecodeRow(
@@ -141,6 +218,9 @@ public sealed partial class SharpSqlCompiler
             BytecodeCallInstruction item =>
                 ("__method_id, __pc, __opcode, __destination, __target",
                     $"({prefix}, {Sql(item.Destination?.Value)}, {item.Target.Value})"),
+            BytecodeHostCallInstruction item =>
+                ("__method_id, __pc, __opcode, __target",
+                    $"({prefix}, {-((int)item.Operation)})"),
             BytecodeReturnInstruction item =>
                 ("__method_id, __pc, __opcode, __operand_a",
                     $"({prefix}, {Sql(item.Value?.Value)})"),
@@ -205,7 +285,36 @@ public sealed partial class SharpSqlCompiler
         }
         _sql.Line("END;");
 
-        _sql.Line($"IF @__sharpsql_bc_opcode = {(int)RegisterBytecodeOpCode.Call} THROW 51032, 'Nested register-bytecode calls are not enabled by ABI 1.0.', 1;");
+        _sql.Line($"IF @__sharpsql_bc_opcode = {(int)RegisterBytecodeOpCode.Call}");
+        _sql.Line("BEGIN");
+        using (_sql.Indent())
+        {
+            _sql.Line("IF @__sharpsql_bc_target < 0");
+            _sql.Line("BEGIN");
+            using (_sql.Indent())
+            {
+                _sql.Line("SET @__sharpsql_bc_a = NULL;");
+                _sql.Line("SET @__sharpsql_bc_type = NULL;");
+                _sql.Line($"SELECT @__sharpsql_bc_a = source.__value, @__sharpsql_bc_type = arg.__type FROM {BytecodeArgumentsTable} AS arg INNER JOIN {BytecodeRegistersTable} AS source ON source.__frame_id = @__sharpsql_bc_frame_id AND source.__register_id = arg.__register_id WHERE arg.__method_id = @__sharpsql_bc_method_id AND arg.__pc = @__sharpsql_bc_pc AND arg.__argument_index = 0;");
+                _sql.Line($"IF @__sharpsql_bc_target = {-((int)BytecodeHostOperation.WriteLine)} PRINT CASE WHEN @__sharpsql_bc_type IS NULL THEN N'' WHEN @__sharpsql_bc_type = 1 AND @__sharpsql_bc_a <> 0 THEN N'True' WHEN @__sharpsql_bc_type = 1 THEN N'False' ELSE CONVERT(NVARCHAR(4000), @__sharpsql_bc_a) END;");
+                _sql.Line("ELSE THROW 51032, 'Register bytecode host operation is not supported by this runtime ABI.', 1;");
+                EmitBytecodeAdvance();
+            }
+            _sql.Line("END;");
+            _sql.Line("SET @__sharpsql_bc_caller_frame_id = @__sharpsql_bc_frame_id;");
+            _sql.Line($"INSERT INTO {BytecodeFramesTable} (__method_id, __pc, __return_id, __caller_id, __result_destination) VALUES (@__sharpsql_bc_target, 0, 0, @__sharpsql_bc_caller_frame_id, @__sharpsql_bc_destination);");
+            _sql.Line("SET @__sharpsql_bc_new_frame_id = CONVERT(INT, SCOPE_IDENTITY());");
+            _sql.Line($"INSERT INTO {BytecodeRegistersTable} (__frame_id, __register_id, __value)");
+            _sql.Line("SELECT @__sharpsql_bc_new_frame_id, parameter.__register_id, source.__value");
+            _sql.Line($"FROM {BytecodeArgumentsTable} AS arg");
+            _sql.Line($"INNER JOIN {BytecodeParametersTable} AS parameter ON parameter.__method_id = @__sharpsql_bc_target AND parameter.__parameter_index = arg.__argument_index");
+            _sql.Line($"INNER JOIN {BytecodeRegistersTable} AS source ON source.__frame_id = @__sharpsql_bc_caller_frame_id AND source.__register_id = arg.__register_id");
+            _sql.Line("WHERE arg.__method_id = @__sharpsql_bc_method_id AND arg.__pc = @__sharpsql_bc_pc;");
+            _sql.Line($"UPDATE {BytecodeFramesTable} SET __pc = __pc + 1 WHERE __id = @__sharpsql_bc_caller_frame_id;");
+            _sql.Line("SET @__sharpsql_bc_frame_id = @__sharpsql_bc_new_frame_id;");
+            _sql.Line($"GOTO {BytecodeDispatchLabel};");
+        }
+        _sql.Line("END;");
         _sql.Line($"IF @__sharpsql_bc_opcode = {(int)RegisterBytecodeOpCode.Return}");
         _sql.Line("BEGIN");
         using (_sql.Indent())
@@ -214,9 +323,19 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("IF @__sharpsql_bc_operand_a IS NOT NULL");
             using (_sql.Indent())
                 EmitBytecodeRead("@__sharpsql_bc_operand_a", "@__sharpsql_bc_result");
-            _sql.Line("SELECT @__sharpsql_bc_jump = __return_id FROM #__sharpsql_bc_frames WHERE __id = @__sharpsql_bc_frame_id;");
+            _sql.Line("SELECT @__sharpsql_bc_jump = __return_id, @__sharpsql_bc_caller_frame_id = __caller_id, @__sharpsql_bc_result_destination = __result_destination FROM #__sharpsql_bc_frames WHERE __id = @__sharpsql_bc_frame_id;");
             _sql.Line("DELETE FROM #__sharpsql_bc_registers WHERE __frame_id = @__sharpsql_bc_frame_id;");
             _sql.Line("DELETE FROM #__sharpsql_bc_frames WHERE __id = @__sharpsql_bc_frame_id;");
+            _sql.Line("IF @__sharpsql_bc_caller_frame_id IS NOT NULL");
+            _sql.Line("BEGIN");
+            using (_sql.Indent())
+            {
+                _sql.Line("SET @__sharpsql_bc_frame_id = @__sharpsql_bc_caller_frame_id;");
+                _sql.Line($"UPDATE {BytecodeRegistersTable} SET __value = @__sharpsql_bc_result WHERE __frame_id = @__sharpsql_bc_frame_id AND __register_id = @__sharpsql_bc_result_destination;");
+                _sql.Line($"IF @@ROWCOUNT = 0 INSERT INTO {BytecodeRegistersTable} (__frame_id, __register_id, __value) VALUES (@__sharpsql_bc_frame_id, @__sharpsql_bc_result_destination, @__sharpsql_bc_result);");
+                _sql.Line($"GOTO {BytecodeDispatchLabel};");
+            }
+            _sql.Line("END;");
             _sql.Line($"GOTO {BytecodeReturnDispatchLabel};");
         }
         _sql.Line("END;");
@@ -229,6 +348,8 @@ public sealed partial class SharpSqlCompiler
         EmitLabel(BytecodeHaltLabel);
         _sql.Line($"DROP TABLE IF EXISTS {BytecodeRegistersTable};");
         _sql.Line($"DROP TABLE IF EXISTS {BytecodeFramesTable};");
+        _sql.Line($"DROP TABLE IF EXISTS {BytecodeArgumentsTable};");
+        _sql.Line($"DROP TABLE IF EXISTS {BytecodeParametersTable};");
         _sql.Line($"DROP TABLE IF EXISTS {BytecodeProgramTable};");
     }
 
@@ -368,7 +489,7 @@ public sealed partial class SharpSqlCompiler
             var returnLabel = _names.AllocateLabel($"bc_return_{callee.Name}");
             var returnId = ++_nextVmContinuationId;
             _bytecodeContinuations.Add(new VmContinuation(returnId, returnLabel));
-            _sql.Line($"INSERT INTO {BytecodeFramesTable} (__method_id, __pc, __return_id) VALUES ({callee.Id.Value}, 0, {returnId});");
+            _sql.Line($"INSERT INTO {BytecodeFramesTable} (__method_id, __pc, __return_id, __caller_id, __result_destination) VALUES ({callee.Id.Value}, 0, {returnId}, NULL, NULL);");
             _sql.Line("SET @__sharpsql_bc_frame_id = CONVERT(INT, SCOPE_IDENTITY());");
             for (var index = 0; index < captured.Count; index++)
             {

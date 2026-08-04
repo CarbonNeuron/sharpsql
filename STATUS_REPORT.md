@@ -1,5 +1,12 @@
 # SharpSql status report
 
+> Historical audit: the detailed findings below describe revision `dc34e4b` as
+> inspected on 2026-07-30. Since that audit, `main` has gained the compact
+> register-bytecode fallback. ABI 1.1 supports linked scalar methods, recursive
+> bytecode calls, and typed `Console.WriteLine` host calls; current limitations
+> and selection controls are documented in
+> [Register-bytecode fallback](docs/register-bytecode.md).
+
 Audit date: 2026-07-30
 
 Audited revision: `dc34e4bbcc7546e0b48a69d3cecf1ad2688ad606` (`main`)

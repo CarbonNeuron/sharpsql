@@ -63,65 +63,121 @@ public sealed partial class SharpSqlCompiler
                 (!UsesServiceBrokerRuntime || !method.IsAsync) &&
                 !method.IsAbstract && (method.Body is not null || method.ExpressionBody is not null)));
 
-        foreach (var method in _methods.Values.Where(method => roots.Contains(method.Id)))
+        var fallbackMethods = _methods.Values.Where(method => roots.Contains(method.Id)).ToArray();
+        if (_options.ManagedFallback == ManagedFallbackKind.Legacy)
         {
-            var reason = "Legacy fallback was explicitly selected.";
-            if (_options.ManagedFallback != ManagedFallbackKind.Legacy && TryAddBytecodeMethod(method, out reason))
-                continue;
+            foreach (var method in fallbackMethods)
+                AddVmMethod(method);
+            return;
+        }
+
+        var candidateIds = roots.ToHashSet();
+        var pending = new Queue<IrMethodId>(candidateIds);
+        while (pending.TryDequeue(out var caller))
+        {
+            foreach (var callee in graph.Callees(caller))
+            {
+                if (!_methods.TryGetValue(callee, out var method) || method.IsAsync || method.IsAbstract ||
+                    method.Body is null && method.ExpressionBody is null)
+                    continue;
+                if (candidateIds.Add(callee))
+                    pending.Enqueue(callee);
+            }
+        }
+
+        var candidates = _methods.Values.Where(method => candidateIds.Contains(method.Id)).ToArray();
+        var coreMethods = new Dictionary<IrMethodId, CoreMethod>();
+        var reasons = new Dictionary<IrMethodId, string>();
+        foreach (var method in candidates)
+        {
+            var core = CoreIrLowerer.Lower(method, candidateIds);
+            if (core.Method is null)
+                reasons[method.Id] = core.UnsupportedReason ?? "Core IR lowering failed.";
+            else
+                coreMethods.Add(method.Id, core.Method);
+        }
+
+        var changed = true;
+        while (changed)
+        {
+            changed = false;
+            foreach (var (methodId, core) in coreMethods.ToArray())
+            {
+                var missingTarget = core.Blocks.SelectMany(block => block.Instructions)
+                    .OfType<CoreCallInstruction>()
+                    .Select(call => call.Target)
+                    .FirstOrDefault(target => !coreMethods.ContainsKey(target));
+                if (missingTarget.IsNone)
+                    continue;
+                coreMethods.Remove(methodId);
+                reasons[methodId] = $"Call target '{missingTarget.Value}' cannot lower into the same bytecode module.";
+                changed = true;
+            }
+        }
+
+        var methodIds = coreMethods.Keys
+            .OrderBy(id => id.Value, StringComparer.Ordinal)
+            .Select((id, index) => (id, bytecodeId: new BytecodeMethodId(index + 1)))
+            .ToDictionary(item => item.id, item => item.bytecodeId);
+        var loweredMethods = new Dictionary<IrMethodId, RegisterBytecodeMethod>();
+        foreach (var method in candidates.Where(method => coreMethods.ContainsKey(method.Id)))
+        {
+            var lowered = RegisterBytecodeLowerer.Lower(
+                method,
+                coreMethods[method.Id],
+                methodIds[method.Id],
+                methodIds);
+            if (lowered.Method is null)
+                reasons[method.Id] = lowered.UnsupportedReason ?? "Register bytecode lowering failed.";
+            else
+                loweredMethods.Add(method.Id, lowered.Method);
+        }
+
+        var validation = RegisterBytecodeContract.Validate(new RegisterBytecodeModule(
+            RegisterBytecodeContract.CurrentVersion,
+            loweredMethods.Values.ToArray()));
+        if (validation.Count > 0)
+        {
+            var reason = string.Join(" ", validation.Select(error => error.Message));
+            foreach (var method in candidates.Where(method => loweredMethods.ContainsKey(method.Id)))
+                reasons[method.Id] = reason;
+            loweredMethods.Clear();
+        }
+
+        if (_options.ManagedFallback == ManagedFallbackKind.Auto &&
+            !RegisterBytecodeModuleIsProjectedSmaller(candidates, loweredMethods.Values))
+            loweredMethods.Clear();
+
+        foreach (var (methodId, method) in loweredMethods)
+            _bytecodeMethods.Add(methodId, method);
+
+        foreach (var method in fallbackMethods.Where(method => !_bytecodeMethods.ContainsKey(method.Id)))
+        {
             if (_options.ManagedFallback == ManagedFallbackKind.Bytecode)
             {
                 AddDiagnostic(
                     "SS8001",
-                    $"Method '{method.Name}' cannot use the required register-bytecode fallback: {reason}",
+                    $"Method '{method.Name}' cannot use the required register-bytecode fallback: " +
+                    reasons.GetValueOrDefault(method.Id, "A linked bytecode dependency could not be emitted."),
                     method.Source);
             }
             AddVmMethod(method);
         }
     }
 
-    private bool TryAddBytecodeMethod(MethodDefinition definition, out string reason)
-    {
-        var core = CoreIrLowerer.Lower(definition);
-        if (core.Method is null)
-        {
-            reason = core.UnsupportedReason ?? "Core IR lowering failed.";
-            return false;
-        }
-
-        var lowered = RegisterBytecodeLowerer.Lower(
-            definition,
-            core.Method,
-            new BytecodeMethodId(_bytecodeMethods.Count + 1));
-        if (lowered.Method is null)
-        {
-            reason = lowered.UnsupportedReason ?? "Register bytecode lowering failed.";
-            return false;
-        }
-
-        if (_options.ManagedFallback == ManagedFallbackKind.Auto &&
-            !RegisterBytecodeIsProjectedSmaller(definition, lowered.Method))
-        {
-            reason = "The compact image is not projected to amortize the interpreter in this program.";
-            return false;
-        }
-
-        _bytecodeMethods.Add(definition.Id, lowered.Method);
-        reason = string.Empty;
-        return true;
-    }
-
-    private static bool RegisterBytecodeIsProjectedSmaller(
-        MethodDefinition definition,
-        RegisterBytecodeMethod bytecode)
+    private static bool RegisterBytecodeModuleIsProjectedSmaller(
+        IReadOnlyCollection<MethodDefinition> definitions,
+        IEnumerable<RegisterBytecodeMethod> bytecodeMethods)
     {
         // The interpreter is emitted once per program. This deliberately conservative
         // first cost model prevents Auto from making ordinary small VM methods larger.
         const int interpreterCost = 12_000;
         const int encodedInstructionCost = 28;
-        var projectedBytecode = interpreterCost + bytecode.Instructions.Count * encodedInstructionCost;
-        var projectedLegacy = Math.Max(
+        var projectedBytecode = interpreterCost +
+            bytecodeMethods.Sum(method => method.Instructions.Count) * encodedInstructionCost;
+        var projectedLegacy = definitions.Sum(definition => Math.Max(
             definition.Source.Span.Length,
-            definition.StatementCount * 45);
+            definition.StatementCount * 45));
         return projectedBytecode < projectedLegacy;
     }
 

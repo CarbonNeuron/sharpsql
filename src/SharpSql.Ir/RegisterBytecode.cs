@@ -61,6 +61,15 @@ internal sealed record BytecodeCallInstruction(
     BytecodeMethodId Target,
     IReadOnlyList<BytecodeRegister> Arguments) : RegisterBytecodeInstruction(RegisterBytecodeOpCode.Call);
 
+internal enum BytecodeHostOperation
+{
+    WriteLine = 1
+}
+
+internal sealed record BytecodeHostCallInstruction(
+    BytecodeHostOperation Operation,
+    IReadOnlyList<BytecodeRegister> Arguments) : RegisterBytecodeInstruction(RegisterBytecodeOpCode.Call);
+
 internal sealed record BytecodeReturnInstruction(
     BytecodeRegister? Value) : RegisterBytecodeInstruction(RegisterBytecodeOpCode.Return);
 
@@ -98,7 +107,7 @@ internal sealed record RegisterBytecodeValidationError(
 
 internal static class RegisterBytecodeContract
 {
-    public static RegisterBytecodeVersion CurrentVersion { get; } = new(1, 0);
+    public static RegisterBytecodeVersion CurrentVersion { get; } = new(1, 1);
 
     public static IReadOnlyList<RegisterBytecodeValidationError> Validate(RegisterBytecodeModule module)
     {
@@ -238,6 +247,36 @@ internal static class RegisterBytecodeContract
                 if (!methods.TryGetValue(call.Target, out var target) || target.Parameters.Count != call.Arguments.Count)
                     errors.Add(new(RegisterBytecodeValidationCode.InvalidCall,
                         $"Call target {call.Target.Value} is missing or has a different arity.", method.Id, offset));
+                else
+                {
+                    for (var index = 0; index < call.Arguments.Count; index++)
+                    {
+                        if (registers.TryGetValue(call.Arguments[index], out var argumentType) &&
+                            argumentType != target.Parameters[index].Type)
+                        {
+                            errors.Add(new(RegisterBytecodeValidationCode.InvalidCall,
+                                $"Call argument {index} has type '{argumentType.Name}', expected '{target.Parameters[index].Type.Name}'.",
+                                method.Id, offset));
+                        }
+                    }
+                    if (target.ReturnType == IrType.Void && call.Destination is not null ||
+                        target.ReturnType != IrType.Void &&
+                        (call.Destination is null ||
+                         registers.TryGetValue(call.Destination.Value, out var destinationType) && destinationType != target.ReturnType))
+                    {
+                        errors.Add(new(RegisterBytecodeValidationCode.InvalidCall,
+                            "Call destination does not match the target return type.", method.Id, offset));
+                    }
+                }
+                break;
+            case BytecodeHostCallInstruction host:
+                foreach (var argument in host.Arguments)
+                    Require(argument);
+                if (host.Operation != BytecodeHostOperation.WriteLine || host.Arguments.Count > 1)
+                {
+                    errors.Add(new(RegisterBytecodeValidationCode.InvalidCall,
+                        $"Host operation '{host.Operation}' has an invalid argument shape.", method.Id, offset));
+                }
                 break;
             case BytecodeReturnInstruction @return:
                 if (@return.Value is { } value)

@@ -41,6 +41,21 @@ internal sealed record CoreConvertInstruction(
     IrType Type,
     CoreValueId Operand) : CoreInstruction(Result, Type);
 
+internal sealed record CoreCallInstruction(
+    CoreValueId Result,
+    IrType Type,
+    IrMethodId Target,
+    IReadOnlyList<CoreValueId> Arguments) : CoreInstruction(Result, Type);
+
+internal enum CoreHostOperation
+{
+    WriteLine = 1
+}
+
+internal sealed record CoreHostCallInstruction(
+    CoreHostOperation Operation,
+    IReadOnlyList<CoreValueId> Arguments) : CoreInstruction(default, IrType.Void);
+
 internal abstract record CoreTerminator;
 
 internal sealed record CoreJump(CoreBlockId Target) : CoreTerminator;
