@@ -5,6 +5,113 @@ namespace SharpSql.Tests;
 public sealed class RegisterBytecodeTests
 {
     [Fact]
+    public void CanonicalImageIdentityIsDeterministicAndChangesWithExecutableData()
+    {
+        var firstMethod = ImageMethod(1, 41);
+        var secondMethod = ImageMethod(2, 42);
+        var version = RegisterBytecodeContract.CurrentVersion;
+
+        var first = RegisterBytecodeImage.Create(new RegisterBytecodeModule(
+            version,
+            [secondMethod, firstMethod]));
+        var reordered = RegisterBytecodeImage.Create(new RegisterBytecodeModule(
+            version,
+            [firstMethod, secondMethod]));
+        var changed = RegisterBytecodeImage.Create(new RegisterBytecodeModule(
+            version,
+            [firstMethod, ImageMethod(2, 43)]));
+
+        Assert.Equal(64, first.HexId.Length);
+        Assert.Equal(first.HexId, reordered.HexId);
+        Assert.NotEqual(first.HexId, changed.HexId);
+        Assert.Equal(4, first.InstructionCount);
+        Assert.Equal(0, first.ArgumentCount);
+        Assert.Equal(0, first.ParameterCount);
+
+        static RegisterBytecodeMethod ImageMethod(int id, int constant) => new(
+            new BytecodeMethodId(id),
+            new IrMethodId($"M{id}"),
+            $"M{id}",
+            IrType.Int,
+            [],
+            [new RegisterBytecodeRegister(new BytecodeRegister(1), IrType.Int)],
+            [
+                new BytecodeConstantInstruction(new BytecodeRegister(1), IrType.Int, constant),
+                new BytecodeReturnInstruction(new BytecodeRegister(1))
+            ]);
+    }
+
+    [Fact]
+    public void DurableInlineBytecodeUsesVersionedExecutionAndImageScopedRowstore()
+    {
+        const string source = """
+            string Decorate(string value)
+            {
+                string prefix = "durable-bytecode-unit:";
+                return prefix + value;
+            }
+
+            Console.WriteLine(Decorate("ok"));
+            """;
+
+        var result = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions
+            {
+                Execution = RuntimeExecutionKind.Inline,
+                Durability = RuntimeDurabilityKind.Durable,
+                UseMemoryOptimizedTables = false,
+                ManagedFallback = ManagedFallbackKind.Bytecode,
+                MaxInlineStatements = 1
+            });
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.True(result.UsesRegisterBytecode);
+        Assert.Contains("CREATE TABLE [SharpSql].[BytecodeImages]", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE [SharpSql].[BytecodeInstructionsV1]", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE [SharpSql].[BytecodeFramesV1]", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE [SharpSql].[BytecodeRegistersV1]", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("[RuntimeName] = N'RegisterBytecode'", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("IF @__sharpsql_bc_schema_version <> 1", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("@Resource = N'SharpSql.Bytecode.Image.", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("The installed SharpSql register-bytecode image is incomplete or incompatible", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("DECLARE @__sharpsql_bc_image_id BINARY(32) = 0x", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("__image_id = @__sharpsql_bc_image_id", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("__execution_id = @__sharpsql_execution_id", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("INSERT INTO [SharpSql].[BytecodeFramesV1] (__execution_id, __image_id", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("DELETE FROM [SharpSql].[BytecodeRegistersV1] WHERE __execution_id = @__sharpsql_execution_id;", result.Sql, StringComparison.Ordinal);
+        Assert.Equal(2, Count(result.Sql, "DELETE FROM [SharpSql].[BytecodeRegistersV1] WHERE __execution_id = @__sharpsql_execution_id;"));
+        Assert.DoesNotContain("CREATE TABLE #__sharpsql_bc_", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DROP TABLE IF EXISTS #__sharpsql_bc_", result.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DurableMemoryOptimizedBytecodeKeepsTheExistingLocalInterpreterState()
+    {
+        const string source = """
+            int CountDown(int value) => value == 0 ? 0 : CountDown(value - 1);
+            Console.WriteLine(CountDown(3));
+            """;
+
+        var result = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions
+            {
+                Execution = RuntimeExecutionKind.Inline,
+                Durability = RuntimeDurabilityKind.Durable,
+                UseMemoryOptimizedTables = true,
+                ManagedFallback = ManagedFallbackKind.Bytecode,
+                MaxInlineStatements = 1
+            });
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.True(result.UsesRegisterBytecode);
+        Assert.Contains("CREATE TABLE #__sharpsql_bc_program", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE #__sharpsql_bc_frames", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("[SharpSql].[BytecodeImages]", result.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void LowersCoreBlocksToEightFamilyRegisterBytecodeDeterministically()
     {
         const string source = """
@@ -206,5 +313,17 @@ public sealed class RegisterBytecodeTests
 
         Assert.Contains(errors, error => error.Code == RegisterBytecodeValidationCode.InvalidInstruction);
         Assert.Contains(errors, error => error.Code == RegisterBytecodeValidationCode.InvalidReturn);
+    }
+
+    private static int Count(string text, string value)
+    {
+        var count = 0;
+        var offset = 0;
+        while ((offset = text.IndexOf(value, offset, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            offset += value.Length;
+        }
+        return count;
     }
 }

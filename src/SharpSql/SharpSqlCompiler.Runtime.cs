@@ -141,6 +141,7 @@ public sealed partial class SharpSqlCompiler
             return;
 
         EmitLabel(RuntimeCleanupLabel);
+        EmitDurableRegisterBytecodeCleanup();
         EmitDurableVmCleanup();
     }
 
@@ -155,6 +156,7 @@ public sealed partial class SharpSqlCompiler
         using (_sql.Indent())
         {
             _sql.Line("-- Preserve the original error after reclaiming this execution's shared state.");
+            EmitDurableRegisterBytecodeCleanup();
             EmitDurableVmCleanup();
             EmitDurableHeapCleanup();
             EmitServiceBrokerRegistryCleanup();

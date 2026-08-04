@@ -1,3 +1,4 @@
+using Microsoft.Data.SqlClient;
 using Xunit;
 
 namespace SharpSql.IntegrationTests;
@@ -5,6 +6,116 @@ namespace SharpSql.IntegrationTests;
 [Collection(SqlServerCollection.Name)]
 public sealed class RegisterBytecodeIntegrationTests(SqlServerFixture sqlServer)
 {
+    [Fact]
+    public async Task DurableImagesAreInstalledOnceWhileConcurrentExecutionsStayIsolatedAndCleanUp()
+    {
+        const string marker = "durable-register-image-20260804:";
+        const string sourceTemplate = """
+            string Decorate(string value)
+            {
+                string prefix = "durable-register-image-20260804:";
+                return prefix + value;
+            }
+
+            Console.WriteLine(Decorate("VALUE"));
+            """;
+        var firstId = Guid.Parse("d94b1096-d1d7-4e0b-a46f-9af14e23a101");
+        var secondId = Guid.Parse("d94b1096-d1d7-4e0b-a46f-9af14e23a102");
+        var thirdId = Guid.Parse("d94b1096-d1d7-4e0b-a46f-9af14e23a103");
+        var first = CompileDurableBytecode(sourceTemplate.Replace("VALUE", "alpha", StringComparison.Ordinal));
+        var second = CompileDurableBytecode(sourceTemplate.Replace("VALUE", "beta", StringComparison.Ordinal));
+
+        await using var firstConnection = await OpenConnectionAsync();
+        await using var secondConnection = await OpenConnectionAsync();
+        var outputs = await Task.WhenAll(
+            ExecuteAsync(firstConnection, WithExecutionId(first.Sql, firstId)),
+            ExecuteAsync(secondConnection, WithExecutionId(second.Sql, secondId)));
+
+        Assert.Equal([marker + "alpha", marker + "beta"], outputs);
+        Assert.Equal(0L, await CountExecutionRowsAsync(firstConnection, "BytecodeFramesV1", firstId));
+        Assert.Equal(0L, await CountExecutionRowsAsync(firstConnection, "BytecodeRegistersV1", firstId));
+        Assert.Equal(0L, await CountExecutionRowsAsync(firstConnection, "BytecodeFramesV1", secondId));
+        Assert.Equal(0L, await CountExecutionRowsAsync(firstConnection, "BytecodeRegistersV1", secondId));
+
+        var imageCount = await ScalarAsync(
+            firstConnection,
+            """
+            SELECT COUNT_BIG(*)
+            FROM (
+                SELECT DISTINCT [__image_id]
+                FROM [SharpSql].[BytecodeInstructionsV1]
+                WHERE [__constant_text] = @marker
+            ) AS [image];
+            """,
+            new SqlParameter("@marker", marker));
+        Assert.Equal(1L, imageCount);
+        Assert.Equal(1L, await ScalarAsync(
+            firstConnection,
+            """
+            SELECT COUNT_BIG(*)
+            FROM [SharpSql].[BytecodeImages] AS [image]
+            WHERE [image].[__image_id] IN (
+                SELECT [__image_id]
+                FROM [SharpSql].[BytecodeInstructionsV1]
+                WHERE [__constant_text] = @marker
+            )
+            AND [image].[__instruction_count] = (
+                SELECT COUNT_BIG(*) FROM [SharpSql].[BytecodeInstructionsV1] AS [instruction]
+                WHERE [instruction].[__image_id] = [image].[__image_id]
+            )
+            AND [image].[__argument_count] = (
+                SELECT COUNT_BIG(*) FROM [SharpSql].[BytecodeArgumentsV1] AS [argument]
+                WHERE [argument].[__image_id] = [image].[__image_id]
+            )
+            AND [image].[__parameter_count] = (
+                SELECT COUNT_BIG(*) FROM [SharpSql].[BytecodeParametersV1] AS [parameter]
+                WHERE [parameter].[__image_id] = [image].[__image_id]
+            );
+            """,
+            new SqlParameter("@marker", marker)));
+
+        var installedAt = await DateTimeScalarAsync(firstConnection, marker);
+        var thirdOutput = await ExecuteAsync(firstConnection, WithExecutionId(first.Sql, thirdId));
+        Assert.Equal(marker + "alpha", thirdOutput);
+        Assert.Equal(installedAt, await DateTimeScalarAsync(firstConnection, marker));
+        Assert.Equal(0L, await CountExecutionRowsAsync(firstConnection, "BytecodeFramesV1", thirdId));
+        Assert.Equal(0L, await CountExecutionRowsAsync(firstConnection, "BytecodeRegistersV1", thirdId));
+    }
+
+    [Fact]
+    public async Task DurableInterpreterFailureCleansMutableStateButRetainsTheImage()
+    {
+        const string marker = "durable-register-failure-20260804";
+        const string source = """
+            int Fail(int divisor)
+            {
+                Console.WriteLine("durable-register-failure-20260804");
+                return 10 / divisor;
+            }
+
+            Console.WriteLine(Fail(0));
+            """;
+        var executionId = Guid.Parse("d94b1096-d1d7-4e0b-a46f-9af14e23a104");
+        var result = CompileDurableBytecode(source);
+
+        await using var connection = await OpenConnectionAsync();
+        connection.FireInfoMessageEventOnUserErrors = false;
+        var exception = await Assert.ThrowsAsync<SqlException>(() =>
+            ExecuteAsync(connection, WithExecutionId(result.Sql, executionId)));
+
+        Assert.Equal(8134, exception.Number);
+        Assert.Equal(0L, await CountExecutionRowsAsync(connection, "BytecodeFramesV1", executionId));
+        Assert.Equal(0L, await CountExecutionRowsAsync(connection, "BytecodeRegistersV1", executionId));
+        Assert.Equal(1L, await ScalarAsync(
+            connection,
+            """
+            SELECT COUNT_BIG(*)
+            FROM [SharpSql].[BytecodeInstructionsV1]
+            WHERE [__constant_text] = @marker;
+            """,
+            new SqlParameter("@marker", marker)));
+    }
+
     [Fact]
     public async Task CompactFallbackExecutesScalarLoopsWithCSharpParity()
     {
@@ -129,5 +240,105 @@ public sealed class RegisterBytecodeIntegrationTests(SqlServerFixture sqlServer)
         Assert.Contains("__text_value NVARCHAR(MAX)", sql.GeneratedSql, StringComparison.Ordinal);
         Assert.DoesNotContain("SharpSql stack-machine runtime", sql.GeneratedSql, StringComparison.Ordinal);
         Assert.DoesNotContain("#__sharpsql_stack", sql.GeneratedSql, StringComparison.Ordinal);
+    }
+
+    private static TranspileResult CompileDurableBytecode(string source)
+    {
+        var result = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions
+            {
+                Execution = RuntimeExecutionKind.Inline,
+                Durability = RuntimeDurabilityKind.Durable,
+                UseMemoryOptimizedTables = false,
+                ManagedFallback = ManagedFallbackKind.Bytecode,
+                MaxInlineStatements = 1
+            });
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.True(result.UsesRegisterBytecode);
+        Assert.DoesNotContain("CREATE TABLE #__sharpsql_bc_", result.Sql, StringComparison.Ordinal);
+        return result;
+    }
+
+    private static string WithExecutionId(string sql, Guid executionId)
+    {
+        const string generated = "DECLARE @__sharpsql_execution_id UNIQUEIDENTIFIER = NEWID();";
+        Assert.Contains(generated, sql, StringComparison.Ordinal);
+        return sql.Replace(
+            generated,
+            $"DECLARE @__sharpsql_execution_id UNIQUEIDENTIFIER = '{executionId:D}';",
+            StringComparison.Ordinal);
+    }
+
+    private async Task<SqlConnection> OpenConnectionAsync()
+    {
+        var connection = new SqlConnection(sqlServer.ConnectionString)
+        {
+            FireInfoMessageEventOnUserErrors = true
+        };
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        return connection;
+    }
+
+    private static async Task<string> ExecuteAsync(SqlConnection connection, string sql)
+    {
+        var messages = new List<string>();
+        connection.InfoMessage += HandleMessage;
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.CommandTimeout = 60;
+            await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            return string.Join(Environment.NewLine, messages);
+        }
+        finally
+        {
+            connection.InfoMessage -= HandleMessage;
+        }
+
+        void HandleMessage(object sender, SqlInfoMessageEventArgs args)
+        {
+            foreach (SqlError error in args.Errors)
+                if (error.Class == 0)
+                    messages.Add(error.Message);
+        }
+    }
+
+    private static async Task<long> CountExecutionRowsAsync(
+        SqlConnection connection,
+        string table,
+        Guid executionId) => await ScalarAsync(
+            connection,
+            $"SELECT COUNT_BIG(*) FROM [SharpSql].[{table}] WHERE [__execution_id] = @executionId;",
+            new SqlParameter("@executionId", executionId));
+
+    private static async Task<long> ScalarAsync(
+        SqlConnection connection,
+        string sql,
+        params SqlParameter[] parameters)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddRange(parameters);
+        return Convert.ToInt64(
+            await command.ExecuteScalarAsync(TestContext.Current.CancellationToken),
+            System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<DateTime> DateTimeScalarAsync(SqlConnection connection, string marker)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT [image].[__installed_at_utc]
+            FROM [SharpSql].[BytecodeImages] AS [image]
+            WHERE [image].[__image_id] IN (
+                SELECT [__image_id]
+                FROM [SharpSql].[BytecodeInstructionsV1]
+                WHERE [__constant_text] = @marker
+            );
+            """;
+        command.Parameters.AddWithValue("@marker", marker);
+        return (DateTime)(await command.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
     }
 }

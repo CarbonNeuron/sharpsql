@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-This document proposes an incremental persistence model for the compact register-bytecode runtime. It is a design, not a description of implemented behavior. ABI 1.2 currently stores its program image, call metadata, frames, and registers in connection-local temporary tables. Even when the surrounding heap or legacy VM uses durable storage, register-bytecode execution remains local to one T-SQL batch.
+This document defines the incremental persistence model for the compact register-bytecode runtime. The bounded durable-rowstore inline slice described below is implemented. Other configurations still store the program image, call metadata, frames, and registers in connection-local temporary tables, and cross-session resumption remains future work.
 
 The first implementation slice is deliberately limited to synchronous, inline execution with ordinary durable rowstore tables. It makes program images reusable and frame state execution-scoped without changing bytecode semantics or promising restart resumption.
 
@@ -40,7 +40,7 @@ The compiler validates a `RegisterBytecodeModule` before hashing or emission. It
 
 The serialization excludes source names, comments, timestamps, SQL formatting, and compiler-local labels. Integers use a fixed-width or otherwise unambiguous binary representation; null fields have an explicit encoding. SHA-256 over those bytes produces `BytecodeImageId`.
 
-The existing compact-row logic in `SharpSqlCompiler.RegisterBytecode.cs` should be extracted into one image model/emitter used by both temporary and durable storage. This prevents local and durable encodings from drifting. Changing any executable row or ABI version must change the image ID.
+The compact-row logic in `SharpSqlCompiler.RegisterBytecode.cs` is shared by temporary and durable storage, while `RegisterBytecodeImage` canonicalizes the same validated executable contract for hashing. This prevents local and durable encodings from drifting. Changing any executable row or ABI version changes the image ID.
 
 ## Proposed rowstore schema
 
@@ -88,11 +88,11 @@ Mutable execution state uses separate versioned tables:
 
 ```text
 ExecutionId, FrameId, ImageId, MethodId, Pc,
-CallerFrameId, ResultDestination, HostContinuation
+CallerFrameId, ResultDestination, ReturnId
 primary key (ExecutionId, FrameId)
 ```
 
-`FrameId` should be a globally allocated `BIGINT`. `HostContinuation` preserves the first slice's native batch return path; it is not a cross-session continuation contract.
+`FrameId` is a globally allocated `BIGINT`. `ReturnId` preserves the first slice's native batch return path; it is not a cross-session continuation contract.
 
 `[SharpSql].[BytecodeRegistersV1]` stores:
 
