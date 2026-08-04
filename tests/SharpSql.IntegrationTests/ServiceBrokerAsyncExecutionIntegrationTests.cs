@@ -6,6 +6,8 @@ namespace SharpSql.IntegrationTests;
 [Collection(SqlServerCollection.Name)]
 public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture sqlServer)
 {
+    private readonly string _databaseName = $"SharpSqlBrokerAsyncTests_{Guid.NewGuid():N}";
+
     [Fact]
     public async Task PersistsTheBrokerErrorCodeAndDescriptionForAnUndeliverableRootTask()
     {
@@ -645,19 +647,18 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
 
     private async Task<SqlConnection> OpenBrokerDatabaseAsync()
     {
-        const string databaseName = "SharpSqlBrokerAsyncTests";
         await using (var master = new SqlConnection(sqlServer.ConnectionString))
         {
             await master.OpenAsync(TestContext.Current.CancellationToken);
             await using var command = master.CreateCommand();
             command.CommandText = $"""
-                IF DB_ID(N'{databaseName}') IS NULL CREATE DATABASE [{databaseName}];
+                IF DB_ID(N'{_databaseName}') IS NULL CREATE DATABASE [{_databaseName}];
                 IF EXISTS (
                     SELECT 1
                     FROM sys.databases
-                    WHERE [name] = N'{databaseName}' AND [is_broker_enabled] = 0
+                    WHERE [name] = N'{_databaseName}' AND [is_broker_enabled] = 0
                 )
-                    ALTER DATABASE [{databaseName}] SET ENABLE_BROKER;
+                    ALTER DATABASE [{_databaseName}] SET ENABLE_BROKER;
                 """;
             command.CommandTimeout = 60;
             await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
@@ -665,7 +666,7 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
 
         var connectionString = new SqlConnectionStringBuilder(sqlServer.ConnectionString)
         {
-            InitialCatalog = databaseName
+            InitialCatalog = _databaseName
         }.ConnectionString;
         var connection = new SqlConnection(connectionString)
         {
