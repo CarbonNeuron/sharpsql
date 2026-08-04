@@ -10,7 +10,7 @@ public sealed partial class SharpSqlCompiler
     private const string LocalBytecodeFramesTable = "#__sharpsql_bc_frames";
     private const string LocalBytecodeRegistersTable = "#__sharpsql_bc_registers";
     private const string BytecodeImageIdVariable = "@__sharpsql_bc_image_id";
-    private readonly List<VmContinuation> _bytecodeContinuations = [];
+    private List<VmContinuation> _bytecodeContinuations = [];
     private RegisterBytecodeImage? _bytecodeImage;
 
     private bool UsesDurableRowstoreBytecode =>
@@ -38,6 +38,11 @@ public sealed partial class SharpSqlCompiler
         new RegisterBytecodeModule(
             RegisterBytecodeContract.CurrentVersion,
             _bytecodeMethods.Values.OrderBy(method => method.Id.Value).ToArray()));
+    private bool ServiceBrokerWorkerOwnsBytecodeRuntime =>
+        UsesServiceBrokerRuntime &&
+        !_emittingServiceBrokerWorker &&
+        _boundProgram is not null &&
+        ProgramRequiresAsyncExecution(_boundProgram);
 
     private string BytecodeDispatchLabel => "__sharpsql_bc_dispatch";
     private string BytecodeReturnDispatchLabel => "__sharpsql_bc_return_dispatch";
@@ -45,7 +50,7 @@ public sealed partial class SharpSqlCompiler
 
     private void EmitRegisterBytecodePreamble()
     {
-        if (_bytecodeMethods.Count == 0)
+        if (_bytecodeMethods.Count == 0 || ServiceBrokerWorkerOwnsBytecodeRuntime)
             return;
 
         _sql.Line("-- SharpSql compact register-bytecode runtime ABI 1.2");
@@ -392,7 +397,7 @@ public sealed partial class SharpSqlCompiler
 
     private void EmitRegisterBytecodeEpilogue()
     {
-        if (_bytecodeMethods.Count == 0)
+        if (_bytecodeMethods.Count == 0 || ServiceBrokerWorkerOwnsBytecodeRuntime)
             return;
 
         _sql.Line($"GOTO {BytecodeHaltLabel};");
@@ -446,7 +451,13 @@ public sealed partial class SharpSqlCompiler
                 _sql.Line("SET @__sharpsql_bc_a_text = NULL;");
                 _sql.Line("SET @__sharpsql_bc_type = NULL;");
                 _sql.Line($"SELECT @__sharpsql_bc_a = source.__value, @__sharpsql_bc_a_text = source.__text_value, @__sharpsql_bc_type = source.__type FROM {BytecodeArgumentsTable} AS arg INNER JOIN {BytecodeRegistersTable} AS source ON source.__frame_id = @__sharpsql_bc_frame_id AND source.__register_id = arg.__register_id{BytecodeExecutionPredicate("source")} WHERE arg.__method_id = @__sharpsql_bc_method_id AND arg.__pc = @__sharpsql_bc_pc AND arg.__argument_index = 0{BytecodeImagePredicate("arg")};");
-                _sql.Line($"IF @__sharpsql_bc_target = {-((int)BytecodeHostOperation.WriteLine)} PRINT CASE WHEN @__sharpsql_bc_type IS NULL THEN N'' WHEN @__sharpsql_bc_type = 4 THEN COALESCE(@__sharpsql_bc_a_text, N'') WHEN @__sharpsql_bc_type = 1 AND @__sharpsql_bc_a <> 0 THEN N'True' WHEN @__sharpsql_bc_type = 1 THEN N'False' ELSE CONVERT(NVARCHAR(4000), @__sharpsql_bc_a) END;");
+                _sql.Line($"IF @__sharpsql_bc_target = {-((int)BytecodeHostOperation.WriteLine)}");
+                _sql.Line("BEGIN");
+                using (_sql.Indent())
+                {
+                    EmitPrintSql("CASE WHEN @__sharpsql_bc_type IS NULL THEN N'' WHEN @__sharpsql_bc_type = 4 THEN COALESCE(@__sharpsql_bc_a_text, N'') WHEN @__sharpsql_bc_type = 1 AND @__sharpsql_bc_a <> 0 THEN N'True' WHEN @__sharpsql_bc_type = 1 THEN N'False' ELSE CONVERT(NVARCHAR(4000), @__sharpsql_bc_a) END");
+                }
+                _sql.Line("END");
                 _sql.Line("ELSE THROW 51032, 'Register bytecode host operation is not supported by this runtime ABI.', 1;");
                 EmitBytecodeAdvance();
             }

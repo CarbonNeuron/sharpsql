@@ -4,7 +4,8 @@
 > inspected on 2026-07-30. Since that audit, `main` has gained the compact
 > register-bytecode fallback. ABI 1.2 supports linked scalar methods, recursive
 > bytecode calls, nullable string values, typed `Console.WriteLine` host calls, and
-> execution-partitioned durable rowstore state; current limitations
+> execution-partitioned durable rowstore state. Service Broker workers can execute
+> eligible synchronous bytecode helpers to completion; current limitations
 > and selection controls are documented in
 > [Register-bytecode fallback](docs/register-bytecode.md).
 

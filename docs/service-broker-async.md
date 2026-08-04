@@ -172,7 +172,9 @@ The executable first slice includes:
   `Task.Delay`, with pre-await failures captured on the corresponding child task;
 - generation-scoped `Task.WhenAll` dependency joins whose final child queues exactly
   one continuation message;
-- millisecond `Task.Delay`, task results, fault propagation, and proxied worker output; and
+- millisecond `Task.Delay`, task results, fault propagation, and proxied worker output;
+- synchronous register-bytecode helper calls that execute to completion inside one
+  activation, including recursive/direct/void calls and `WriteLine` through durable output; and
 - ordinary `try`/`catch` around resumed code, including `ApplicationException` and
   `SharpSql.DatabaseException` mappings.
 
@@ -183,8 +185,9 @@ method, using the `Task.Delay(int milliseconds)` overload. Parameters and captur
 entry scalars/object references are spilled to JSON. Captured objects keep their shared
 durable identity, but direct assignment to a captured entry local is rejected until
 shared closure cells exist. Other locals declared before an await, nested returns, and
-calls requiring the stack-machine fallback are likewise rejected with async-specific
-diagnostics rather than producing invalid worker SQL or silently losing state. General
+calls requiring the legacy stack-machine fallback are likewise rejected with `SS7005`.
+Eligible synchronous register-bytecode helpers are accepted, but they cannot await or
+preserve bytecode frames across a worker suspension. General
 local/closure spilling, control-flow splitting, multiple/nested awaits, async recursion,
 and source-level `CancellationToken` lowering remain future work. Operators can cancel
 a whole execution through the lifecycle procedure above.

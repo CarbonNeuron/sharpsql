@@ -645,6 +645,65 @@ public sealed class ServiceBrokerAsyncExecutionIntegrationTests(SqlServerFixture
         await AssertExecutionsCleanedUpAsync(connection);
     }
 
+    [Fact]
+    public async Task ExecutesRegisterBytecodeHelpersToCompletionInsideBrokerWorkers()
+    {
+        await using var connection = await OpenBrokerDatabaseAsync();
+        await ExecuteAsync(connection, SharpSqlServiceBrokerRuntime.GenerateProvisioningSql(), 120);
+
+        const string source = """
+            var values = new List<int> { 6 };
+            var tasks = values.Select(Work).ToList();
+            await Task.WhenAll(tasks);
+            var results = tasks.Select(task => task.Result);
+            foreach (int result in results)
+                Console.WriteLine("result:" + result);
+
+            async Task<int> Work(int value)
+            {
+                await Task.Delay(25);
+                Emit(Decorate("worker"));
+                return Fib(value);
+            }
+
+            string Echo(string value)
+            {
+                string copy = value;
+                return copy;
+            }
+
+            string Decorate(string value)
+            {
+                string decorated = "[" + Echo(value);
+                return decorated + "]";
+            }
+
+            void Emit(string value)
+            {
+                string output = value;
+                Console.WriteLine(output);
+            }
+
+            int Fib(int value) => value <= 1 ? value : Fib(value - 1) + Fib(value - 2);
+            """;
+        var compilation = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions
+            {
+                RuntimeStorage = RuntimeStorageKind.ServiceBroker,
+                ManagedFallback = ManagedFallbackKind.Bytecode,
+                MaxInlineStatements = 1
+            });
+        Assert.True(compilation.Success, string.Join(Environment.NewLine, compilation.Diagnostics));
+        Assert.True(compilation.UsesRegisterBytecode);
+
+        var messages = await ExecuteCapturingMessagesAsync(connection, compilation.Sql);
+
+        Assert.Contains("[worker]", messages);
+        Assert.Contains("result:8", messages);
+        await AssertExecutionsCleanedUpAsync(connection);
+    }
+
     private async Task<SqlConnection> OpenBrokerDatabaseAsync()
     {
         await using (var master = new SqlConnection(sqlServer.ConnectionString))

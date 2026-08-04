@@ -14,7 +14,7 @@ public sealed partial class SharpSqlCompiler
     private const int ServiceBrokerUnhandledDatabaseError = 51923;
     private const int ServiceBrokerCanceledError = 51924;
     private const int ServiceBrokerWorkerTransactionRequiredError = 51927;
-    private const string ServiceBrokerProgramAbi = "2";
+    private const string ServiceBrokerProgramAbi = "3";
 
     private bool _emittingServiceBrokerWorker;
     private bool _serviceBrokerProgramEmitted;
@@ -90,11 +90,11 @@ public sealed partial class SharpSqlCompiler
         out ServiceBrokerProgramPlan plan)
     {
         plan = null!;
-        if (_vmMethods.Count > 0 || _bytecodeMethods.Count > 0)
+        if (_vmMethods.Count > 0)
         {
             AddDiagnostic(
                 "SS7005",
-                "The current Service Broker backend cannot call managed fallback methods from worker continuations.",
+                "The current Service Broker backend cannot call legacy stack-VM fallback methods from worker continuations.",
                 program.EntryPoint.Source);
             return false;
         }
@@ -247,6 +247,7 @@ public sealed partial class SharpSqlCompiler
             _sql.Line("SELECT @__sharpsql_handler = [HandlerName], @__sharpsql_continuation_state = [ContinuationState], @__sharpsql_payload = [PayloadJson]");
             _sql.Line("FROM @__sharpsql_claimed;");
             _sql.Line();
+            EmitRegisterBytecodePreamble();
             _sql.Line("BEGIN TRY");
             using (_sql.Indent())
             {
@@ -264,6 +265,7 @@ public sealed partial class SharpSqlCompiler
                     _sql.Line($"THROW {ServiceBrokerHandlerMissingError}, 'The SharpSql async handler was not found.', 1;");
                 }
                 _sql.Line("END;");
+                EmitRegisterBytecodeEpilogue();
             }
             _sql.Line("END TRY");
             _sql.Line("BEGIN CATCH");
@@ -847,8 +849,12 @@ public sealed partial class SharpSqlCompiler
     {
         var outerWriter = _sql;
         var outerWorker = _emittingServiceBrokerWorker;
+        var outerBytecodeContinuations = _bytecodeContinuations;
+        var outerNextContinuationId = _nextVmContinuationId;
         _sql = new SqlWriter();
         _emittingServiceBrokerWorker = true;
+        _bytecodeContinuations = [];
+        _nextVmContinuationId = 0;
         try
         {
             emit();
@@ -858,6 +864,8 @@ public sealed partial class SharpSqlCompiler
         {
             _sql = outerWriter;
             _emittingServiceBrokerWorker = outerWorker;
+            _bytecodeContinuations = outerBytecodeContinuations;
+            _nextVmContinuationId = outerNextContinuationId;
         }
     }
 
@@ -871,11 +879,15 @@ public sealed partial class SharpSqlCompiler
         identity.Append("options|")
             .Append(_options.MaxInlineStatements).Append('|')
             .Append(_options.MaxInlineCallSites).Append('|')
+            .Append((int)_options.ManagedFallback).Append('|')
             .Append(_options.EmitNoCount).Append('|')
             .Append(_options.EmitRuntimeDiagnostics).Append('|')
             .Append((int)_effectiveRuntime.Execution).Append('|')
             .Append((int)_effectiveRuntime.Durability).Append('|')
             .Append(_effectiveRuntime.UseMemoryOptimizedTables)
+            .Append('\n');
+        identity.Append("bytecode-image|")
+            .Append(_bytecodeMethods.Count == 0 ? "<none>" : BytecodeImage.HexId)
             .Append('\n');
         if (_compilation is not null)
         {

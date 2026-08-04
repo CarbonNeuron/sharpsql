@@ -2,13 +2,13 @@
 
 ## Status and scope
 
-This document defines the incremental persistence model for the compact register-bytecode runtime. The bounded durable-rowstore inline slice described below is implemented. Other configurations still store the program image, call metadata, frames, and registers in connection-local temporary tables, and cross-session resumption remains future work.
+This document defines the incremental persistence model for the compact register-bytecode runtime. The bounded durable-rowstore inline slice described below is implemented. Service Broker workers also support eligible synchronous bytecode helpers through activation-local temporary state that always runs to completion. Cross-session bytecode resumption remains future work.
 
 The first implementation slice is deliberately limited to synchronous, inline execution with ordinary durable rowstore tables. It makes program images reusable and frame state execution-scoped without changing bytecode semantics or promising restart resumption.
 
 The first slice does not include:
 
-- Service Broker workers or suspension across sessions;
+- bytecode suspension or bytecode frame resumption across Service Broker activations;
 - memory-optimized bytecode frames;
 - new bytecode types, opcodes, host operations, or exception handling;
 - recovery or continuation of an abandoned inline batch;
@@ -167,7 +167,7 @@ Ephemeral tables use `SCHEMA_ONLY`; durable tables use `SCHEMA_AND_DATA`. Their 
 
 ### Service Broker without suspension
 
-The next worker increment permits synchronous register-bytecode calls that always run to completion. The interpreter must be emitted into the worker procedure, or moved into a shared slice runner; making storage global alone is insufficient. Worker output maps `WriteLine` to `AppendOutput` rather than `PRINT`. Legacy VM calls may remain rejected while this narrower path removes `SS7005` for eligible register bytecode.
+The bounded worker increment is implemented. Each generated worker procedure embeds one local temporary-table interpreter and eligible synchronous register-bytecode calls always run to completion within the current activation transaction. No bytecode program counter, frame, or register survives a worker return or suspension. Worker `WriteLine` maps to `AppendOutput` rather than `PRINT`, so the launcher drains it through the normal ordered output path. The worker program identity includes both the selected fallback mode and canonical bytecode image identity. Legacy stack-VM calls remain rejected with `SS7005`.
 
 ### Suspension and resumption
 

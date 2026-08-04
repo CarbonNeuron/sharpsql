@@ -199,11 +199,75 @@ public sealed class AsyncStateMachinePlanTests
 
         var result = new SharpSqlCompiler().Transpile(
             source,
-            new TranspileOptions { RuntimeStorage = RuntimeStorageKind.ServiceBroker });
+            new TranspileOptions
+            {
+                RuntimeStorage = RuntimeStorageKind.ServiceBroker,
+                ManagedFallback = ManagedFallbackKind.Legacy
+            });
 
         var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == "SS7005");
-        Assert.Contains("managed fallback", diagnostic.Message);
+        Assert.Contains("legacy stack-VM fallback", diagnostic.Message);
         Assert.DoesNotContain("CREATE OR ALTER PROCEDURE [SharpSql].[Program_", result.Sql);
+    }
+
+    [Fact]
+    public void EmbedsRunToCompletionRegisterBytecodeInsideBrokerWorkers()
+    {
+        const string source = """
+            var values = new List<int> { 6 };
+            var tasks = values.Select(Work).ToList();
+            await Task.WhenAll(tasks);
+            var results = tasks.Select(task => task.Result);
+            foreach (int result in results)
+                Console.WriteLine("result:" + result);
+
+            async Task<int> Work(int value)
+            {
+                await Task.Delay(25);
+                Emit(Decorate("worker"));
+                return Fib(value);
+            }
+
+            string Echo(string value)
+            {
+                string copy = value;
+                return copy;
+            }
+
+            string Decorate(string value)
+            {
+                string decorated = "[" + Echo(value);
+                return decorated + "]";
+            }
+
+            void Emit(string value)
+            {
+                string output = value;
+                Console.WriteLine(output);
+            }
+
+            int Fib(int value) => value <= 1 ? value : Fib(value - 1) + Fib(value - 2);
+            """;
+
+        var result = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions
+            {
+                RuntimeStorage = RuntimeStorageKind.ServiceBroker,
+                ManagedFallback = ManagedFallbackKind.Bytecode,
+                MaxInlineStatements = 1
+            });
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        Assert.True(result.UsesRegisterBytecode);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "SS7005");
+        Assert.Contains("CREATE TABLE #__sharpsql_bc_program", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("__sharpsql_bc_dispatch:;", result.Sql, StringComparison.Ordinal);
+        Assert.Contains("EXEC [SharpSql].[AppendOutput]", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PRINT CASE WHEN @__sharpsql_bc", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("#__sharpsql_stack", result.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("[SharpSql].[BytecodeFramesV1]", result.Sql, StringComparison.Ordinal);
+        Assert.Equal(1, Count(result.Sql, "CREATE TABLE #__sharpsql_bc_program"));
     }
 
     [Fact]
@@ -355,10 +419,20 @@ public sealed class AsyncStateMachinePlanTests
                 RuntimeStorage = RuntimeStorageKind.ServiceBroker,
                 MaxInlineStatements = 41
             });
+        var differentFallback = new SharpSqlCompiler().Transpile(
+            source,
+            new TranspileOptions
+            {
+                RuntimeStorage = RuntimeStorageKind.ServiceBroker,
+                ManagedFallback = ManagedFallbackKind.Bytecode,
+                MaxInlineStatements = 40
+            });
 
         Assert.True(first.Success, string.Join(Environment.NewLine, first.Diagnostics));
         Assert.True(second.Success, string.Join(Environment.NewLine, second.Diagnostics));
+        Assert.True(differentFallback.Success, string.Join(Environment.NewLine, differentFallback.Diagnostics));
         Assert.NotEqual(ProgramId(first.Sql), ProgramId(second.Sql));
+        Assert.NotEqual(ProgramId(first.Sql), ProgramId(differentFallback.Sql));
 
         static string ProgramId(string sql)
         {
@@ -400,5 +474,17 @@ public sealed class AsyncStateMachinePlanTests
             start += marker.Length;
             return sql.Substring(start, 32);
         }
+    }
+
+    private static int Count(string value, string fragment)
+    {
+        var count = 0;
+        var offset = 0;
+        while ((offset = value.IndexOf(fragment, offset, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            offset += fragment.Length;
+        }
+        return count;
     }
 }

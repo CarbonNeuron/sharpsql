@@ -55,7 +55,9 @@ relational host operations remain on the legacy VM in `Auto`.
 Synchronous inline execution with durable rowstore storage installs immutable,
 content-addressed program images and keeps execution-partitioned frames and registers
 in versioned shared tables. The interpreter and native return labels still execute in
-one batch, so this storage is not yet restart-resumable. Memory-optimized bytecode
-state and Service Broker suspension/resumption remain later work. Their staged
+one batch, so this storage is not yet restart-resumable. Service Broker workers can
+embed the local interpreter for eligible synchronous helpers, but each call must finish
+within its activation; worker bytecode frames are not persisted or resumed. Memory-optimized
+bytecode state and bytecode suspension/resumption remain later work. Their staged
 architecture is described in
 [Durable register-bytecode design](durable-register-bytecode.md).
